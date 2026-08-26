@@ -27,6 +27,7 @@ and all four need the graph.
 | `textDocument/references` | working, main repo only |
 | `textDocument/documentHighlight` | working, current file only |
 | `textDocument/rename` | working, main repo only |
+| `textDocument/formatting` | working where `buildifier` is installed |
 | completion, hover | not yet |
 
 The server runs with no Bazel installed, and stays useful when it does: the

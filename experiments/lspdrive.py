@@ -156,6 +156,10 @@ def main():
             params["context"] = {"includeDeclaration": True}
         if method == "textDocument/rename":
             params["newName"] = probe["newName"]
+        if method == "textDocument/formatting":
+            # Required by the spec even where the server delegates to a
+            # formatter with opinions of its own.
+            params["options"] = {"tabSize": 4, "insertSpaces": True}
         if method == "workspace/symbol":
             params = {"query": probe["needle"]}
         resp = client.request(method, params)

@@ -5,6 +5,7 @@
 //!
 //! stdout is the LSP transport. Everything human-readable goes to stderr.
 
+mod format;
 mod handlers;
 mod line_index;
 
@@ -18,12 +19,12 @@ use lsp_server::{Connection, Message, Response};
 use lsp_types::{
     Definition, DefinitionRequest, DefinitionResponse, DidChangeTextDocumentNotification,
     DidChangeTextDocumentParams, DidCloseTextDocumentNotification, DidCloseTextDocumentParams,
-    DidOpenTextDocumentNotification, DidOpenTextDocumentParams, DocumentHighlightRequest,
-    DocumentSymbolRequest, InitializeParams, Location, LocationLink, LspNotificationMethod,
-    LspRequestMethod, Notification, PrepareRenameRequest, PrepareRenameResult,
-    PublishDiagnosticsNotification, PublishDiagnosticsParams, ReferencesRequest, RenameOptions,
-    RenameRequest, Request as _, ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, Uri,
-    WorkspaceSymbolRequest,
+    DidOpenTextDocumentNotification, DidOpenTextDocumentParams, DocumentFormattingRequest,
+    DocumentHighlightRequest, DocumentSymbolRequest, InitializeParams, Location, LocationLink,
+    LspNotificationMethod, LspRequestMethod, Notification, PrepareRenameRequest,
+    PrepareRenameResult, PublishDiagnosticsNotification, PublishDiagnosticsParams,
+    ReferencesRequest, RenameOptions, RenameRequest, Request as _, ServerCapabilities,
+    TextDocumentSync, TextDocumentSyncKind, TextEdit, Uri, WorkspaceSymbolRequest,
 };
 use starlark_cst::{Dialect, FileKind, classify};
 
@@ -141,6 +142,10 @@ fn run_server() -> Result<()> {
         definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
         references_provider: Some(lsp_types::ReferencesProvider::Bool(true)),
         document_highlight_provider: Some(lsp_types::DocumentHighlightProvider::Bool(true)),
+        // Advertised whether or not buildifier is installed, the way the rest
+        // of the server is advertised without Bazel: a capability withdrawn at
+        // startup is one the user cannot get back by installing the tool.
+        document_formatting_provider: Some(lsp_types::DocumentFormattingProvider::Bool(true)),
         rename_provider: Some(lsp_types::RenameProvider::RenameOptions(RenameOptions {
             prepare_provider: Some(true),
             ..Default::default()
@@ -275,6 +280,8 @@ fn respond(
         Response::new_ok(id, locations)
     } else if method == DocumentHighlightRequest::METHOD {
         Response::new_ok(id, document_highlight(request, docs, index, root)?)
+    } else if method == DocumentFormattingRequest::METHOD {
+        Response::new_ok(id, formatting(request, docs)?)
     } else if method == RenameRequest::METHOD {
         Response::new_ok(id, rename(request, docs, index, root)?)
     } else if method == PrepareRenameRequest::METHOD {
@@ -324,6 +331,28 @@ fn document_highlight(
     );
     tracing::debug!(?uri, count = highlights.len(), "documentHighlight");
     Ok(highlights)
+}
+
+/// buildifier's opinion of the open buffer, as one whole-document edit.
+///
+/// The buffer is what gets formatted, never the file beside it: a document the
+/// user has been editing and has not saved is a different file on disk, and
+/// formatting that one would revert their typing.
+///
+/// A document the server does not hold is not an error — the client may format
+/// a file it never opened — and neither is a buildifier that is absent or
+/// unhappy. Both are no edits; only the second says so on stderr.
+fn formatting(request: &lsp_server::Request, docs: &Documents) -> Result<Vec<TextEdit>> {
+    let params: lsp_types::DocumentFormattingParams =
+        serde_json::from_value(request.params.clone())?;
+    let uri = params.text_document.uri;
+    let (_, kind) = Documents::classify_uri(&uri);
+    let Some(text) = docs.texts.get(&uri) else {
+        return Ok(Vec::new());
+    };
+    let edits = format::format(text, kind)?;
+    tracing::debug!(?uri, ?kind, count = edits.len(), "formatting");
+    Ok(edits)
 }
 
 /// The edits a rename produces, or nothing where there is no target under the
