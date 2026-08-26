@@ -70,9 +70,6 @@ Working today, with no Bazel process:
 - [x] **Rename** — rename a target and rewrite every referring label
 - [x] **Hover** — the resolved target behind the label under the cursor
 - [x] **Formatting** — delegated to `buildifier` where it is installed
-
-Planned, roughly in the order they earn their place:
-
 - [ ] **Completion** — labels from the index, rule names and their attributes
 - [ ] **Unresolved-label diagnostics** — labels that name no target
 - [ ] **Lint diagnostics** — `buildifier --lint=warn`, alongside the parse errors
@@ -94,14 +91,6 @@ Planned, roughly in the order they earn their place:
 - [ ] **File-rename edits** — rewrite labels when a file or package moves
 - [ ] **Execute command** — run a `bazel` invocation the code lens offers
 - [ ] **Incremental sync** — `didChange` ranges rather than whole documents
-- [ ] **`.bazelrc`** — completion, hover and unknown-flag diagnostics from
-      `bazel help flags-as-proto`, version-exact for the user's own binary
-
-Deliberately absent. Type hierarchy, document colour, linked editing ranges,
-on-type formatting and monikers describe languages this is not. Call hierarchy
-is the near miss: mapping incoming calls to reverse dependencies reads well
-until a client labels the panel "Calls" and a macro's callers and a target's
-dependents appear in the same tree — find-references already answers the
-question honestly. Starlark type inference stays out for the reason
-`.devin/ROADMAP.md` gives: it is a third of starpls' codebase and answers
-`Unknown` where it matters.
+- [ ] **`.bazelrc`** — full LSP semantics, including completion, hover and
+      unknown-flag diagnostics from `bazel help flags-as-proto`, version-exact
+      for the user's own binary
