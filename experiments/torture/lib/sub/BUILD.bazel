@@ -1,0 +1,24 @@
+package(default_visibility = ["//lib:__pkg__"])
+
+filegroup(
+    name = "sub_srcs",
+    srcs = ["sub.txt"],
+    visibility = [
+        "//lib:__pkg__",
+        "//app:__subpackages__",
+        "@sh//:__subpackages__",
+    ],
+)
+
+# Label pointing back up at the parent package.
+filegroup(
+    name = "parent_ref",
+    srcs = ["//lib:exported.txt"],
+)
+
+# Label to a target that does not exist — a diagnostic an LSP should raise.
+filegroup(
+    name = "broken",
+    srcs = ["//lib:does_not_exist"],
+    tags = ["manual"],
+)

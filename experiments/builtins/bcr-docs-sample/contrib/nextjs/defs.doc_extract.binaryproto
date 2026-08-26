@@ -1,0 +1,222 @@
+©
+nextjs&
+namethe name of the build target ¶
+srcs«Source files to include in build & dev targets.
+Typically these are source files or transpiled source files in Next.js source folders
+such as `pages`, `public` & `styles`. î
+next_js_binaryÙThe next `js_binary` target to use for running Next.js
+
+Typically this is a js_binary target created using `bin` loaded from the `package_json.bzl`
+file of the npm package.
+
+See main docstring above for example usage. R
+config5the Next.js config file. Typically `next.config.mjs`."next.config.mjs"©
+dataœData files to include in all targets.
+These are typically npm packages required for the build & configuration files such as
+package.json and next.config.js.[]<
+
+serve_data*Data files to include in devserver targets[]@
+kwargs6Other attributes passed to all targets such as `tags`.§	Generates Next.js build, dev & start targets.
+
+`{name}`       - a Next.js production bundle
+`{name}.dev`   - a Next.js devserver
+`{name}.start` - a Next.js prodserver
+
+Use this macro in the BUILD file at the root of a next app where the `next.config.mjs`
+file is located.
+
+For example, a target such as `//app:next` in `app/BUILD.bazel`
+
+```
+next(
+    name = "next",
+    config = "next.config.mjs",
+    srcs = glob(["src/**"]),
+    data = [
+        "//:node_modules/next",
+        "//:node_modules/react-dom",
+        "//:node_modules/react",
+        "package.json",
+    ],
+    next_js_binary = "//:next_js_binary",
+)
+```
+
+will create the targets:
+
+```
+//app:next
+//app:next.dev
+//app:next.start
+```
+
+To build the above next app, equivalent to running `next build` outside Bazel:
+
+```
+bazel build //app:next
+```
+
+To run the development server in watch mode with
+[ibazel](https://github.com/bazelbuild/bazel-watcher), equivalent to running
+`next dev` outside Bazel:
+
+```
+ibazel run //app:next.dev
+```
+
+To run the production server in watch mode with
+[ibazel](https://github.com/bazelbuild/bazel-watcher), equivalent to running
+`next start` outside Bazel:
+
+```
+ibazel run //app:next.start
+```
+2#
+nextjs//contrib/nextjs:defs.bzlà
+nextjs_build&
+namethe name of the build target #
+configthe Next.js config file L
+srcsBthe sources to include in the build, including any transitive deps î
+next_js_binaryÙThe next `js_binary` target to use for running Next.js
+
+Typically this is a js_binary target created using `bin` loaded from the `package_json.bzl`
+file of the npm package.
+
+See main docstring above for example usage. 2
+data&the data files to include in the build[]B
+use_execroot_entry_point passed directly to js_run_binaryTrueñ
+argsäAdditional arguments to pass to `next build`, appended after the
+`build` subcommand. For example `["--webpack"]` to opt out of
+Turbopack, which cannot run under a Bazel sandbox.
+
+The `build` subcommand itself is not overridable.[]D
+kwargs:Other attributes passed to all targets such as `tags`, envgBuild the Next.js production artifact.
+
+See https://nextjs.org/docs/pages/api-reference/cli/next#build
+2)
+nextjs_build//contrib/nextjs:defs.bzlµ
+nextjs_start&
+namethe name of the build target #
+configthe Next.js config file U
+appLthe pre-compiled Next.js application, typically the output of `nextjs_build` î
+next_js_binaryÙThe next `js_binary` target to use for running Next.js
+
+Typically this is a js_binary target created using `bin` loaded from the `package_json.bzl`
+file of the npm package.
+
+See main docstring above for example usage. "
+dataadditional server data[]D
+kwargs:Other attributes passed to all targets such as `tags`, env{Run the Next.js production server for an app.
+
+See https://nextjs.org/docs/pages/api-reference/cli/next#next-start-options
+2)
+nextjs_start//contrib/nextjs:defs.bzl¥
+
+nextjs_dev&
+namethe name of the build target #
+configthe Next.js config file L
+srcsBthe sources to include in the build, including any transitive deps +
+data!additional devserver runtime data î
+next_js_binaryÙThe next `js_binary` target to use for running Next.js
+
+Typically this is a js_binary target created using `bin` loaded from the `package_json.bzl`
+file of the npm package.
+
+See main docstring above for example usage. D
+kwargs:Other attributes passed to all targets such as `tags`, envoRun the Next.js development server.
+
+See https://nextjs.org/docs/pages/api-reference/cli/next#next-dev-options
+2'
+
+nextjs_dev//contrib/nextjs:defs.bzlì
+nextjs_standalone_build&
+namethe name of the build target #
+configthe Next.js config file L
+srcsBthe sources to include in the build, including any transitive deps :
+next_js_binary&the Next.js binary to use for building 2
+data&the data files to include in the build[]B
+use_execroot_entry_point passed directly to js_run_binaryTrueñ
+argsäAdditional arguments to pass to `next build`, appended after the
+`build` subcommand. For example `["--webpack"]` to opt out of
+Turbopack, which cannot run under a Bazel sandbox.
+
+The `build` subcommand itself is not overridable.[]D
+kwargs:Other attributes passed to all targets such as `tags`, env‘Compile a standalone Next.js application.
+
+See https://nextjs.org/docs/app/api-reference/config/next-config-js/output#automatically-copying-traced-files
+
+NOTE: a `next.config.mjs` is generated, wrapping the passed `config`, to overcome Next.js limitation with bazel,
+rules_js and pnpm (with hoist=false, as required by rules_js).
+
+The `config` file is renamed and dynamically imported by the generated `next.config.mjs`. Including the `config` file
+elsewhere (e.g. in `srcs` or `data`) may cause issues, particularly if it follows Next.js naming conventions
+and is loaded by Next.js instead of the generated `next.config.mjs`.
+
+Issues worked around by the generated config include:
+* https://github.com/vercel/next.js/issues/48017
+* https://github.com/aspect-build/rules_js/issues/714
+24
+nextjs_standalone_build//contrib/nextjs:defs.bzlÑ	
+nextjs_standalone_server'
+namethe name of the binary target X
+appOthe standalone app directory, typically the output of `nextjs_standalone_build` è
+pkgÚthe directory server.js is in within the standalone/ directory.
+
+This is normally the application path relative to the pnpm-lock.yaml.
+
+Default: native.package_name() (for a pnpm-lock.yaml in the root of the workspace)None¼
+data¯runtime data required to run the standalone server.
+
+Normally requires `[":node_modules/next", ":node_modules/react"]` which are not included
+in the Next.js standalone output.[]+
+kwargs!additional `js_binary` attributes£Configures the output of a standalone Next.js application to be a standalone server binary.
+
+See the Next.js [standalone server documentation](https://nextjs.org/docs/app/api-reference/config/next-config-js/output#automatically-copying-traced-files)
+for details on the standalone server directory structure.
+
+This function is normally used in conjunction with `nextjs_standalone_build` to create a standalone
+Next.js application. The standalone server is a `js_binary` target that can be run with `bazel run`
+or deployed in a container image etc.
+25
+nextjs_standalone_server//contrib/nextjs:defs.bzl*¥Utilities for building Next.js applications with Bazel and rules_js.
+
+All invocations of Next.js are done through a `next_js_binary` target passed into the macros.
+This is normally generated once alongside the `package.json` containing the `next` dependency:
+
+```
+load("@npm//:next/package_json.bzl", next_bin = "bin")
+
+next_bin.next_binary(
+    name = "next_js_binary",
+    visibility = ["//visibility:public"],
+)
+```
+
+The next binary is then passed into the macros, for example:
+
+```
+nextjs_build(
+    name = "next",
+    config = "next.config.mjs",
+    srcs = glob(["src/**"]),
+    next_js_binary = "//:next_js_binary",
+)
+```
+
+There are two sets of macros for building Next.js applications: standard and standalone.
+
+### Standard Build
+
+- `nextjs()`: wrap the build+dev+start targets
+- `nextjs_build()`: the Next.js [build](https://nextjs.org/docs/app/building-your-application/deploying#production-builds) command
+- `nextjs_dev()`: the Next.js [dev](https://nextjs.org/docs/app/getting-started/installation#run-the-development-server) command
+- `nextjs_start()`: the Next.js [start](https://nextjs.org/docs/app/building-your-application/deploying#nodejs-server) command,
+   accepting a Next.js build artifact to start
+
+### Standalone Mode
+
+For [standalone applications](https://nextjs.org/docs/app/api-reference/config/next-config-js/output#automatically-copying-traced-files):
+- `nextjs_standalone_build()`: the Next.js [build](https://nextjs.org/docs/app/building-your-application/deploying#production-builds) command,
+   configured for a standalone application within bazel
+- `nextjs_standalone_server()`: constructs a standalone Next.js server `js_binary` following the
+  [standalone directory structure guidelines](https://nextjs.org/docs/app/api-reference/config/next-config-js/output#automatically-copying-traced-files)2//contrib/nextjs:defs.bzl

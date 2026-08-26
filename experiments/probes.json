@@ -1,0 +1,119 @@
+[
+  {
+    "label": "goto-def on load() path of an EXTERNAL repo",
+    "file": "lib/BUILD.bazel",
+    "needle": "@bazel_skylib//rules:write_file.bzl",
+    "offset": 5,
+    "method": "textDocument/definition"
+  },
+  {
+    "label": "goto-def on load() SYMBOL from external repo",
+    "file": "lib/BUILD.bazel",
+    "needle": "\"write_file\"",
+    "offset": 3,
+    "method": "textDocument/definition"
+  },
+  {
+    "label": "goto-def on RELATIVE load(':local.bzl')",
+    "file": "lib/BUILD.bazel",
+    "needle": ":local.bzl",
+    "offset": 3,
+    "method": "textDocument/definition"
+  },
+  {
+    "label": "goto-def on a same-package label ':srcs'",
+    "file": "lib/BUILD.bazel",
+    "needle": "$(location :srcs)",
+    "offset": 13,
+    "method": "textDocument/definition"
+  },
+  {
+    "label": "goto-def on cross-package label //lib/sub:sub_srcs",
+    "file": "lib/BUILD.bazel",
+    "needle": "\"//lib/sub:sub_srcs\"",
+    "offset": 5,
+    "method": "textDocument/definition"
+  },
+  {
+    "label": "goto-def on select() KEY @platforms//os:macos",
+    "file": "lib/BUILD.bazel",
+    "needle": "@platforms//os:macos",
+    "offset": 5,
+    "method": "textDocument/definition"
+  },
+  {
+    "label": "goto-def on repo_name-ALIASED repo @sh//:__subpackages__",
+    "file": "lib/sub/BUILD.bazel",
+    "needle": "@sh//:__subpackages__",
+    "offset": 2,
+    "method": "textDocument/definition"
+  },
+  {
+    "label": "hover on native rule genrule",
+    "file": "lib/BUILD.bazel",
+    "needle": "genrule(",
+    "offset": 2,
+    "method": "textDocument/hover"
+  },
+  {
+    "label": "hover on macro-provided symbol write_file",
+    "file": "lib/BUILD.bazel",
+    "needle": "write_file(\n",
+    "offset": 2,
+    "method": "textDocument/hover"
+  },
+  {
+    "label": "hover on user rule attr with doc= (message)",
+    "file": "lib/local.bzl",
+    "needle": "\"message\": attr.string",
+    "offset": 15,
+    "method": "textDocument/hover"
+  },
+  {
+    "label": "find-references of target 'srcs' (declared //lib:srcs)",
+    "file": "lib/BUILD.bazel",
+    "needle": "name = \"srcs\"",
+    "offset": 9,
+    "method": "textDocument/references"
+  },
+  {
+    "label": "document symbols of a BUILD file",
+    "file": "lib/BUILD.bazel",
+    "needle": "filegroup",
+    "method": "textDocument/documentSymbol"
+  },
+  {
+    "label": "workspace symbol search for a target name",
+    "file": "lib/BUILD.bazel",
+    "needle": "srcs",
+    "method": "workspace/symbol"
+  },
+  {
+    "label": "goto-def on bazel_dep name in MODULE.bazel",
+    "file": "MODULE.bazel",
+    "needle": "\"bazel_skylib\"",
+    "offset": 3,
+    "method": "textDocument/definition"
+  },
+  {
+    "label": "hover on bazel_dep() in MODULE.bazel",
+    "file": "MODULE.bazel",
+    "needle": "bazel_dep(",
+    "offset": 2,
+    "method": "textDocument/hover"
+  },
+  {
+    "label": "goto-def on use_extension('//ext:defs.bzl')",
+    "file": "MODULE.bazel",
+    "needle": "//ext:defs.bzl",
+    "offset": 3,
+    "method": "textDocument/definition"
+  },
+  {
+    "label": "goto-def on macro-generated target //lib:from_legacy_0",
+    "file": "lib/BUILD.bazel",
+    "needle": "legacy_macro(name",
+    "offset": 2,
+    "method": "textDocument/definition"
+  }
+]

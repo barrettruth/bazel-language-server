@@ -1,0 +1,94 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("//macros:legacy.bzl", "legacy_macro")
+load("//macros:symbolic.bzl", "symbolic_macro")
+load(":local.bzl", "local_helper", _renamed = "renamed_in_load")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["exported.txt"])
+
+filegroup(
+    name = "srcs",
+    # glob() must not cross into //lib/sub, which is its own package.
+    srcs = glob(
+        ["**/*.txt"],
+        exclude = ["excluded.txt"],
+        allow_empty = True,
+    ),
+)
+
+# Cross-package label into a subpackage.
+filegroup(
+    name = "with_subpackage",
+    srcs = ["//lib/sub:sub_srcs"],
+)
+
+# A file target in a package that has NO BUILD file of its own: `app/nested/`
+# belongs to //app, so this label is //app:nested/data.txt, not //app/nested:data.txt.
+filegroup(
+    name = "nested_file",
+    srcs = ["//app:nested/data.txt"],
+)
+
+alias(
+    name = "aliased",
+    actual = ":srcs",
+)
+
+alias(
+    name = "double_aliased",
+    actual = ":aliased",
+)
+
+write_file(
+    name = "generated",
+    out = "generated.txt",
+    content = ["hello"],
+)
+
+copy_file(
+    name = "copied",
+    src = ":generated.txt",  # label to an OUTPUT file, not a source file
+    out = "copied.txt",
+)
+
+genrule(
+    name = "gen",
+    srcs = [
+        ":srcs",
+        "//lib/sub:sub_srcs",
+    ],
+    outs = ["gen.out"],
+    # Labels embedded in a string, inside a $(location) expansion.
+    cmd = "cat $(location :srcs) $(locations //lib/sub:sub_srcs) > $@",
+    tools = ["//app:tool"],
+)
+
+config_setting(
+    name = "is_linux",
+    constraint_values = ["@platforms//os:linux"],
+)
+
+cc_library_placeholder = "not a rule"
+
+filegroup(
+    name = "selected",
+    srcs = select({
+        # select() KEYS are labels too.
+        ":is_linux": [":srcs"],
+        "@platforms//os:macos": [":generated.txt"],
+        "//conditions:default": [],
+    }),
+)
+
+legacy_macro(name = "from_legacy")
+
+symbolic_macro(
+    name = "from_symbolic",
+    dep = ":srcs",
+)
+
+local_helper(name = "from_local")
+
+_renamed(name = "from_renamed_load")

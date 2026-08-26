@@ -1,0 +1,45 @@
+"""Torture-test workspace for Bazel language server navigation.
+
+Every construct here is a case a language server must resolve. See CASES.md.
+"""
+
+module(
+    name = "torture",
+    version = "0.1.0",
+)
+
+# Plain deps: goto-def should reach the BCR module's own MODULE.bazel,
+# and hover should surface the registry metadata.
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
+bazel_dep(name = "platforms", version = "0.0.10")
+
+# Renamed repo: `@sh` is an apparent name that exists only in this module's repo
+# mapping. Naive `@name` -> directory lookup fails here. Bazel rejects declaring
+# the SAME module twice under two apparent names, so the rename must be the only
+# declaration of rules_shell.
+bazel_dep(name = "rules_shell", version = "0.3.0", repo_name = "sh")
+
+# Dev-only dep: visible to this module but not to dependents.
+bazel_dep(name = "rules_testing", version = "0.6.0", dev_dependency = True)
+
+# Repo rule used directly from MODULE.bazel (Bazel 7.1+).
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "direct_repo_rule_target",
+    sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
+    urls = ["https://example.invalid/x.tar.gz"],
+)
+
+# Module extension: `@ext_generated` does not exist on disk until the extension
+# is evaluated. Static resolution is impossible; only the lockfile knows.
+my_ext = use_extension("//ext:defs.bzl", "my_ext")
+my_ext.declare(name = "generated_one")
+use_repo(my_ext, "ext_generated", aliased_ext_repo = "ext_generated_two")
+
+single_version_override(
+    module_name = "platforms",
+    version = "0.0.10",
+)
+
+register_toolchains("//toolchains:all")

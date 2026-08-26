@@ -1,0 +1,2 @@
+sh_binary(name = "tool", srcs = ["tool.sh"], visibility = ["//visibility:public"])
+filegroup(name = "nested_data", srcs = ["nested/data.txt"])
