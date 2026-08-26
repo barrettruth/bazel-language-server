@@ -58,8 +58,6 @@ bazel-language-server doctor path/to/workspace
 
 ## Features
 
-Working today, with no Bazel process:
-
 - [x] **Diagnostics** — syntax errors, reported per keystroke against a
       recovering parser
 - [x] **Document symbols** — every target declared in a BUILD file
