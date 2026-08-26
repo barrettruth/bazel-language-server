@@ -70,24 +70,24 @@ bazel-language-server doctor path/to/workspace
 - [x] **Formatting** — delegated to `buildifier` where it is installed
 - [ ] **Completion** — labels from the index, rule names and their attributes
 - [ ] **Unresolved-label diagnostics** — labels that name no target
-- [ ] **Lint diagnostics** — `buildifier --lint=warn`, alongside the parse errors
-- [ ] **Document links** — labels and `load()` paths as links, for clients that
+- [x] **Lint diagnostics** — `buildifier --lint=warn`, alongside the parse errors
+- [x] **Document links** — labels and `load()` paths as links, for clients that
       prefer them to go-to-definition
 - [ ] **Code actions** — apply a `buildifier` fix, add a missing dependency,
       fetch an unfetched repository
-- [ ] **Code lens** — build, test or run the target a line declares
+- [x] **Code lens** — build, test or run the target a line declares
 - [ ] **Signature help** — the attributes of the rule being called, while typing
-- [ ] **Semantic tokens** — tell labels, rule names and providers apart, which
+- [x] **Semantic tokens** — tell labels, rule names and providers apart, which
       no TextMate grammar can do
-- [ ] **Go-to-implementation** — from a rule to the function implementing it
-- [ ] **Inlay hints** — the package a relative label resolves against
-- [ ] **Folding ranges** — rule calls, lists and comment runs
-- [ ] **Selection ranges** — expand the selection along the syntax tree
+- [x] **Go-to-implementation** — from a rule to the function implementing it
+- [x] **Inlay hints** — the package a relative label resolves against
+- [x] **Folding ranges** — rule calls, lists and comment runs
+- [x] **Selection ranges** — expand the selection along the syntax tree
 - [ ] **Workspace diagnostics** — the pull model, so unresolved labels can be
       reported repository-wide rather than per open file
 - [ ] **Watched-file refresh** — reindex when BUILD files change on disk
 - [ ] **File-rename edits** — rewrite labels when a file or package moves
-- [ ] **Execute command** — run a `bazel` invocation the code lens offers
+- [x] **Execute command** — run a `bazel` invocation the code lens offers
 - [ ] **Incremental sync** — `didChange` ranges rather than whole documents
 - [ ] **`.bazelrc`** — full LSP semantics, including completion, hover and
       unknown-flag diagnostics from `bazel help flags-as-proto`, version-exact

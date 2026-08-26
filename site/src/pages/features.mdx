@@ -16,8 +16,30 @@ toc: true
 - [x] **Rename** — rename a target and rewrite every referring label
 - [x] **Hover** — the resolved target behind the label under the cursor
 - [x] **Formatting** — delegated to `buildifier` where it is installed
-- [ ] **Completion** — labels, rule names, attributes
+- [ ] **Completion** — labels from the index, rule names and their attributes
 - [ ] **Unresolved-label diagnostics** — labels that name no target
+- [x] **Lint diagnostics** — `buildifier --lint=warn`, alongside the parse errors
+- [x] **Document links** — labels and `load()` paths as links, for clients that
+      prefer them to go-to-definition
+- [ ] **Code actions** — apply a `buildifier` fix, add a missing dependency,
+      fetch an unfetched repository
+- [x] **Code lens** — build, test or run the target a line declares
+- [ ] **Signature help** — the attributes of the rule being called, while typing
+- [x] **Semantic tokens** — tell labels, rule names and providers apart, which
+      no TextMate grammar can do
+- [x] **Go-to-implementation** — from a rule to the function implementing it
+- [x] **Inlay hints** — the package a relative label resolves against
+- [x] **Folding ranges** — rule calls, lists and comment runs
+- [x] **Selection ranges** — expand the selection along the syntax tree
+- [ ] **Workspace diagnostics** — the pull model, so unresolved labels can be
+      reported repository-wide rather than per open file
+- [ ] **Watched-file refresh** — reindex when BUILD files change on disk
+- [ ] **File-rename edits** — rewrite labels when a file or package moves
+- [x] **Execute command** — run a `bazel` invocation the code lens offers
+- [ ] **Incremental sync** — `didChange` ranges rather than whole documents
+- [ ] **`.bazelrc`** — full LSP semantics, including completion, hover and
+      unknown-flag diagnostics from `bazel help flags-as-proto`, version-exact
+      for the user's own binary
 
 ## Diagnostics
 
@@ -35,9 +57,34 @@ Targets declared by legacy macros are named at evaluation time, so no parser can
 see them. The index reports that it is undercounting rather than presenting a
 partial list as complete.
 
-## Formatting
+## Formatting and lint
 
 Formatting delegates to `buildifier`, because the only correct way to format a
 BUILD file is to agree with `buildifier` byte for byte. The capability is
 advertised whether or not `buildifier` is installed: one withdrawn at startup is
-one the user cannot get back by installing the tool.
+one the user cannot get back by installing the tool. A missing `buildifier`
+comes back as a request error rather than as silence, because a format that
+quietly does nothing is indistinguishable from a file needing no formatting.
+
+Lint findings arrive as warnings on the same channel as parse errors, and only
+once the file parses — `buildifier` declines to lint what it cannot read, and
+the parser has already said so.
+
+## Navigation
+
+A label resolves against the index, and failing that against the source file it
+names. Labels inside `$(location …)`, `$(rootpath …)` and their siblings are
+resolved too: `buildifier` treats those as ordinary strings, but Bazel reads a
+label out of them, so a rename that skipped one would leave a command pointing
+at a target that no longer exists.
+
+External repositories and target patterns resolve to nothing on purpose. The
+first needs the repository mapping only Bazel can produce, and the second names
+a set rather than a target, so either answer would be a guess.
+
+## Running targets
+
+A code lens sits above every target a BUILD file declares, offering `build`, and
+`test` as well where the rule is a test. Running one starts `bazel` detached:
+LSP has no channel for a subprocess's output, and inventing one here would be a
+worse terminal than the one you already have.
