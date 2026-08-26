@@ -138,10 +138,21 @@ fn run_server() -> Result<()> {
         workspace_symbol_provider: Some(lsp_types::WorkspaceSymbolProvider::Bool(true)),
         ..Default::default()
     };
-    let params = connection.initialize(serde_json::json!({
-        "capabilities": capabilities,
-        "serverInfo": { "name": "bazel-language-server", "version": env!("CARGO_PKG_VERSION") },
-    }))?;
+    // `Connection::initialize` wraps its argument in `{"capabilities": …}`, so
+    // passing a whole InitializeResult nests it twice; the client then sees no
+    // `textDocumentSync`, never sends `didOpen`, and every document request
+    // comes back empty. Drive the handshake directly to send `serverInfo` too.
+    let (id, params) = connection.initialize_start()?;
+    connection.initialize_finish(
+        id,
+        serde_json::json!({
+            "capabilities": capabilities,
+            "serverInfo": {
+                "name": "bazel-language-server",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+        }),
+    )?;
     let init: InitializeParams = serde_json::from_value(params)?;
 
     let root = workspace_root(&init);
