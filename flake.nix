@@ -16,6 +16,8 @@
         toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         commonBuildInputs = [
           pkgs.bazel_8
+          pkgs.cargo-edit
+          pkgs.gh
           pkgs.bazelisk
           pkgs.bazel-buildtools
           pkgs.biome

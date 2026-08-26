@@ -1,0 +1,48 @@
+name: nightly
+
+on:
+  push:
+    branches: [main]
+
+# A crates.io version is permanent, so per-commit builds ship as a binary under
+# one reusable tag instead. The tag and its release are replaced each time
+# rather than accumulating.
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  nightly:
+    name: Nightly
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@v22
+
+      - name: Build nightly asset
+        run: |
+          nix develop .#ci --command just build
+          mkdir -p dist
+          cp target/release/bazel-language-server \
+            "dist/bazel-language-server-nightly-x86_64-unknown-linux-gnu"
+
+      - name: Move the nightly tag
+        run: |
+          git tag -f --no-sign nightly "$GITHUB_SHA"
+          git push origin refs/tags/nightly --force
+
+      - name: Replace the nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete nightly --yes --cleanup-tag=false || true
+          gh release create nightly \
+            --title "nightly" \
+            --notes "Built from ${GITHUB_SHA} on $(date -u +%Y-%m-%dT%H:%M:%SZ)." \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            dist/*

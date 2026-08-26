@@ -1,0 +1,60 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  quality:
+    uses: ./.github/workflows/quality.yaml
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: quality
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@v22
+
+      # The tag is an assertion, not a fact. Publishing whatever Cargo.toml
+      # happens to say under a tag that disagrees ships a version nobody named.
+      - name: Verify tag matches Cargo.toml
+        run: |
+          cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$cargo_version" != "$tag_version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml $cargo_version" >&2
+            exit 1
+          fi
+
+      - name: Build release asset
+        run: |
+          nix develop .#ci --command just build
+          mkdir -p dist
+          cp target/release/bazel-language-server \
+            "dist/bazel-language-server-x86_64-unknown-linux-gnu"
+
+      - name: Publish crate dry run
+        run: nix develop .#ci --command cargo publish --dry-run --locked
+
+      - name: Publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "CARGO_REGISTRY_TOKEN is not configured" >&2
+            exit 1
+          fi
+          nix develop .#ci --command cargo publish --locked
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*
