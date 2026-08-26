@@ -25,8 +25,8 @@ use lsp_types::{
     DidCloseTextDocumentNotification, DidCloseTextDocumentParams, DidOpenTextDocumentNotification,
     DidOpenTextDocumentParams, DocumentFormattingRequest, DocumentHighlightRequest,
     DocumentLinkRequest, DocumentSymbolRequest, ExecuteCommandRequest, FoldingRangeRequest,
-    HoverRequest, ImplementationRequest, InitializeParams, Location, LocationLink,
-    LspNotificationMethod, LspRequestMethod, Notification, PrepareRenameRequest,
+    HoverRequest, ImplementationRequest, InitializeParams, InlayHintRequest, Location,
+    LocationLink, LspNotificationMethod, LspRequestMethod, Notification, PrepareRenameRequest,
     PrepareRenameResult, PublishDiagnosticsNotification, PublishDiagnosticsParams,
     ReferencesRequest, RenameOptions, RenameRequest, Request as _, SelectionRangeRequest,
     SemanticTokensRequest, ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, TextEdit,
@@ -152,6 +152,7 @@ fn run_server() -> Result<()> {
         // Advertised whether or not buildifier is installed, the way the rest
         // of the server is advertised without Bazel: a capability withdrawn at
         // startup is one the user cannot get back by installing the tool.
+        inlay_hint_provider: Some(lsp_types::InlayHintProvider::Bool(true)),
         code_lens_provider: Some(lsp_types::CodeLensOptions::default()),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
             commands: vec![handlers::RUN_COMMAND.to_string()],
@@ -327,6 +328,8 @@ fn respond(
         Response::new_ok(id, code_lenses(request, docs, root)?)
     } else if method == ExecuteCommandRequest::METHOD {
         Response::new_ok(id, execute_command(request, root)?)
+    } else if method == InlayHintRequest::METHOD {
+        Response::new_ok(id, inlay_hints(request, docs, index, root)?)
     } else if method == WorkspaceSymbolRequest::METHOD {
         let params: lsp_types::WorkspaceSymbolParams =
             serde_json::from_value(request.params.clone())?;
@@ -419,6 +422,29 @@ fn formatting(request: &lsp_server::Request, docs: &Documents) -> Result<Vec<Tex
     let edits = format::format(text, kind)?;
     tracing::debug!(?uri, ?kind, count = edits.len(), "formatting");
     Ok(edits)
+}
+
+/// The package a shorthand label resolves against.
+fn inlay_hints(
+    request: &lsp_server::Request,
+    docs: &Documents,
+    index: &IndexHandle,
+    root: Option<&Path>,
+) -> Result<Vec<lsp_types::InlayHint>> {
+    let params: lsp_types::InlayHintParams = serde_json::from_value(request.params.clone())?;
+    let uri = params.text_document.uri;
+    let hints = match (docs.texts.get(&uri), root) {
+        (Some(text), Some(root)) => handlers::inlay_hints(
+            text,
+            Path::new(&uri_to_path(&uri)),
+            root,
+            &index.load(),
+            params.range,
+        ),
+        _ => Vec::new(),
+    };
+    tracing::debug!(?uri, count = hints.len(), "inlayHint");
+    Ok(hints)
 }
 
 /// What a reader can collapse.
