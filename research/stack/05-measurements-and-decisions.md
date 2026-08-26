@@ -44,7 +44,29 @@ session that produced them.
 | second server on a private output base | **+1,225 MB** |
 | output base on disk | 154 MB / 109 MB |
 
-At 189k targets the proto stream extrapolates to **~165 MB per full refresh**.
+At 189k targets the proto stream extrapolates to ~165 MB per full refresh — but
+see §1.1: pruning attributes cuts that by 10×.
+
+### 1.1 Proto stream, measured end to end
+
+`--output=streamed_proto` off the pipe, 60,000 targets:
+
+| variant | bytes | wall | peak RSS |
+| --- | --- | --- | --- |
+| default | 53.7 MB | 0.89 s | — |
+| `--proto:output_rule_attrs= --noproto:rule_inputs_and_outputs` | **5.4 MB** | **0.42 s** | — |
+| incremental decode, 205 MiB / 240k targets | — | 0.622 s | **34 MB** |
+| slurped instead, same input | — | 0.641 s | **442 MB** |
+
+- Attribute pruning is a **10× reduction** and still carries name, rule class and
+  location — everything the index needs. The 189k-target refresh is therefore
+  **~16 MB, not 165 MB**.
+- Incremental and slurped decode run at the same speed; slurping costs 13× the
+  memory for nothing. Decode must stream.
+- Throughput is Bazel's write rate (52–56 MB/s), not the decoder's: prost
+  manages 324 MB/s. Decoder choice is not a performance decision.
+- `prost-build` hard-requires `protoc` at build time. **`protox` 0.9.1 removes
+  that**, which matters for packaging.
 
 ### The ratio that drives everything
 
@@ -120,6 +142,36 @@ and a real repo would be several GB. The lock only hurts if a request *waits* on
 Bazel — and it never does (see invariant 1). A build holding the lock just means
 the index refresh is late, and late is invisible. So it is a tunable for people
 with RAM to spare and constant builds, not a default.
+
+## 2.1 Cancelling Bazel — do not use `kill()`
+
+Measured, and it is a trap:
+
+| signal to the client | result |
+| --- | --- |
+| `SIGKILL` | the **server-side command keeps running to completion** and holds the command lock under a dead PID. Later invocations fail with `Another command (pid=…) is running`. |
+| `SIGINT` / `SIGTERM` | clean: lock released in **13–42 ms** |
+
+`Child::kill()` in std sends `SIGKILL`, so the obvious call is the wrong one.
+The client turns SIGINT into a `Cancel` RPC (`blaze_util_posix.cc:144`).
+Under `unsafe_code = "forbid"` the way to send a different signal is
+`shared_child`'s `unix::SharedChildExt::send_signal`.
+
+Two further limits:
+
+- **Bazel's query output-serialisation phase is uncancellable.** Cancelling at
+  254 ms exits in 7 ms; at 352 ms the command runs to completion. So a
+  superseded refresh cannot always be stopped — it must be *discarded*, which
+  the single-actor design already does.
+- **Do not ping to keep the server warm.** `--max_idle_secs` defaults to 10800
+  and a ping does reset the timer, but it also suppresses Bazel's 10 s idle GC.
+  Eviction costs 3.09 s against 0.99 s warm; that is not worth a permanently
+  inflated heap.
+
+**gRPC command server: not for v1.** A working tonic client saves a measured
+106 ms median per call and gets a real `Cancel` (acked in 2.3 ms), but costs 89
+crates against 34, and tonic has just moved to `grpc/grpc-rust` with breaking
+changes in preparation. Revisit when per-call latency actually matters.
 
 ## 3. Threading
 

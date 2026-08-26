@@ -164,6 +164,16 @@ impl BazelClient {
 
     /// Invoke Bazel and wait.
     ///
+    /// Blocking, and deliberately so: this runs on the Bazel thread, never in a
+    /// request handler.
+    ///
+    /// When this grows cancellation, it must **not** use [`std::process::Child::kill`].
+    /// That sends `SIGKILL`, which leaves the server-side command running to
+    /// completion while the command lock is held by a dead pid; every later
+    /// invocation then fails with `Another command (pid=…) is running`. `SIGINT`
+    /// is what the client turns into a `Cancel` RPC, and releases the lock in
+    /// 13-42 ms. See `research/stack/05-measurements-and-decisions.md` §2.1.
+    ///
     /// # Errors
     ///
     /// If the process cannot be spawned or its output cannot be collected.
