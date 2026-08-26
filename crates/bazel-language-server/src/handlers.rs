@@ -8,7 +8,7 @@ use lsp_types::{
     SymbolKind, WorkspaceSymbol,
 };
 use starlark_cst::ast::{AstNode, Expr, File, Stmt};
-use starlark_cst::{Dialect, parse};
+use starlark_cst::{Dialect, FileKind, parse};
 
 use crate::line_index::LineIndex;
 
@@ -24,11 +24,18 @@ pub struct Declaration {
 
 /// Every target a BUILD file declares.
 ///
+/// Only BUILD files declare targets. `MODULE.bazel` is full of top-level calls
+/// carrying a `name` — `bazel_dep(name = "rules_shell")` — and reporting those
+/// as targets invents labels that resolve to nothing.
+///
 /// Legacy macros are invisible here by construction: `legacy_macro(name = "x")`
 /// yields `x`, but the `x_0`, `x_1` it actually declares are computed at
 /// evaluation time and only Bazel knows them.
 #[must_use]
-pub fn declarations(text: &str, dialect: Dialect) -> Vec<Declaration> {
+pub fn declarations(text: &str, dialect: Dialect, kind: FileKind) -> Vec<Declaration> {
+    if kind != FileKind::Build {
+        return Vec::new();
+    }
     let lines = LineIndex::new(text);
     let parsed = parse(text, dialect);
     let Some(file) = File::cast(parsed.syntax()) else {
@@ -70,8 +77,8 @@ pub fn declarations(text: &str, dialect: Dialect) -> Vec<Declaration> {
 }
 
 #[must_use]
-pub fn document_symbols(text: &str, dialect: Dialect) -> Vec<DocumentSymbol> {
-    declarations(text, dialect)
+pub fn document_symbols(text: &str, dialect: Dialect, kind: FileKind) -> Vec<DocumentSymbol> {
+    declarations(text, dialect, kind)
         .into_iter()
         .map(|d| DocumentSymbol {
             name: format!(":{}", d.name),
@@ -155,7 +162,7 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
 
     #[test]
     fn finds_every_declaration() {
-        let found = declarations(BUILD, Dialect::Bazel);
+        let found = declarations(BUILD, Dialect::Bazel, FileKind::Build);
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].name, "srcs");
         assert_eq!(found[0].rule, "filegroup");
@@ -168,9 +175,20 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
 
     #[test]
     fn symbols_are_prefixed_like_labels() {
-        let symbols = document_symbols(BUILD, Dialect::Bazel);
+        let symbols = document_symbols(BUILD, Dialect::Bazel, FileKind::Build);
         assert_eq!(symbols[0].name, ":srcs");
         assert_eq!(symbols[0].detail.as_deref(), Some("filegroup"));
+    }
+
+    #[test]
+    fn module_bazel_declares_no_targets() {
+        let module = "bazel_dep(name = \"rules_shell\", version = \"0.3.0\")\n";
+        assert!(declarations(module, Dialect::Bazel, FileKind::Module).is_empty());
+        // The same text read as a BUILD file would look like a target.
+        assert_eq!(
+            declarations(module, Dialect::Bazel, FileKind::Build).len(),
+            1
+        );
     }
 
     #[test]

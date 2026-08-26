@@ -111,11 +111,19 @@ fn package_label(root: &Path, build_file: &Path) -> Option<String> {
 
 /// Directories that must never be walked.
 ///
-/// `bazel-*` are convenience symlinks into the output base; following them
-/// re-enters the whole source tree through the execroot symlink forest.
+/// The `bazel-*` convenience symlinks point into the output base, and following
+/// them re-enters the source tree through the execroot symlink forest.
+///
+/// They only ever exist directly in the workspace root, so the check is
+/// depth-scoped. Matching the name at any depth would also discard a workspace
+/// whose own directory is called something like `bazel-tools` — the root is
+/// depth 0 — and take every target with it.
 fn is_excluded(entry: &walkdir::DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
-    name.starts_with("bazel-") || name == ".git" || name == ".jj"
+    if name == ".git" || name == ".jj" {
+        return true;
+    }
+    entry.depth() == 1 && name.starts_with("bazel-")
 }
 
 /// Workspace-relative directories listed in `.bazelignore`.
@@ -297,6 +305,36 @@ mod tests {
                 .all(|label| !label.contains("bazel-out")),
             "generated output must not be indexed: {:?}",
             index.targets.keys().collect::<Vec<_>>()
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A workspace may legitimately be named `bazel-something`. Matching the
+    /// convenience-symlink prefix at any depth prunes the root itself and the
+    /// index comes back empty, with nothing to suggest why.
+    #[test]
+    fn a_workspace_named_bazel_something_still_indexes() {
+        let root = std::env::temp_dir().join("bazel-named-workspace-test");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::create_dir_all(root.join("tools/bazel-helpers")).unwrap();
+        std::fs::write(root.join("MODULE.bazel"), "module(name='t')\n").unwrap();
+        for dir in ["lib", "tools/bazel-helpers"] {
+            std::fs::write(
+                root.join(dir).join("BUILD.bazel"),
+                "filegroup(name = \"t\", srcs = [])\n",
+            )
+            .unwrap();
+        }
+
+        let index = build_static(&root);
+        let mut labels: Vec<_> = index.targets.keys().cloned().collect();
+        labels.sort();
+        assert_eq!(
+            labels,
+            vec!["//lib:t".to_string(), "//tools/bazel-helpers:t".to_string()],
+            "the root and a nested bazel-* directory are both real source"
         );
 
         std::fs::remove_dir_all(&root).ok();

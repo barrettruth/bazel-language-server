@@ -23,7 +23,7 @@ use lsp_types::{
     Request as _, ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, Uri,
     WorkspaceSymbolRequest,
 };
-use starlark_cst::{Dialect, classify};
+use starlark_cst::{Dialect, FileKind, classify};
 
 type FxHashMap<K, V> = std::collections::HashMap<K, V>;
 
@@ -122,9 +122,9 @@ struct Documents {
 }
 
 impl Documents {
-    fn dialect(uri: &Uri) -> Dialect {
+    fn classify_uri(uri: &Uri) -> (Dialect, FileKind) {
         let path = PathBuf::from(uri_to_path(uri));
-        classify(&path, None).map_or(Dialect::Standard, |(dialect, _)| dialect)
+        classify(&path, None).unwrap_or((Dialect::Standard, FileKind::Bzl))
     }
 }
 
@@ -179,8 +179,9 @@ fn run_server() -> Result<()> {
                     let params: lsp_types::DocumentSymbolParams =
                         serde_json::from_value(request.params.clone())?;
                     let uri = params.text_document.uri;
+                    let (dialect, kind) = Documents::classify_uri(&uri);
                     let symbols = docs.texts.get(&uri).map_or_else(Vec::new, |text| {
-                        handlers::document_symbols(text, Documents::dialect(&uri))
+                        handlers::document_symbols(text, dialect, kind)
                     });
                     tracing::debug!(?uri, count = symbols.len(), "documentSymbol");
                     Response::new_ok(request.id, symbols)
@@ -245,7 +246,8 @@ fn publish(connection: &Connection, docs: &Documents, uri: &Uri) -> Result<()> {
     let Some(text) = docs.texts.get(uri) else {
         return Ok(());
     };
-    let diagnostics = handlers::syntax_diagnostics(text, Documents::dialect(uri));
+    let (dialect, _) = Documents::classify_uri(uri);
+    let diagnostics = handlers::syntax_diagnostics(text, dialect);
     let params = PublishDiagnosticsParams {
         uri: uri.clone(),
         diagnostics,
@@ -270,8 +272,19 @@ fn uri_to_path(uri: &Uri) -> String {
 }
 
 /// Prefer a real Bazel root over whatever the editor called the workspace.
+///
+/// Clients disagree about which field carries the root. `workspaceFolders` is
+/// the current one, `rootUri` and `rootPath` are deprecated but still what
+/// several clients actually send, and reading only the first leaves the index
+/// silently empty — the server starts, attaches, answers every request with
+/// nothing, and logs no error. So try all of them, then the working directory,
+/// and record which one won.
+// rootUri and rootPath are deprecated in favour of workspaceFolders, and are
+// read anyway: the deprecation describes the spec's intent, not what clients
+// send.
+#[allow(deprecated)]
 fn workspace_root(init: &InitializeParams) -> Option<PathBuf> {
-    let candidate = init
+    let from_folders = init
         .workspace_folders_initialize_params
         .workspace_folders
         .as_ref()
@@ -279,6 +292,26 @@ fn workspace_root(init: &InitializeParams) -> Option<PathBuf> {
             lsp_types::WorkspaceFolders::WorkspaceFolderList(list) => list.first(),
             lsp_types::WorkspaceFolders::Null => None,
         })
-        .map(|folder| PathBuf::from(uri_to_path(&folder.uri)))?;
-    Some(bls_bazel::find_workspace(&candidate).map_or(candidate, |w| w.root))
+        .map(|folder| ("workspaceFolders", PathBuf::from(uri_to_path(&folder.uri))));
+
+    let from_root_uri = init
+        .root_uri
+        .as_ref()
+        .map(|uri| ("rootUri", PathBuf::from(uri_to_path(uri))));
+
+    let from_root_path = init.root_path.as_ref().and_then(|root| match root {
+        lsp_types::RootPath::String(path) => Some(("rootPath", PathBuf::from(path))),
+        lsp_types::RootPath::Null => None,
+    });
+
+    let from_cwd = std::env::current_dir().ok().map(|dir| ("cwd", dir));
+
+    let (source, candidate) = from_folders
+        .or(from_root_uri)
+        .or(from_root_path)
+        .or(from_cwd)?;
+
+    let root = bls_bazel::find_workspace(&candidate).map_or(candidate, |w| w.root);
+    tracing::info!(?root, source, "workspace root");
+    Some(root)
 }
