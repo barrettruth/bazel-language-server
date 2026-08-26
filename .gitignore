@@ -7,7 +7,7 @@
 result
 result-*
 
-/experiments/**/bazel-*
+/tests/workspace/bazel-*
 
 site/node_modules/
 site/dist/
