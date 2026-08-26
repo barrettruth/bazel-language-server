@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from urllib.parse import quote
 
 
 class Client:
@@ -73,7 +74,9 @@ class Client:
             return self.pending.pop(rid)
 
     def uri(self, rel):
-        return "file://" + str(self.root / rel)
+        # Percent-encode: a path with a space is not a URI, and a server is
+        # right to reject one.
+        return "file://" + quote(str(self.root / rel))
 
     def open(self, rel):
         path = self.root / rel

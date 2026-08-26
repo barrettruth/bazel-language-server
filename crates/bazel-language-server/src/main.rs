@@ -162,8 +162,8 @@ fn run_server() -> Result<()> {
     let link_support = supports_definition_links(&init);
     let index = IndexHandle::new();
     if let Some(root) = root.clone() {
-        // Synchronous for now: measured at ~1.4 s for a 74k-package repo, and
-        // moving it to the Bazel thread is step one of G3.
+        // Synchronous: ~1.4 s on a 74k-package repo, which is cheaper than the
+        // machinery to report progress on it would be.
         index.store(bls_index::build_static(&root));
     }
     tracing::info!(targets = index.load().len(), "ready");
@@ -174,18 +174,34 @@ fn run_server() -> Result<()> {
 
     for message in &connection.receiver {
         match message {
+            // A message the server cannot make sense of fails that message.
+            // Letting the error out of the loop would exit the process and take
+            // every open buffer's language support with it, over one bad URI.
             Message::Request(request) => {
                 if connection.handle_shutdown(&request)? {
                     break;
                 }
-                let response = respond(&request, &docs, &index, root.as_deref(), link_support)?;
+                let id = request.id.clone();
+                let response = match respond(&request, &docs, &index, root.as_deref(), link_support)
+                {
+                    Ok(response) => response,
+                    Err(err) => {
+                        tracing::error!(method = request.method, "{err:#}");
+                        Response::new_err(
+                            id,
+                            lsp_server::ErrorCode::InvalidParams as i32,
+                            err.to_string(),
+                        )
+                    }
+                };
                 connection.sender.send(Message::Response(response))?;
             }
-            Message::Notification(note) => {
-                if let Some(uri) = apply(&note, &mut docs)? {
-                    publish(&connection, &docs, &uri)?;
-                }
-            }
+            Message::Notification(note) => match apply(&note, &mut docs) {
+                Ok(Some(uri)) => publish(&connection, &docs, &uri)?,
+                Ok(None) => {}
+                // A notification has no reply, so this is the only report.
+                Err(err) => tracing::error!(method = note.method, "{err:#}"),
+            },
             Message::Response(_) => {}
         }
     }

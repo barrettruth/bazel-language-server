@@ -178,7 +178,30 @@ pub fn workspace_symbols(index: &bls_index::Index, query: &str) -> Vec<Workspace
 }
 
 fn file_uri(path: &Path) -> Option<Uri> {
-    format!("file://{}", path.display()).parse().ok()
+    let mut uri = String::from("file://");
+    for byte in path.as_os_str().as_encoded_bytes() {
+        // RFC 3986 unreserved, plus the separators a path needs to keep. Bytes
+        // outside that set are escaped, so a workspace under a directory with a
+        // space in it produces a URI a client can parse. `uri_to_path` decodes
+        // the same way on the way back in.
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'.'
+            | b'_'
+            | b'~'
+            | b'/'
+            | b':'
+            | b'@' => uri.push(*byte as char),
+            other => {
+                use std::fmt::Write as _;
+                let _ = write!(uri, "%{other:02X}");
+            }
+        }
+    }
+    uri.parse().ok()
 }
 
 /// What a string in a build file refers to, decided by where it sits.
@@ -521,6 +544,25 @@ mod tests {
 
     const BUILD: &str = "\
 filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\")\n";
+
+    /// A path a client can parse, for every path a filesystem allows.
+    ///
+    /// `path.display()` is raw, so a space produced `file:///ws with space/…`,
+    /// which fluent-uri rejects; the request then failed and, before the loop
+    /// caught its own errors, took the server with it.
+    #[test]
+    fn file_uri_escapes_what_a_uri_cannot_hold() {
+        let cases = [
+            ("/ws/lib/BUILD.bazel", "file:///ws/lib/BUILD.bazel"),
+            ("/ws with space/BUILD", "file:///ws%20with%20space/BUILD"),
+            ("/ws/a#b?c/BUILD", "file:///ws/a%23b%3Fc/BUILD"),
+            ("/ws/100%/BUILD", "file:///ws/100%25/BUILD"),
+        ];
+        for (path, expected) in cases {
+            let uri = file_uri(Path::new(path)).expect("a parseable uri");
+            assert_eq!(uri.as_str(), expected, "encoding {path}");
+        }
+    }
 
     /// `name` identifies a declaration only at the top level. Nested, it is an
     /// argument that happens to share the spelling, and counting it as a
