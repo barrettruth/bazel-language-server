@@ -4,7 +4,7 @@ use std::path::Path;
 
 use lsp_types::{Location, Range};
 use starlark_cst::ast::{AstNode, CallExpr, File, Stmt};
-use starlark_cst::{SyntaxKind, parse};
+use starlark_cst::{SyntaxKind, TextRange, parse};
 
 use super::cursor::{classify_file, file_uri};
 use crate::line_index::LineIndex;
@@ -37,7 +37,7 @@ pub fn implementation(
         tracing::debug!("the cursor names no rule implementation");
         return Vec::new();
     };
-    let Some((start, end)) = definition_of(&syntax, &wanted) else {
+    let Some(range) = definition_of(&syntax, &wanted) else {
         tracing::debug!(function = wanted, "no `def` of that name in this file");
         return Vec::new();
     };
@@ -48,8 +48,8 @@ pub fn implementation(
     vec![Location {
         uri,
         range: Range {
-            start: lines.position(text, start),
-            end: lines.position(text, end),
+            start: lines.position(text, range.start().into()),
+            end: lines.position(text, range.end().into()),
         },
     }]
 }
@@ -110,17 +110,11 @@ fn implementation_name(syntax: &starlark_cst::SyntaxNode, offset: u32) -> Option
     None
 }
 
-/// The byte span of a top-level `def` of that name.
-///
-/// Offsets rather than a `TextRange`, which `starlark-cst` does not re-export
-/// and so cannot be named in a signature here.
-fn definition_of(syntax: &starlark_cst::SyntaxNode, wanted: &str) -> Option<(usize, usize)> {
+/// The span of a top-level `def` of that name.
+fn definition_of(syntax: &starlark_cst::SyntaxNode, wanted: &str) -> Option<TextRange> {
     File::cast(syntax.clone())?.stmts().find_map(|stmt| {
         let Stmt::Def(def) = stmt else { return None };
-        (def.name().as_deref() == Some(wanted)).then(|| {
-            let range = def.range();
-            (usize::from(range.start()), usize::from(range.end()))
-        })
+        (def.name().as_deref() == Some(wanted)).then(|| def.range())
     })
 }
 

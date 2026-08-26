@@ -4,9 +4,6 @@ on:
   push:
     branches: [main]
 
-# A crates.io version is permanent, so per-commit builds ship as a binary under
-# one reusable tag instead. The tag and its release are replaced each time
-# rather than accumulating.
 concurrency:
   group: nightly
   cancel-in-progress: true

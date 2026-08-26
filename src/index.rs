@@ -19,7 +19,7 @@ use arc_swap::ArcSwap;
 use lsp_types::Position;
 use rustc_hash::FxHashMap;
 use starlark_cst::ast::{AstNode, CallExpr, Expr, File, LiteralExpr, Stmt};
-use starlark_cst::{Dialect, SyntaxElement, SyntaxKind, classify, parse};
+use starlark_cst::{Dialect, SyntaxElement, SyntaxKind, TextRange, classify, parse};
 
 use crate::label::{Label, make_variable_labels, parse_label};
 use crate::line_index::utf16_len;
@@ -280,10 +280,9 @@ fn collect(
             };
             // Point at the name string, not the call: jumping to `cc_library(`
             // is less useful than landing on the target you searched for.
-            let anchor = match name.string_value_range() {
-                Some(range) => range.start(),
-                None => call.range().start(),
-            };
+            let anchor = name
+                .string_value_range()
+                .map_or_else(|| call.range().start(), TextRange::start);
             let Position { line, character } = lines.position(text, usize::from(anchor));
             let length = utf16_len(&value);
             targets.insert(

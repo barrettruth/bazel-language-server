@@ -19,8 +19,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@v22
 
-      # The tag is an assertion, not a fact. Publishing whatever Cargo.toml
-      # happens to say under a tag that disagrees ships a version nobody named.
       - name: Verify tag matches Cargo.toml
         run: |
           cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -30,17 +28,12 @@ jobs:
             exit 1
           fi
 
-      # Outside the working tree: cargo publish refuses to package a dirty
-      # checkout, and an asset built into the repo is exactly that.
       - name: Build release asset
         run: |
           nix develop .#ci --command just build
           mkdir -p "$RUNNER_TEMP/dist"
           cp target/release/bazel-language-server \
             "$RUNNER_TEMP/dist/bazel-language-server-x86_64-unknown-linux-gnu"
-
-      - name: Publish crate dry run
-        run: nix develop .#ci --command cargo publish --dry-run --locked
 
       - name: Publish crate
         env:
