@@ -8,7 +8,7 @@
 mod handlers;
 mod line_index;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use bls_bazel::{BazelClient, BazelConfig};
@@ -16,12 +16,12 @@ use bls_index::IndexHandle;
 use clap::{Parser, Subcommand};
 use lsp_server::{Connection, Message, Response};
 use lsp_types::{
-    DidChangeTextDocumentNotification, DidChangeTextDocumentParams,
-    DidCloseTextDocumentNotification, DidCloseTextDocumentParams, DidOpenTextDocumentNotification,
-    DidOpenTextDocumentParams, DocumentSymbolRequest, InitializeParams, LspNotificationMethod,
-    LspRequestMethod, Notification, PublishDiagnosticsNotification, PublishDiagnosticsParams,
-    Request as _, ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, Uri,
-    WorkspaceSymbolRequest,
+    Definition, DefinitionRequest, DefinitionResponse, DidChangeTextDocumentNotification,
+    DidChangeTextDocumentParams, DidCloseTextDocumentNotification, DidCloseTextDocumentParams,
+    DidOpenTextDocumentNotification, DidOpenTextDocumentParams, DocumentSymbolRequest,
+    InitializeParams, Location, LocationLink, LspNotificationMethod, LspRequestMethod,
+    Notification, PublishDiagnosticsNotification, PublishDiagnosticsParams, Request as _,
+    ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, Uri, WorkspaceSymbolRequest,
 };
 use starlark_cst::{Dialect, FileKind, classify};
 
@@ -136,6 +136,7 @@ fn run_server() -> Result<()> {
         text_document_sync: Some(TextDocumentSync::Kind(TextDocumentSyncKind::Full)),
         document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
         workspace_symbol_provider: Some(lsp_types::WorkspaceSymbolProvider::Bool(true)),
+        definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
         ..Default::default()
     };
     // `Connection::initialize` wraps its argument in `{"capabilities": …}`, so
@@ -156,6 +157,7 @@ fn run_server() -> Result<()> {
     let init: InitializeParams = serde_json::from_value(params)?;
 
     let root = workspace_root(&init);
+    let link_support = supports_definition_links(&init);
     let index = IndexHandle::new();
     if let Some(root) = root.clone() {
         // Synchronous for now: measured at ~1.4 s for a 74k-package repo, and
@@ -174,63 +176,12 @@ fn run_server() -> Result<()> {
                 if connection.handle_shutdown(&request)? {
                     break;
                 }
-                let method: LspRequestMethod<'_> = request.method.as_str().into();
-                let response = if method == DocumentSymbolRequest::METHOD {
-                    let params: lsp_types::DocumentSymbolParams =
-                        serde_json::from_value(request.params.clone())?;
-                    let uri = params.text_document.uri;
-                    let (dialect, kind) = Documents::classify_uri(&uri);
-                    let symbols = docs.texts.get(&uri).map_or_else(Vec::new, |text| {
-                        handlers::document_symbols(text, dialect, kind)
-                    });
-                    tracing::debug!(?uri, count = symbols.len(), "documentSymbol");
-                    Response::new_ok(request.id, symbols)
-                } else if method == WorkspaceSymbolRequest::METHOD {
-                    let params: lsp_types::WorkspaceSymbolParams =
-                        serde_json::from_value(request.params.clone())?;
-                    let symbols = handlers::workspace_symbols(&index.load(), &params.query);
-                    tracing::debug!(
-                        query = params.query,
-                        count = symbols.len(),
-                        "workspaceSymbol"
-                    );
-                    Response::new_ok(request.id, symbols)
-                } else {
-                    tracing::debug!(method = request.method, "unhandled request");
-                    Response::new_err(
-                        request.id,
-                        lsp_server::ErrorCode::MethodNotFound as i32,
-                        format!("unhandled: {}", request.method),
-                    )
-                };
+                let response = respond(&request, &docs, &index, root.as_deref(), link_support)?;
                 connection.sender.send(Message::Response(response))?;
             }
             Message::Notification(note) => {
-                let method: LspNotificationMethod<'_> = note.method.as_str().into();
-                if method == DidOpenTextDocumentNotification::METHOD {
-                    let params: DidOpenTextDocumentParams =
-                        serde_json::from_value(note.params.clone())?;
-                    let uri = params.text_document.uri;
-                    docs.texts.insert(uri.clone(), params.text_document.text);
+                if let Some(uri) = apply(&note, &mut docs)? {
                     publish(&connection, &docs, &uri)?;
-                } else if method == DidChangeTextDocumentNotification::METHOD {
-                    let params: DidChangeTextDocumentParams =
-                        serde_json::from_value(note.params.clone())?;
-                    let uri = params.text_document.text_document_identifier.uri;
-                    if let Some(change) = params.content_changes.into_iter().next() {
-                        let text = match change {
-                            lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(whole) => whole.text,
-                            lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangePartial(partial) => partial.text,
-                        };
-                        docs.texts.insert(uri.clone(), text);
-                    }
-                    publish(&connection, &docs, &uri)?;
-                } else if method == DidCloseTextDocumentNotification::METHOD {
-                    let params: DidCloseTextDocumentParams =
-                        serde_json::from_value(note.params.clone())?;
-                    docs.texts.remove(&params.text_document.uri);
-                } else {
-                    tracing::trace!(method = note.method, "unhandled notification");
                 }
             }
             Message::Response(_) => {}
@@ -240,6 +191,129 @@ fn run_server() -> Result<()> {
     io_threads.join()?;
     tracing::info!("shut down");
     Ok(())
+}
+
+fn respond(
+    request: &lsp_server::Request,
+    docs: &Documents,
+    index: &IndexHandle,
+    root: Option<&Path>,
+    link_support: bool,
+) -> Result<Response> {
+    let id = request.id.clone();
+    let method: LspRequestMethod<'_> = request.method.as_str().into();
+    Ok(if method == DocumentSymbolRequest::METHOD {
+        let params: lsp_types::DocumentSymbolParams =
+            serde_json::from_value(request.params.clone())?;
+        let uri = params.text_document.uri;
+        let (dialect, kind) = Documents::classify_uri(&uri);
+        let symbols = docs.texts.get(&uri).map_or_else(Vec::new, |text| {
+            handlers::document_symbols(text, dialect, kind)
+        });
+        tracing::debug!(?uri, count = symbols.len(), "documentSymbol");
+        Response::new_ok(id, symbols)
+    } else if method == DefinitionRequest::METHOD {
+        let params: lsp_types::DefinitionParams = serde_json::from_value(request.params.clone())?;
+        let position = params.text_document_position_params;
+        let uri = position.text_document.uri;
+        let (dialect, _) = Documents::classify_uri(&uri);
+        let links = match (docs.texts.get(&uri), root) {
+            (Some(text), Some(root)) => handlers::definition(
+                text,
+                dialect,
+                Path::new(&uri_to_path(&uri)),
+                root,
+                &index.load(),
+                position.position,
+            ),
+            _ => Vec::new(),
+        };
+        tracing::debug!(?uri, count = links.len(), "definition");
+        Response::new_ok(id, definition_response(links, link_support))
+    } else if method == WorkspaceSymbolRequest::METHOD {
+        let params: lsp_types::WorkspaceSymbolParams =
+            serde_json::from_value(request.params.clone())?;
+        let symbols = handlers::workspace_symbols(&index.load(), &params.query);
+        tracing::debug!(
+            query = params.query,
+            count = symbols.len(),
+            "workspaceSymbol"
+        );
+        Response::new_ok(id, symbols)
+    } else {
+        tracing::debug!(method = request.method, "unhandled request");
+        Response::new_err(
+            id,
+            lsp_server::ErrorCode::MethodNotFound as i32,
+            format!("unhandled: {}", request.method),
+        )
+    })
+}
+
+/// Apply a notification to the open-document map.
+///
+/// Returns the document whose diagnostics are now stale, if any.
+fn apply(note: &lsp_server::Notification, docs: &mut Documents) -> Result<Option<Uri>> {
+    let method: LspNotificationMethod<'_> = note.method.as_str().into();
+    if method == DidOpenTextDocumentNotification::METHOD {
+        let params: DidOpenTextDocumentParams = serde_json::from_value(note.params.clone())?;
+        let uri = params.text_document.uri;
+        docs.texts.insert(uri.clone(), params.text_document.text);
+        return Ok(Some(uri));
+    }
+    if method == DidChangeTextDocumentNotification::METHOD {
+        let params: DidChangeTextDocumentParams = serde_json::from_value(note.params.clone())?;
+        let uri = params.text_document.text_document_identifier.uri;
+        if let Some(change) = params.content_changes.into_iter().next() {
+            let text = match change {
+                lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(whole) => whole.text,
+                lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangePartial(partial) => partial.text,
+            };
+            docs.texts.insert(uri.clone(), text);
+        }
+        return Ok(Some(uri));
+    }
+    if method == DidCloseTextDocumentNotification::METHOD {
+        let params: DidCloseTextDocumentParams = serde_json::from_value(note.params.clone())?;
+        docs.texts.remove(&params.text_document.uri);
+        return Ok(None);
+    }
+    tracing::trace!(method = note.method, "unhandled notification");
+    Ok(None)
+}
+
+/// Whether the client understands `LocationLink`.
+///
+/// A client that does not gets `Location`s instead. Sending links to one that
+/// never asked for them is a response it cannot parse, which reads as a broken
+/// server rather than as a missing capability.
+fn supports_definition_links(init: &InitializeParams) -> bool {
+    init.capabilities
+        .text_document
+        .as_ref()
+        .and_then(|caps| caps.definition.as_ref())
+        .and_then(|definition| definition.link_support)
+        .unwrap_or(false)
+}
+
+/// Narrow a link to a plain location, dropping the origin range with it.
+fn definition_response(links: Vec<LocationLink>, link_support: bool) -> Option<DefinitionResponse> {
+    if links.is_empty() {
+        return None;
+    }
+    Some(if link_support {
+        DefinitionResponse::DefinitionLinkList(links)
+    } else {
+        DefinitionResponse::Definition(Definition::LocationList(
+            links
+                .into_iter()
+                .map(|link| Location {
+                    uri: link.target_uri,
+                    range: link.target_selection_range,
+                })
+                .collect(),
+        ))
+    })
 }
 
 fn publish(connection: &Connection, docs: &Documents, uri: &Uri) -> Result<()> {
