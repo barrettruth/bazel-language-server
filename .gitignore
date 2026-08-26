@@ -1,19 +1,17 @@
 /target
 
 .*cache*
-CLAUDE.md
-.claude/
 
 .envrc
 .direnv/
 result
 result-*
 
-# Shallow clones of prior art, re-fetchable and ~1 GB.
-/upstream/
-
-# Generated Bazel artifacts and scratch output bases.
 /experiments/**/bazel-*
-/experiments/builtins/*.tar.gz
+
+site/node_modules/
+site/dist/
+site/.astro/
+site/.vercel/
 
 notes/

@@ -1,25 +1,0 @@
-
-Ð
-my_ruleDoes a thing.*
-nameA unique name for this target. 
-srcsSources2[]&
-modeMode2"fast"J"fast"J"slow"4
-depA dep*
-MyInfo
-MyInfo
-//:doc.bzl2None"
-my_rule
-//:doc.bzl@
-MyInfoMy provider	
-xan x
-ya y"
-MyInfo
-//:doc.bzlv
-my_macro
-namethe name (
-
-visibilityvisNone(
-kwargsrest(A legacy macro.2
-my_macro
-//:doc.bzl*Example user module.2
-//:doc.bzl

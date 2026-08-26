@@ -1,7 +1,0 @@
-D
-
-cc_library
-
-kwargs(2*
-
-cc_library@rules_cc//cc:cc_library.bzl*cc_library rule2@rules_cc//cc:cc_library.bzl
