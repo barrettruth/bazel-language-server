@@ -262,48 +262,11 @@ fn respond(
     let id = request.id.clone();
     let method: LspRequestMethod<'_> = request.method.as_str().into();
     Ok(if method == DocumentSymbolRequest::METHOD {
-        let params: lsp_types::DocumentSymbolParams =
-            serde_json::from_value(request.params.clone())?;
-        let uri = params.text_document.uri;
-        let (dialect, kind) = Documents::classify_uri(&uri);
-        let symbols = docs.texts.get(&uri).map_or_else(Vec::new, |text| {
-            handlers::document_symbols(text, dialect, kind)
-        });
-        tracing::debug!(?uri, count = symbols.len(), "documentSymbol");
-        Response::new_ok(id, symbols)
+        Response::new_ok(id, document_symbols(request, docs)?)
     } else if method == DefinitionRequest::METHOD {
-        let params: lsp_types::DefinitionParams = serde_json::from_value(request.params.clone())?;
-        let position = params.text_document_position_params;
-        let uri = position.text_document.uri;
-        let links = match (docs.texts.get(&uri), root) {
-            (Some(text), Some(root)) => handlers::definition(
-                text,
-                Path::new(&uri_to_path(&uri)),
-                root,
-                &index.load(),
-                position.position,
-            ),
-            _ => Vec::new(),
-        };
-        tracing::debug!(?uri, count = links.len(), "definition");
-        Response::new_ok(id, definition_response(links, link_support))
+        Response::new_ok(id, definition(request, docs, index, root, link_support)?)
     } else if method == ReferencesRequest::METHOD {
-        let params: lsp_types::ReferenceParams = serde_json::from_value(request.params.clone())?;
-        let position = params.text_document_position_params;
-        let uri = position.text_document.uri;
-        let locations = match (docs.texts.get(&uri), root) {
-            (Some(text), Some(root)) => handlers::references(
-                text,
-                Path::new(&uri_to_path(&uri)),
-                root,
-                &index.load(),
-                position.position,
-                params.context.include_declaration,
-            ),
-            _ => Vec::new(),
-        };
-        tracing::debug!(?uri, count = locations.len(), "references");
-        Response::new_ok(id, locations)
+        Response::new_ok(id, references(request, docs, index, root)?)
     } else if method == DocumentHighlightRequest::METHOD {
         Response::new_ok(id, document_highlight(request, docs, index, root)?)
     } else if method == HoverRequest::METHOD {
@@ -331,15 +294,7 @@ fn respond(
     } else if method == InlayHintRequest::METHOD {
         Response::new_ok(id, inlay_hints(request, docs, index, root)?)
     } else if method == WorkspaceSymbolRequest::METHOD {
-        let params: lsp_types::WorkspaceSymbolParams =
-            serde_json::from_value(request.params.clone())?;
-        let symbols = handlers::workspace_symbols(&index.load(), &params.query);
-        tracing::debug!(
-            query = params.query,
-            count = symbols.len(),
-            "workspaceSymbol"
-        );
-        Response::new_ok(id, symbols)
+        Response::new_ok(id, workspace_symbols(request, index)?)
     } else {
         tracing::debug!(method = request.method, "unhandled request");
         Response::new_err(
@@ -422,6 +377,86 @@ fn formatting(request: &lsp_server::Request, docs: &Documents) -> Result<Vec<Tex
     let edits = format::format(text, kind)?;
     tracing::debug!(?uri, ?kind, count = edits.len(), "formatting");
     Ok(edits)
+}
+
+/// The targets a BUILD file declares.
+fn document_symbols(
+    request: &lsp_server::Request,
+    docs: &Documents,
+) -> Result<Vec<lsp_types::DocumentSymbol>> {
+    let params: lsp_types::DocumentSymbolParams = serde_json::from_value(request.params.clone())?;
+    let uri = params.text_document.uri;
+    let (dialect, kind) = Documents::classify_uri(&uri);
+    let symbols = docs.texts.get(&uri).map_or_else(Vec::new, |text| {
+        handlers::document_symbols(text, dialect, kind)
+    });
+    tracing::debug!(?uri, count = symbols.len(), "documentSymbol");
+    Ok(symbols)
+}
+
+/// Where the string under the cursor is declared.
+fn definition(
+    request: &lsp_server::Request,
+    docs: &Documents,
+    index: &IndexHandle,
+    root: Option<&Path>,
+    link_support: bool,
+) -> Result<Option<DefinitionResponse>> {
+    let params: lsp_types::DefinitionParams = serde_json::from_value(request.params.clone())?;
+    let position = params.text_document_position_params;
+    let uri = position.text_document.uri;
+    let links = match (docs.texts.get(&uri), root) {
+        (Some(text), Some(root)) => handlers::definition(
+            text,
+            Path::new(&uri_to_path(&uri)),
+            root,
+            &index.load(),
+            position.position,
+        ),
+        _ => Vec::new(),
+    };
+    tracing::debug!(?uri, count = links.len(), "definition");
+    Ok(definition_response(links, link_support))
+}
+
+/// Every label naming the target under the cursor.
+fn references(
+    request: &lsp_server::Request,
+    docs: &Documents,
+    index: &IndexHandle,
+    root: Option<&Path>,
+) -> Result<Vec<Location>> {
+    let params: lsp_types::ReferenceParams = serde_json::from_value(request.params.clone())?;
+    let position = params.text_document_position_params;
+    let uri = position.text_document.uri;
+    let locations = match (docs.texts.get(&uri), root) {
+        (Some(text), Some(root)) => handlers::references(
+            text,
+            Path::new(&uri_to_path(&uri)),
+            root,
+            &index.load(),
+            position.position,
+            params.context.include_declaration,
+        ),
+        _ => Vec::new(),
+    };
+    tracing::debug!(?uri, count = locations.len(), "references");
+    Ok(locations)
+}
+
+/// Every target in the workspace matching a query.
+fn workspace_symbols(
+    request: &lsp_server::Request,
+    index: &IndexHandle,
+) -> Result<Vec<lsp_types::WorkspaceSymbol>> {
+    let params: lsp_types::WorkspaceSymbolParams = serde_json::from_value(request.params.clone())?;
+    let symbols = handlers::workspace_symbols(&index.load(), &params.query);
+    tracing::debug!(
+        query = params.query,
+        count = symbols.len(),
+        "workspaceSymbol"
+    );
+    Ok(symbols)
 }
 
 /// The package a shorthand label resolves against.
