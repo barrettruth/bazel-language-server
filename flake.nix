@@ -27,6 +27,13 @@
         ];
       in
       {
+        packages.default = pkgs.rustPlatform.buildRustPackage {
+          pname = "bazel-language-server";
+          version = "0.0.1";
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+        };
+
         devShells.default = pkgs.mkShell {
           buildInputs = [ toolchain ] ++ commonBuildInputs;
         };
