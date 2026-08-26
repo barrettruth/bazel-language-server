@@ -23,11 +23,12 @@ use lsp_types::{
     Definition, DefinitionRequest, DefinitionResponse, DidChangeTextDocumentNotification,
     DidChangeTextDocumentParams, DidCloseTextDocumentNotification, DidCloseTextDocumentParams,
     DidOpenTextDocumentNotification, DidOpenTextDocumentParams, DocumentFormattingRequest,
-    DocumentHighlightRequest, DocumentSymbolRequest, HoverRequest, InitializeParams, Location,
-    LocationLink, LspNotificationMethod, LspRequestMethod, Notification, PrepareRenameRequest,
-    PrepareRenameResult, PublishDiagnosticsNotification, PublishDiagnosticsParams,
-    ReferencesRequest, RenameOptions, RenameRequest, Request as _, ServerCapabilities,
-    TextDocumentSync, TextDocumentSyncKind, TextEdit, Uri, WorkspaceSymbolRequest,
+    DocumentHighlightRequest, DocumentSymbolRequest, FoldingRangeRequest, HoverRequest,
+    InitializeParams, Location, LocationLink, LspNotificationMethod, LspRequestMethod,
+    Notification, PrepareRenameRequest, PrepareRenameResult, PublishDiagnosticsNotification,
+    PublishDiagnosticsParams, ReferencesRequest, RenameOptions, RenameRequest, Request as _,
+    ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, TextEdit, Uri,
+    WorkspaceSymbolRequest,
 };
 use starlark_cst::{Dialect, FileKind, classify};
 
@@ -149,6 +150,7 @@ fn run_server() -> Result<()> {
         // Advertised whether or not buildifier is installed, the way the rest
         // of the server is advertised without Bazel: a capability withdrawn at
         // startup is one the user cannot get back by installing the tool.
+        folding_range_provider: Some(lsp_types::FoldingRangeProvider::Bool(true)),
         document_formatting_provider: Some(lsp_types::DocumentFormattingProvider::Bool(true)),
         rename_provider: Some(lsp_types::RenameProvider::RenameOptions(RenameOptions {
             prepare_provider: Some(true),
@@ -288,6 +290,16 @@ fn respond(
         Response::new_ok(id, rename(request, docs, index, root)?)
     } else if method == PrepareRenameRequest::METHOD {
         Response::new_ok(id, prepare_rename(request, docs, index, root)?)
+    } else if method == FoldingRangeRequest::METHOD {
+        let params: lsp_types::FoldingRangeParams = serde_json::from_value(request.params.clone())?;
+        let uri = params.text_document.uri;
+        let (dialect, _) = Documents::classify_uri(&uri);
+        let ranges = docs
+            .texts
+            .get(&uri)
+            .map_or_else(Vec::new, |text| handlers::folding_ranges(text, dialect));
+        tracing::debug!(?uri, count = ranges.len(), "foldingRange");
+        Response::new_ok(id, ranges)
     } else if method == WorkspaceSymbolRequest::METHOD {
         let params: lsp_types::WorkspaceSymbolParams =
             serde_json::from_value(request.params.clone())?;

@@ -12,6 +12,7 @@
 mod cursor;
 mod definition;
 mod diagnostics;
+mod folding;
 mod highlight;
 mod hover;
 mod references;
@@ -23,6 +24,7 @@ mod fixture;
 
 pub use definition::definition;
 pub use diagnostics::syntax_diagnostics;
+pub use folding::folding_ranges;
 pub use highlight::document_highlight;
 pub use hover::hover;
 pub use references::references;
