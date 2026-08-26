@@ -1,4 +1,4 @@
-//! Formatting, delegated to `buildifier`.
+//! Formatting and linting, delegated to `buildifier`.
 //!
 //! This is the one subprocess the server runs inside a request, and it is a
 //! deliberate exception rather than a crack in invariant 1. What that invariant
@@ -29,7 +29,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use lsp_types::{Position, Range, TextEdit};
+use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, Position, Range, TextEdit};
+use serde::Deserialize;
 use starlark_cst::FileKind;
 
 use crate::line_index::LineIndex;
@@ -98,6 +99,113 @@ enum Unusable {
     Broken(anyhow::Error),
 }
 
+/// What `buildifier --lint=warn --format=json` reports.
+///
+/// Only the fields used here are named; buildifier prints more, and ignoring
+/// the rest keeps a new field in a future release from failing the parse.
+#[derive(Deserialize)]
+struct LintReport {
+    files: Vec<LintFile>,
+}
+
+#[derive(Deserialize)]
+struct LintFile {
+    warnings: Vec<Warning>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Warning {
+    start: Point,
+    end: Point,
+    category: String,
+    message: String,
+    url: String,
+    auto_fixable: bool,
+}
+
+#[derive(Deserialize)]
+struct Point {
+    line: u32,
+    column: u32,
+}
+
+/// Lint findings, as diagnostics.
+///
+/// Warnings only: buildifier's own severity is advisory, and reporting them as
+/// errors would put a red mark on a file that builds. A finding buildifier can
+/// fix itself is tagged, so a client offering "fix all" has something to key on
+/// once code actions land.
+///
+/// Empty when buildifier is absent or the buffer does not parse — a file with a
+/// syntax error already has the parser's diagnostics on it, and buildifier
+/// declines to lint what it cannot read.
+#[must_use]
+pub fn lint(text: &str, kind: FileKind) -> Vec<Diagnostic> {
+    lint_with(BUILDIFIER, text, kind)
+}
+
+fn lint_with(binary: &str, text: &str, kind: FileKind) -> Vec<Diagnostic> {
+    let args = [
+        format!("-type={}", file_type(kind)),
+        "--mode=check".to_string(),
+        "--lint=warn".to_string(),
+        "--format=json".to_string(),
+    ];
+    let output = match invoke(binary, &args, text) {
+        Ok(output) => output,
+        Err(Unusable::Rejected(reason)) => {
+            tracing::debug!("{binary} lint: {reason}");
+            return Vec::new();
+        }
+        Err(Unusable::Broken(reason)) => {
+            tracing::warn!("{binary} lint: {reason:#}");
+            return Vec::new();
+        }
+    };
+
+    let report: LintReport = match serde_json::from_str(&output.stdout) {
+        Ok(report) => report,
+        Err(err) => {
+            tracing::warn!("{binary} lint: unreadable json: {err}");
+            return Vec::new();
+        }
+    };
+
+    report
+        .files
+        .iter()
+        .flat_map(|file| file.warnings.iter())
+        .map(|warning| Diagnostic {
+            range: Range {
+                start: point(&warning.start),
+                end: point(&warning.end),
+            },
+            severity: Some(DiagnosticSeverity::Warning),
+            code: Some(lsp_types::Code::String(warning.category.clone())),
+            code_description: warning
+                .url
+                .parse()
+                .ok()
+                .map(|href| lsp_types::CodeDescription { href }),
+            source: Some("buildifier".to_string()),
+            message: warning.message.clone().into(),
+            tags: warning
+                .auto_fixable
+                .then(|| vec![DiagnosticTag::Unnecessary]),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// buildifier counts lines and columns from one; LSP counts from zero.
+fn point(at: &Point) -> Position {
+    Position {
+        line: at.line.saturating_sub(1),
+        character: at.column.saturating_sub(1),
+    }
+}
+
 /// buildifier's `-type` for a classified file.
 ///
 /// This is what selects the conventions, and the difference is not cosmetic:
@@ -148,11 +256,31 @@ fn whole_document(text: &str) -> Range {
 /// If buildifier cannot be spawned, exits non-zero — which it does for a syntax
 /// error, already reported as a diagnostic — outputs something that is not
 /// UTF-8, or fails to answer within [`TIMEOUT`].
+/// What one buildifier run produced.
+struct Output {
+    stdout: String,
+    stderr: String,
+    success: bool,
+}
+
 fn run(binary: &str, text: &str, file_type: &str) -> std::result::Result<String, Unusable> {
+    let output = invoke(binary, &[format!("-type={file_type}")], text)?;
+    if !output.success {
+        let reason = output.stderr.trim();
+        return Err(Unusable::Rejected(if reason.is_empty() {
+            "no message".to_string()
+        } else {
+            reason.to_string()
+        }));
+    }
+    Ok(output.stdout)
+}
+
+fn invoke(binary: &str, args: &[String], text: &str) -> std::result::Result<Output, Unusable> {
     // Every stream is a pipe. An inherited stdout would put the child's bytes
     // in the middle of an LSP frame, and the client would read it as us.
     let mut child = Command::new(binary)
-        .arg(format!("-type={file_type}"))
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -191,27 +319,21 @@ fn run(binary: &str, text: &str, file_type: &str) -> std::result::Result<String,
         .context("talking to buildifier")
         .map_err(Unusable::Broken)?;
 
-    if !status.success() {
-        let code = status.code().map_or_else(
-            || "killed by a signal".to_string(),
-            |code| format!("exit {code}"),
-        );
-        let reason = stderr.trim();
-        // Exiting non-zero after reading the buffer is how buildifier reports a
-        // file it cannot parse, which is the user's syntax error and not a
-        // broken tool.
-        return Err(Unusable::Rejected(format!(
-            "{code}: {}",
-            if reason.is_empty() {
-                "no message"
-            } else {
-                reason
-            }
-        )));
-    }
-    String::from_utf8(stdout)
-        .context("buildifier printed something that is not UTF-8")
-        .map_err(Unusable::Broken)
+    let code = status.code().map_or_else(
+        || "killed by a signal".to_string(),
+        |code| format!("exit {code}"),
+    );
+    Ok(Output {
+        stdout: String::from_utf8(stdout)
+            .context("buildifier printed something that is not UTF-8")
+            .map_err(Unusable::Broken)?,
+        stderr: if stderr.trim().is_empty() {
+            code
+        } else {
+            format!("{code}: {}", stderr.trim())
+        },
+        success: status.success(),
+    })
 }
 
 /// Feed the child and collect what it says.

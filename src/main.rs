@@ -313,16 +313,7 @@ fn respond(
         tracing::debug!(?uri, count = ranges.len(), "selectionRange");
         Response::new_ok(id, ranges)
     } else if method == DocumentLinkRequest::METHOD {
-        let params: lsp_types::DocumentLinkParams = serde_json::from_value(request.params.clone())?;
-        let uri = params.text_document.uri;
-        let links = match (docs.texts.get(&uri), root) {
-            (Some(text), Some(root)) => {
-                handlers::document_links(text, Path::new(&uri_to_path(&uri)), root, &index.load())
-            }
-            _ => Vec::new(),
-        };
-        tracing::debug!(?uri, count = links.len(), "documentLink");
-        Response::new_ok(id, links)
+        Response::new_ok(id, document_links(request, docs, index, root)?)
     } else if method == WorkspaceSymbolRequest::METHOD {
         let params: lsp_types::WorkspaceSymbolParams =
             serde_json::from_value(request.params.clone())?;
@@ -415,6 +406,25 @@ fn formatting(request: &lsp_server::Request, docs: &Documents) -> Result<Vec<Tex
     let edits = format::format(text, kind)?;
     tracing::debug!(?uri, ?kind, count = edits.len(), "formatting");
     Ok(edits)
+}
+
+/// Every label in a document that resolves, as a link.
+fn document_links(
+    request: &lsp_server::Request,
+    docs: &Documents,
+    index: &IndexHandle,
+    root: Option<&Path>,
+) -> Result<Vec<lsp_types::DocumentLink>> {
+    let params: lsp_types::DocumentLinkParams = serde_json::from_value(request.params.clone())?;
+    let uri = params.text_document.uri;
+    let links = match (docs.texts.get(&uri), root) {
+        (Some(text), Some(root)) => {
+            handlers::document_links(text, Path::new(&uri_to_path(&uri)), root, &index.load())
+        }
+        _ => Vec::new(),
+    };
+    tracing::debug!(?uri, count = links.len(), "documentLink");
+    Ok(links)
 }
 
 /// The edits a rename produces, or nothing where there is no target under the
@@ -542,8 +552,11 @@ fn publish(connection: &Connection, docs: &Documents, uri: &Uri) -> Result<()> {
     let Some(text) = docs.texts.get(uri) else {
         return Ok(());
     };
-    let (dialect, _) = Documents::classify_uri(uri);
-    let diagnostics = handlers::syntax_diagnostics(text, dialect);
+    let (dialect, kind) = Documents::classify_uri(uri);
+    let mut diagnostics = handlers::syntax_diagnostics(text, dialect);
+    if diagnostics.is_empty() {
+        diagnostics.extend(format::lint(text, kind));
+    }
     let params = PublishDiagnosticsParams {
         uri: uri.clone(),
         diagnostics,

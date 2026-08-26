@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use lsp_types::{DocumentLink, Range};
-use starlark_cst::{Dialect, SyntaxElement, SyntaxKind, parse};
+use starlark_cst::{SyntaxElement, SyntaxKind, parse};
 
 use super::cursor::{classify_file, enclosing_package, file_uri, string_at};
 use super::definition::{file_site, target_site};
@@ -33,7 +33,7 @@ pub fn document_links(
     let lines = LineIndex::new(text);
     let syntax = parse(text, dialect).syntax();
 
-    let mut links = Vec::new();
+    let mut resolved = Vec::new();
     for token in syntax
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
@@ -52,7 +52,7 @@ pub fn document_links(
         let Some(target) = file_uri(site.path()) else {
             continue;
         };
-        links.push(DocumentLink {
+        resolved.push(DocumentLink {
             range: Range {
                 start: lines.position(text, found.range.start as usize),
                 end: lines.position(text, found.range.end as usize),
@@ -63,9 +63,9 @@ pub fn document_links(
         });
     }
 
-    links.sort_by_key(|link| (link.range.start.line, link.range.start.character));
-    links.dedup_by_key(|link| (link.range.start.line, link.range.start.character));
-    links
+    resolved.sort_by_key(|at| (at.range.start.line, at.range.start.character));
+    resolved.dedup_by_key(|at| (at.range.start.line, at.range.start.character));
+    resolved
 }
 
 #[cfg(test)]
@@ -124,7 +124,7 @@ mod tests {
     fn an_unresolvable_string_produces_no_link() {
         let links = links_in("lib/BUILD.bazel");
         assert!(
-            !links.iter().any(|(_, key)| key.starts_with("@")),
+            !links.iter().any(|(_, key)| key.starts_with('@')),
             "external repositories are not linked: {links:?}"
         );
     }
