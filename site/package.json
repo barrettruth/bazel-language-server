@@ -1,0 +1,22 @@
+{
+  "name": "bazel-language-server-site",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "format:check": "biome format astro.config.mjs biome.json package.json tsconfig.json src"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^4.3.14",
+    "astro": "^5.18.1"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.8",
+    "@biomejs/biome": "^2.4.13",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,43 @@
+---
+layout: ../layouts/DocLayout.astro
+title: Features
+toc: true
+---
+
+# Features
+
+- [x] **Diagnostics** — syntax errors, reported per keystroke against a
+      recovering parser
+- [x] **Document symbols** — every target declared in a BUILD file
+- [x] **Workspace symbols** — every target in the workspace
+- [x] **Go-to-definition** — labels and `load()` paths
+- [x] **References** — every label referring to a target, cross-file
+- [x] **Document highlight** — occurrences of the target under the cursor
+- [x] **Rename** — rename a target and rewrite every referring label
+- [x] **Hover** — the resolved target behind the label under the cursor
+- [x] **Formatting** — delegated to `buildifier` where it is installed
+- [ ] **Completion** — labels, rule names, attributes
+- [ ] **Unresolved-label diagnostics** — labels that name no target
+
+## Diagnostics
+
+Parsing never bails on the first error, so a file being edited still produces a
+tree and still produces symbols. A truncated argument list is reported where it
+was truncated and does not swallow the rest of the file.
+
+## Symbols
+
+Only BUILD files declare targets. `MODULE.bazel` is full of top-level calls
+carrying a `name` — `bazel_dep(name = "rules_shell")` — and reporting those as
+targets would invent labels that resolve to nothing.
+
+Targets declared by legacy macros are named at evaluation time, so no parser can
+see them. The index reports that it is undercounting rather than presenting a
+partial list as complete.
+
+## Formatting
+
+Formatting delegates to `buildifier`, because the only correct way to format a
+BUILD file is to agree with `buildifier` byte for byte. The capability is
+advertised whether or not `buildifier` is installed: one withdrawn at startup is
+one the user cannot get back by installing the tool.

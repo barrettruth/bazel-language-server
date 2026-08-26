@@ -1,0 +1,40 @@
+---
+import DocLayout from "../layouts/DocLayout.astro";
+---
+
+<DocLayout title="" description="the build graph, in your editor">
+  <header>
+    <h1>bazel-language-server</h1>
+    <code>//</code>
+  </header>
+
+  <p>
+    Language server for Bazel build files. Symbols, diagnostics, navigation and
+    rename across <code>BUILD</code>, <code>*.bzl</code>, <code
+      >MODULE.bazel</code
+    >, <code>WORKSPACE</code> and <code>*.scl</code>.
+  </p>
+
+  <p>
+    Bazel itself is optional. The target index is parsed from BUILD files, so
+    the server answers without a Bazel process and without a build.
+  </p>
+
+  <h2>Documentation</h2>
+
+  <ul>
+    <li><a href="/installation.html">Installation</a></li>
+    <li><a href="/features.html">Features</a></li>
+  </ul>
+
+  <h2>Links</h2>
+
+  <ul>
+    <li>
+      <a href="https://github.com/barrettruth/bazel-language-server">GitHub</a>
+    </li>
+    <li>
+      <a href="https://github.com/barrettruth/starlark-cst">starlark-cst</a>
+    </li>
+  </ul>
+</DocLayout>

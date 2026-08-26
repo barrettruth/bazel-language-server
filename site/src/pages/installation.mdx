@@ -1,0 +1,50 @@
+---
+layout: ../layouts/DocLayout.astro
+title: Installation
+---
+
+# Installation
+
+## From source
+
+[`starlark-cst`](https://github.com/barrettruth/starlark-cst) is a path
+dependency until it is published, so both repositories are checked out side by
+side:
+
+```sh
+git clone https://github.com/barrettruth/starlark-cst.git
+git clone https://github.com/barrettruth/bazel-language-server.git
+cd bazel-language-server
+cargo install --path crates/bazel-language-server
+```
+
+## Editor setup
+
+### Neovim
+
+Using the built-in LSP client directly:
+
+```lua
+vim.lsp.config('bazel_ls', {
+  cmd = { 'bazel-language-server' },
+  filetypes = { 'bzl' },
+  root_markers = { 'MODULE.bazel', 'WORKSPACE', 'WORKSPACE.bazel', '.git' },
+  workspace_required = false,
+})
+
+vim.lsp.enable('bazel_ls')
+```
+
+The workspace root is taken from `workspaceFolders`, falling back to `rootUri`,
+`rootPath`, and then the working directory. Whichever one answered is logged at
+startup on stderr.
+
+## Bazel
+
+Bazel is optional. The target index is parsed from BUILD files, so the server
+starts and answers with no Bazel on `PATH`. To check what the Bazel subsystem
+makes of a workspace:
+
+```sh
+bazel-language-server doctor path/to/workspace
+```
