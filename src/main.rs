@@ -24,11 +24,12 @@ use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentNotification, DidCloseTextDocumentParams,
     DidOpenTextDocumentNotification, DidOpenTextDocumentParams, DocumentFormattingRequest,
     DocumentHighlightRequest, DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest,
-    HoverRequest, InitializeParams, Location, LocationLink, LspNotificationMethod,
-    LspRequestMethod, Notification, PrepareRenameRequest, PrepareRenameResult,
-    PublishDiagnosticsNotification, PublishDiagnosticsParams, ReferencesRequest, RenameOptions,
-    RenameRequest, Request as _, SelectionRangeRequest, SemanticTokensRequest, ServerCapabilities,
-    TextDocumentSync, TextDocumentSyncKind, TextEdit, Uri, WorkspaceSymbolRequest,
+    HoverRequest, ImplementationRequest, InitializeParams, Location, LocationLink,
+    LspNotificationMethod, LspRequestMethod, Notification, PrepareRenameRequest,
+    PrepareRenameResult, PublishDiagnosticsNotification, PublishDiagnosticsParams,
+    ReferencesRequest, RenameOptions, RenameRequest, Request as _, SelectionRangeRequest,
+    SemanticTokensRequest, ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, TextEdit,
+    Uri, WorkspaceSymbolRequest,
 };
 use starlark_cst::{Dialect, FileKind, classify};
 
@@ -150,6 +151,7 @@ fn run_server() -> Result<()> {
         // Advertised whether or not buildifier is installed, the way the rest
         // of the server is advertised without Bazel: a capability withdrawn at
         // startup is one the user cannot get back by installing the tool.
+        implementation_provider: Some(lsp_types::ImplementationProvider::Bool(true)),
         semantic_tokens_provider: Some(lsp_types::SemanticTokensProvider::SemanticTokensOptions(
             lsp_types::SemanticTokensOptions {
                 legend: lsp_types::SemanticTokensLegend {
@@ -329,6 +331,8 @@ fn respond(
         Response::new_ok(id, document_links(request, docs, index, root)?)
     } else if method == SemanticTokensRequest::METHOD {
         Response::new_ok(id, semantic_tokens(request, docs)?)
+    } else if method == ImplementationRequest::METHOD {
+        Response::new_ok(id, implementation(request, docs, root)?)
     } else if method == WorkspaceSymbolRequest::METHOD {
         let params: lsp_types::WorkspaceSymbolParams =
             serde_json::from_value(request.params.clone())?;
@@ -421,6 +425,25 @@ fn formatting(request: &lsp_server::Request, docs: &Documents) -> Result<Vec<Tex
     let edits = format::format(text, kind)?;
     tracing::debug!(?uri, ?kind, count = edits.len(), "formatting");
     Ok(edits)
+}
+
+/// The function behind the rule under the cursor.
+fn implementation(
+    request: &lsp_server::Request,
+    docs: &Documents,
+    root: Option<&Path>,
+) -> Result<Vec<Location>> {
+    let params: lsp_types::ImplementationParams = serde_json::from_value(request.params.clone())?;
+    let position = params.text_document_position_params;
+    let uri = position.text_document.uri;
+    let found = match (docs.texts.get(&uri), root) {
+        (Some(text), Some(root)) => {
+            handlers::implementation(text, Path::new(&uri_to_path(&uri)), root, position.position)
+        }
+        _ => Vec::new(),
+    };
+    tracing::debug!(?uri, count = found.len(), "implementation");
+    Ok(found)
 }
 
 /// The tokens a grammar cannot colour.
