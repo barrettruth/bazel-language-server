@@ -10,6 +10,18 @@
 //! it would drift into disagreeing by a column — which reads as
 //! goto-definition landing next to its target rather than on it.
 
+/// The width of a string in UTF-16 code units.
+///
+/// The unit a column is counted in, so this is also how long a name is in the
+/// terms a range is expressed in.
+#[must_use]
+pub fn utf16_len(text: &str) -> u32 {
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        text.chars().map(char::len_utf16).sum::<usize>() as u32
+    }
+}
+
 /// Line starts for one document, so a position costs a binary search rather
 /// than a scan from the top of the file.
 pub struct LineIndex {
@@ -30,11 +42,9 @@ impl LineIndex {
     pub fn position(&self, text: &str, offset: usize) -> (u32, u32) {
         let offset = offset.min(text.len());
         let line = self.starts.partition_point(|&start| start <= offset) - 1;
-        let column = text
-            .get(self.starts[line]..offset)
-            .map_or(0, |slice| slice.chars().map(char::len_utf16).sum::<usize>());
+        let column = text.get(self.starts[line]..offset).map_or(0, utf16_len);
         #[allow(clippy::cast_possible_truncation)]
-        (line as u32, column as u32)
+        (line as u32, column)
     }
 
     /// The byte offset of a zero-based line and UTF-16 column.

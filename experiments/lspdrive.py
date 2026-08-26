@@ -128,6 +128,7 @@ def main():
                         "completionItem": {"snippetSupport": False},
                     },
                     "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
+                    "rename": {"prepareSupport": True},
                     "publishDiagnostics": {},
                 },
                 "workspace": {"symbol": {}, "workspaceFolders": True},
@@ -153,6 +154,8 @@ def main():
         }
         if method == "textDocument/references":
             params["context"] = {"includeDeclaration": True}
+        if method == "textDocument/rename":
+            params["newName"] = probe["newName"]
         if method == "workspace/symbol":
             params = {"query": probe["needle"]}
         resp = client.request(method, params)

@@ -20,9 +20,9 @@ use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentNotification, DidCloseTextDocumentParams,
     DidOpenTextDocumentNotification, DidOpenTextDocumentParams, DocumentSymbolRequest,
     InitializeParams, Location, LocationLink, LspNotificationMethod, LspRequestMethod,
-    Notification, PublishDiagnosticsNotification, PublishDiagnosticsParams, ReferencesRequest,
-    Request as _, ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, Uri,
-    WorkspaceSymbolRequest,
+    Notification, PrepareRenameRequest, PrepareRenameResult, PublishDiagnosticsNotification,
+    PublishDiagnosticsParams, ReferencesRequest, RenameOptions, RenameRequest, Request as _,
+    ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, Uri, WorkspaceSymbolRequest,
 };
 use starlark_cst::{Dialect, FileKind, classify};
 
@@ -139,6 +139,10 @@ fn run_server() -> Result<()> {
         workspace_symbol_provider: Some(lsp_types::WorkspaceSymbolProvider::Bool(true)),
         definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
         references_provider: Some(lsp_types::ReferencesProvider::Bool(true)),
+        rename_provider: Some(lsp_types::RenameProvider::RenameOptions(RenameOptions {
+            prepare_provider: Some(true),
+            ..Default::default()
+        })),
         ..Default::default()
     };
     // `Connection::initialize` wraps its argument in `{"capabilities": …}`, so
@@ -267,6 +271,10 @@ fn respond(
         };
         tracing::debug!(?uri, count = locations.len(), "references");
         Response::new_ok(id, locations)
+    } else if method == RenameRequest::METHOD {
+        Response::new_ok(id, rename(request, docs, index, root)?)
+    } else if method == PrepareRenameRequest::METHOD {
+        Response::new_ok(id, prepare_rename(request, docs, index, root)?)
     } else if method == WorkspaceSymbolRequest::METHOD {
         let params: lsp_types::WorkspaceSymbolParams =
             serde_json::from_value(request.params.clone())?;
@@ -285,6 +293,65 @@ fn respond(
             format!("unhandled: {}", request.method),
         )
     })
+}
+
+/// The edits a rename produces, or nothing where there is no target under the
+/// cursor.
+///
+/// An illegal new name comes back as an `Err` and reaches the client as a
+/// request error it shows the user, which is the only outcome they can act on:
+/// a workspace half-rewritten to a name Bazel cannot load is worse.
+fn rename(
+    request: &lsp_server::Request,
+    docs: &Documents,
+    index: &IndexHandle,
+    root: Option<&Path>,
+) -> Result<Option<lsp_types::WorkspaceEdit>> {
+    let params: lsp_types::RenameParams = serde_json::from_value(request.params.clone())?;
+    let position = params.text_document_position_params;
+    let uri = position.text_document.uri;
+    let (dialect, _) = Documents::classify_uri(&uri);
+    let (Some(text), Some(root)) = (docs.texts.get(&uri), root) else {
+        return Ok(None);
+    };
+    let edit = handlers::rename(
+        text,
+        dialect,
+        Path::new(&uri_to_path(&uri)),
+        root,
+        &index.load(),
+        position.position,
+        &params.new_name,
+    )?;
+    tracing::debug!(?uri, new_name = params.new_name, "rename");
+    Ok(edit)
+}
+
+/// The range a rename would rewrite, so a client can offer the request only
+/// where it will do something.
+fn prepare_rename(
+    request: &lsp_server::Request,
+    docs: &Documents,
+    index: &IndexHandle,
+    root: Option<&Path>,
+) -> Result<Option<PrepareRenameResult>> {
+    let params: lsp_types::PrepareRenameParams = serde_json::from_value(request.params.clone())?;
+    let position = params.text_document_position_params;
+    let uri = position.text_document.uri;
+    let (dialect, _) = Documents::classify_uri(&uri);
+    let (Some(text), Some(root)) = (docs.texts.get(&uri), root) else {
+        return Ok(None);
+    };
+    let range = handlers::prepare_rename(
+        text,
+        dialect,
+        Path::new(&uri_to_path(&uri)),
+        root,
+        &index.load(),
+        position.position,
+    );
+    tracing::debug!(?uri, renameable = range.is_some(), "prepareRename");
+    Ok(range.map(PrepareRenameResult::Range))
 }
 
 /// Apply a notification to the open-document map.

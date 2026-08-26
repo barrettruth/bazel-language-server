@@ -38,6 +38,18 @@ impl Label {
     pub fn path(&self) -> PathBuf {
         Path::new(&self.package).join(&self.name)
     }
+
+    /// The byte offset of the name within `raw`, the label this was parsed
+    /// from.
+    ///
+    /// Every form [`parse_label`] accepts ends with the name — `//pkg:name`,
+    /// `:name`, a bare `name`, and `//pkg`, which names its own last component
+    /// — so rewriting that tail renames the target and leaves the package and
+    /// the colon exactly as the author wrote them.
+    #[must_use]
+    pub fn name_offset(&self, raw: &str) -> usize {
+        raw.len().saturating_sub(self.name.len())
+    }
 }
 
 /// Normalise a label written in `package` to its absolute form.
@@ -155,6 +167,23 @@ mod tests {
         // relative label to be relative to.
         assert_eq!(key(":srcs", None), None);
         assert_eq!(key("srcs", None), None);
+    }
+
+    /// What a rename rests on: the name is the tail of the label, whichever
+    /// form it was written in.
+    #[test]
+    fn every_label_ends_with_its_name() {
+        for raw in [
+            "//lib:srcs",
+            "@//lib:srcs",
+            "//:srcs",
+            ":srcs",
+            "srcs",
+            "//lib/config",
+        ] {
+            let label = parse_label(raw, Some("app")).expect(raw);
+            assert_eq!(&raw[label.name_offset(raw)..], label.name, "in {raw}");
+        }
     }
 
     #[test]

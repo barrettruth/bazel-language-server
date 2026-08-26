@@ -24,6 +24,7 @@ use starlark_cst::ast::{AstNode, CallExpr, Expr, File, LiteralExpr, Stmt};
 use starlark_cst::{Dialect, SyntaxElement, SyntaxKind, classify, parse};
 
 use crate::label::{Label, parse_label};
+use crate::line_index::utf16_len;
 
 /// Where a target was declared.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,19 +43,28 @@ pub struct Target {
     /// and re-scanning the file for every symbol a picker displays.
     pub line: u32,
     pub character: u32,
+    /// The name's width in UTF-16 code units, so the name has a range and not
+    /// just a start. A name never spans a line.
+    pub length: u32,
 }
 
 /// Where a label was written, somewhere other than its own declaration.
+///
+/// The position is the *name* inside the label rather than the start of it:
+/// `//lib:srcs` points at `srcs`, which is the span a rename replaces and the
+/// span worth highlighting in a list of referrers.
 ///
 /// Ordered by position so a list of these sorts into the order a reader would
 /// read them in, which is also the order that keeps a client's list stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Reference {
     pub file: FileId,
-    /// Zero-based line of the label string's content, and its column in UTF-16
-    /// code units — the same convention as [`Target`].
+    /// Zero-based line of the name within the label string, and its column in
+    /// UTF-16 code units — the same convention as [`Target`].
     pub line: u32,
     pub character: u32,
+    /// The name's width in UTF-16 code units.
+    pub length: u32,
 }
 
 /// Index into [`Index::files`].
@@ -282,6 +292,7 @@ fn collect(
                 None => call.range().start(),
             };
             let (line, character) = lines.position(text, usize::from(anchor));
+            let length = utf16_len(&value);
             targets.insert(
                 label.key(),
                 Target {
@@ -291,6 +302,7 @@ fn collect(
                     offset: u32::from(call.range().start()),
                     line,
                     character,
+                    length,
                 },
             );
         }
@@ -299,11 +311,14 @@ fn collect(
             let Some(label) = parse_label(&raw, Some(package)) else {
                 continue;
             };
-            let (line, character) = lines.position(text, anchor);
+            // The name, not the whole label: a rename rewrites `srcs` and
+            // leaves `//lib:` where the author put it.
+            let (line, character) = lines.position(text, anchor + label.name_offset(&raw));
             references.entry(label.key()).or_default().push(Reference {
                 file,
                 line,
                 character,
+                length: utf16_len(&label.name),
             });
         }
     }
@@ -334,11 +349,77 @@ fn label_strings(call: &CallExpr) -> impl Iterator<Item = (String, usize)> + use
                 usize::from(literal.string_value_range()?.start()),
             ))
         })
+        .flat_map(|(value, start)| {
+            // A whole string may be a label, and a string may also *contain*
+            // labels inside make-variable expansions. Both count: a rename that
+            // rewrites `data = [":beacon"]` and leaves
+            // `args = ["$(rootpath :beacon)"]` alone produces a workspace that
+            // does not build, which is worse than renaming nothing.
+            let expansions: Vec<_> = make_variable_labels(&value)
+                .map(|(label, offset)| (label, start + offset))
+                .collect();
+            std::iter::once((value, start)).chain(expansions)
+        })
+}
+
+/// Labels inside `$(location …)` and its siblings, with their offsets in the
+/// string.
+///
+/// These expansions are the one place Bazel reads a label out of a string that
+/// is not itself a label, so they are the one place a label can hide from a
+/// whole-string parse.
+fn make_variable_labels(text: &str) -> impl Iterator<Item = (String, usize)> + use<'_> {
+    /// Every make variable that takes a label, per the Bazel documentation.
+    const TAKES_A_LABEL: [&str; 8] = [
+        "location",
+        "locations",
+        "rootpath",
+        "rootpaths",
+        "execpath",
+        "execpaths",
+        "rlocationpath",
+        "rlocationpaths",
+    ];
+
+    text.match_indices("$(").filter_map(|(open, _)| {
+        let rest = &text[open + 2..];
+        let close = rest.find(')')?;
+        let inner = &rest[..close];
+        let (function, argument) = inner.split_once(char::is_whitespace)?;
+        if !TAKES_A_LABEL.contains(&function) {
+            return None;
+        }
+        // Bazel tolerates padding around the label; the offset has to follow it.
+        let padding = argument.len() - argument.trim_start().len();
+        let label = argument.trim();
+        (!label.is_empty()).then(|| (label.to_string(), open + 2 + function.len() + 1 + padding))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn labels_hide_inside_make_variables() {
+        let found = |text: &str| make_variable_labels(text).collect::<Vec<_>>();
+
+        let text = "cat $(location :srcs) > $@";
+        assert_eq!(found(text), vec![(":srcs".to_string(), 15)]);
+        assert_eq!(&text[15..15 + 5], ":srcs");
+
+        assert_eq!(
+            found("$(rootpath //app:bin) $(locations :data)"),
+            vec![("//app:bin".to_string(), 11), (":data".to_string(), 34)]
+        );
+        // Padding shifts the offset; the label still has to be sliceable.
+        let padded = "$(location   :srcs )";
+        let (label, offset) = found(padded).pop().expect("a label");
+        assert_eq!(&padded[offset..offset + label.len()], ":srcs");
+
+        // `$(BINDIR)` and friends take no label, and neither does bare `$@`.
+        assert!(found("$(BINDIR)/out $@ $$(cat x)").is_empty());
+    }
 
     #[test]
     fn snapshots_are_stable_across_swaps() {
@@ -355,6 +436,7 @@ mod tests {
                 offset: 0,
                 line: 0,
                 character: 0,
+                length: 4,
             },
         );
         handle.store(next);
@@ -487,9 +569,12 @@ mod tests {
         );
     }
 
-    /// Collect one file's references the way `build_static` does, as
-    /// `label -> [(line, character), ...]` sorted by label.
-    fn refs(text: &str, package: &str) -> Vec<(String, Vec<(u32, u32)>)> {
+    /// One file's references as `label -> [(line, character, length), ...]`.
+    type Refs = Vec<(String, Vec<(u32, u32, u32)>)>;
+
+    /// Collect one file's references the way `build_static` does, sorted by
+    /// label.
+    fn refs(text: &str, package: &str) -> Refs {
         let mut targets = FxHashMap::default();
         let mut references = FxHashMap::default();
         collect(
@@ -505,7 +590,9 @@ mod tests {
             .map(|(label, at)| {
                 (
                     label,
-                    at.iter().map(|r| (r.line, r.character)).collect::<Vec<_>>(),
+                    at.iter()
+                        .map(|r| (r.line, r.character, r.length))
+                        .collect::<Vec<_>>(),
                 )
             })
             .collect();
@@ -523,21 +610,22 @@ mod tests {
             found,
             vec![
                 // Relative, resolved against the enclosing package.
-                ("//app:c".to_string(), vec![(2, 24)]),
+                ("//app:c".to_string(), vec![(2, 25, 1)]),
                 // Absolute, into another package.
-                ("//lib:a".to_string(), vec![(2, 13)]),
+                ("//lib:a".to_string(), vec![(2, 19, 1)]),
             ]
         );
     }
 
-    /// The position must land on the label, not on the quote that precedes it:
-    /// a client that reveals the range would otherwise highlight punctuation.
+    /// The range must cover the name and nothing else: it is what a rename
+    /// replaces, so `//lib:` and the quotes around it have to stay put.
     #[test]
-    fn a_reference_points_at_the_string_content() {
+    fn a_reference_spans_the_name_inside_the_label() {
         let text = "filegroup(name = \"b\", srcs = [\"//lib:a\"])\n";
         let found = refs(text, "app");
-        let at = found[0].1[0].1 as usize;
-        assert_eq!(&text[at..at + 7], "//lib:a");
+        let (_, at, length) = found[0].1[0];
+        let at = at as usize;
+        assert_eq!(&text[at..at + length as usize], "a");
     }
 
     #[test]
@@ -546,7 +634,10 @@ mod tests {
             "filegroup(\n    name = \"b\",\n    srcs = [\":a\"],\n)\n\nalias(\n    name = \"c\",\n    actual = \":a\",\n)\n",
             "lib",
         );
-        assert_eq!(found, vec![("//lib:a".to_string(), vec![(2, 13), (7, 14)])]);
+        assert_eq!(
+            found,
+            vec![("//lib:a".to_string(), vec![(2, 14, 1), (7, 15, 1)])]
+        );
     }
 
     /// A declaration is not a reference to itself. `includeDeclaration` is the
@@ -562,10 +653,23 @@ mod tests {
     #[test]
     fn non_labels_are_not_recorded() {
         let found = refs(
-            "genrule(\n    name = \"g\",\n    srcs = [\"@platforms//os:linux\", \"//lib:all\", \"//lib/...\"],\n    outs = [],\n    cmd = \"cat $(location :srcs) > $@\",\n)\n",
+            "genrule(\n    name = \"g\",\n    srcs = [\"@platforms//os:linux\", \"//lib:all\", \"//lib/...\"],\n    outs = [],\n)\n",
             "lib",
         );
         assert!(found.is_empty(), "got {found:?}");
+    }
+
+    /// A `cmd` is prose, so a whole-string parse rightly refuses it — but the
+    /// label inside `$(location …)` is one Bazel resolves, and a rename that
+    /// skipped it would leave the command pointing at a target that no longer
+    /// exists.
+    #[test]
+    fn a_label_inside_a_command_is_a_reference() {
+        let found = refs(
+            "genrule(\n    name = \"g\",\n    cmd = \"cat $(location :srcs) > $@\",\n)\n",
+            "lib",
+        );
+        assert_eq!(found, vec![("//lib:srcs".to_string(), vec![(2, 27, 4)])]);
     }
 
     /// `select()` keys, `glob()` arguments and dict values are all inside the
@@ -579,8 +683,8 @@ mod tests {
         assert_eq!(
             found,
             vec![
-                ("//app:is_linux".to_string(), vec![(3, 9)]),
-                ("//lib:posix".to_string(), vec![(3, 23)]),
+                ("//app:is_linux".to_string(), vec![(3, 10, 8)]),
+                ("//lib:posix".to_string(), vec![(3, 29, 5)]),
             ]
         );
     }
