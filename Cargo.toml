@@ -14,18 +14,12 @@ repository = "https://github.com/barrettruth/bazel-language-server"
 bls-bazel = { path = "crates/bls-bazel" }
 bls-index = { path = "crates/bls-index" }
 
-# Published from this machine's checkout until starlark-cst is on crates.io.
 starlark-cst = { path = "../starlark-cst" }
 
 anyhow = "1"
 arc-swap = "1"
 clap = { version = "4", features = ["derive"] }
-crossbeam-channel = "0.5"
 lsp-server = "0.10"
-# rust-analyzer's replacement for lsp-types 0.97, which has been stale since
-# 2024-06-04. Generated from the official LSP metaModel. Not a drop-in.
-# `fluent-uri` rather than `url`: 20 crates in the tree instead of 45, because
-# `url` drags in the whole icu + idna chain for URIs we only ever treat as paths.
 lsp-types = { version = "0.11", package = "gen-lsp-types", features = [
   "fluent-uri",
 ] }

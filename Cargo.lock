@@ -90,7 +90,6 @@ dependencies = [
  "bls-bazel",
  "bls-index",
  "clap",
- "crossbeam-channel",
  "gen-lsp-types",
  "lsp-server",
  "serde",

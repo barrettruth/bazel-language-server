@@ -20,7 +20,6 @@ anyhow.workspace = true
 bls-bazel.workspace = true
 bls-index.workspace = true
 clap.workspace = true
-crossbeam-channel.workspace = true
 lsp-server.workspace = true
 lsp-types.workspace = true
 serde.workspace = true
