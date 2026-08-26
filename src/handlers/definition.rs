@@ -11,12 +11,18 @@ use crate::line_index::LineIndex;
 
 /// Where a definition lives, and the position to reveal in it.
 pub(super) struct Site {
-    pub(super) path: PathBuf,
+    path: PathBuf,
     at: Position,
 }
 
+impl Site {
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// The declaring rule call, from the index snapshot.
-fn target_site(index: &crate::index::Index, label: &Label) -> Option<Site> {
+pub(super) fn target_site(index: &crate::index::Index, label: &Label) -> Option<Site> {
     let target = index.target(&label.key())?;
     Some(Site {
         path: index.path(target.file)?.to_path_buf(),

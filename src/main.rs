@@ -23,12 +23,12 @@ use lsp_types::{
     Definition, DefinitionRequest, DefinitionResponse, DidChangeTextDocumentNotification,
     DidChangeTextDocumentParams, DidCloseTextDocumentNotification, DidCloseTextDocumentParams,
     DidOpenTextDocumentNotification, DidOpenTextDocumentParams, DocumentFormattingRequest,
-    DocumentHighlightRequest, DocumentSymbolRequest, FoldingRangeRequest, HoverRequest,
-    InitializeParams, Location, LocationLink, LspNotificationMethod, LspRequestMethod,
-    Notification, PrepareRenameRequest, PrepareRenameResult, PublishDiagnosticsNotification,
-    PublishDiagnosticsParams, ReferencesRequest, RenameOptions, RenameRequest, Request as _,
-    SelectionRangeRequest, ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, TextEdit,
-    Uri, WorkspaceSymbolRequest,
+    DocumentHighlightRequest, DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest,
+    HoverRequest, InitializeParams, Location, LocationLink, LspNotificationMethod,
+    LspRequestMethod, Notification, PrepareRenameRequest, PrepareRenameResult,
+    PublishDiagnosticsNotification, PublishDiagnosticsParams, ReferencesRequest, RenameOptions,
+    RenameRequest, Request as _, SelectionRangeRequest, ServerCapabilities, TextDocumentSync,
+    TextDocumentSyncKind, TextEdit, Uri, WorkspaceSymbolRequest,
 };
 use starlark_cst::{Dialect, FileKind, classify};
 
@@ -150,6 +150,7 @@ fn run_server() -> Result<()> {
         // Advertised whether or not buildifier is installed, the way the rest
         // of the server is advertised without Bazel: a capability withdrawn at
         // startup is one the user cannot get back by installing the tool.
+        document_link_provider: Some(lsp_types::DocumentLinkOptions::default()),
         selection_range_provider: Some(lsp_types::SelectionRangeProvider::Bool(true)),
         folding_range_provider: Some(lsp_types::FoldingRangeProvider::Bool(true)),
         document_formatting_provider: Some(lsp_types::DocumentFormattingProvider::Bool(true)),
@@ -311,6 +312,17 @@ fn respond(
         });
         tracing::debug!(?uri, count = ranges.len(), "selectionRange");
         Response::new_ok(id, ranges)
+    } else if method == DocumentLinkRequest::METHOD {
+        let params: lsp_types::DocumentLinkParams = serde_json::from_value(request.params.clone())?;
+        let uri = params.text_document.uri;
+        let links = match (docs.texts.get(&uri), root) {
+            (Some(text), Some(root)) => {
+                handlers::document_links(text, Path::new(&uri_to_path(&uri)), root, &index.load())
+            }
+            _ => Vec::new(),
+        };
+        tracing::debug!(?uri, count = links.len(), "documentLink");
+        Response::new_ok(id, links)
     } else if method == WorkspaceSymbolRequest::METHOD {
         let params: lsp_types::WorkspaceSymbolParams =
             serde_json::from_value(request.params.clone())?;

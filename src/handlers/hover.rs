@@ -51,7 +51,7 @@ pub fn hover(
             let site = file_site(root, &label)?;
             Some(card(
                 &label.key(),
-                &format!("Starlark file `{}`", relative(root, &site.path)),
+                &format!("Starlark file `{}`", relative(root, site.path())),
             ))
         }
         StringRole::LoadSymbol(_) => None,
@@ -67,7 +67,7 @@ pub fn hover(
                     let site = file_site(root, &label)?;
                     Some(card(
                         &label.key(),
-                        &format!("source file `{}`", relative(root, &site.path)),
+                        &format!("source file `{}`", relative(root, site.path())),
                     ))
                 })
                 .or_else(|| {
