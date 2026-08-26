@@ -19,6 +19,7 @@ mod links;
 mod references;
 mod rename;
 mod selection;
+mod semantic;
 mod symbols;
 
 #[cfg(test)]
@@ -33,4 +34,5 @@ pub use links::document_links;
 pub use references::references;
 pub use rename::{prepare_rename, rename};
 pub use selection::selection_ranges;
+pub use semantic::{LEGEND, semantic_tokens};
 pub use symbols::{document_symbols, workspace_symbols};

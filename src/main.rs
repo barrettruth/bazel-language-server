@@ -27,8 +27,8 @@ use lsp_types::{
     HoverRequest, InitializeParams, Location, LocationLink, LspNotificationMethod,
     LspRequestMethod, Notification, PrepareRenameRequest, PrepareRenameResult,
     PublishDiagnosticsNotification, PublishDiagnosticsParams, ReferencesRequest, RenameOptions,
-    RenameRequest, Request as _, SelectionRangeRequest, ServerCapabilities, TextDocumentSync,
-    TextDocumentSyncKind, TextEdit, Uri, WorkspaceSymbolRequest,
+    RenameRequest, Request as _, SelectionRangeRequest, SemanticTokensRequest, ServerCapabilities,
+    TextDocumentSync, TextDocumentSyncKind, TextEdit, Uri, WorkspaceSymbolRequest,
 };
 use starlark_cst::{Dialect, FileKind, classify};
 
@@ -150,6 +150,19 @@ fn run_server() -> Result<()> {
         // Advertised whether or not buildifier is installed, the way the rest
         // of the server is advertised without Bazel: a capability withdrawn at
         // startup is one the user cannot get back by installing the tool.
+        semantic_tokens_provider: Some(lsp_types::SemanticTokensProvider::SemanticTokensOptions(
+            lsp_types::SemanticTokensOptions {
+                legend: lsp_types::SemanticTokensLegend {
+                    token_types: handlers::LEGEND
+                        .iter()
+                        .map(|name| (*name).to_string())
+                        .collect(),
+                    token_modifiers: Vec::new(),
+                },
+                full: Some(lsp_types::Full::Bool(true)),
+                ..Default::default()
+            },
+        )),
         document_link_provider: Some(lsp_types::DocumentLinkOptions::default()),
         selection_range_provider: Some(lsp_types::SelectionRangeProvider::Bool(true)),
         folding_range_provider: Some(lsp_types::FoldingRangeProvider::Bool(true)),
@@ -314,6 +327,8 @@ fn respond(
         Response::new_ok(id, ranges)
     } else if method == DocumentLinkRequest::METHOD {
         Response::new_ok(id, document_links(request, docs, index, root)?)
+    } else if method == SemanticTokensRequest::METHOD {
+        Response::new_ok(id, semantic_tokens(request, docs)?)
     } else if method == WorkspaceSymbolRequest::METHOD {
         let params: lsp_types::WorkspaceSymbolParams =
             serde_json::from_value(request.params.clone())?;
@@ -406,6 +421,23 @@ fn formatting(request: &lsp_server::Request, docs: &Documents) -> Result<Vec<Tex
     let edits = format::format(text, kind)?;
     tracing::debug!(?uri, ?kind, count = edits.len(), "formatting");
     Ok(edits)
+}
+
+/// The tokens a grammar cannot colour.
+fn semantic_tokens(
+    request: &lsp_server::Request,
+    docs: &Documents,
+) -> Result<lsp_types::SemanticTokens> {
+    let params: lsp_types::SemanticTokensParams = serde_json::from_value(request.params.clone())?;
+    let uri = params.text_document.uri;
+    let (dialect, _) = Documents::classify_uri(&uri);
+    let tokens = docs
+        .texts
+        .get(&uri)
+        .map(|text| handlers::semantic_tokens(text, dialect))
+        .unwrap_or_default();
+    tracing::debug!(?uri, count = tokens.data.len(), "semanticTokens");
+    Ok(tokens)
 }
 
 /// Every label in a document that resolves, as a link.
