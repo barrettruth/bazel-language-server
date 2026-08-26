@@ -4,14 +4,21 @@ Language server for Bazel build files.
 
 ## Installation
 
-### From source
-
-[`starlark-cst`](https://github.com/barrettruth/starlark-cst) is a path
-dependency until it is published, so both repositories are checked out side by
-side:
+### Cargo
 
 ```sh
-git clone https://github.com/barrettruth/starlark-cst.git
+cargo install bazel-language-server
+```
+
+### Nix
+
+```sh
+nix run github:barrettruth/bazel-language-server
+```
+
+### From source
+
+```sh
 git clone https://github.com/barrettruth/bazel-language-server.git
 cd bazel-language-server
 cargo install --path .
