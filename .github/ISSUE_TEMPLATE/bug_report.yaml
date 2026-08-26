@@ -1,0 +1,67 @@
+name: Bug Report
+description: Report a bug in bazel-language-server
+labels: [bug]
+body:
+  - type: checkboxes
+    attributes:
+      label: Prerequisites
+      options:
+        - label: I have searched existing issues and this is not a duplicate
+          required: true
+        - label: I have updated to the latest version of bazel-language-server
+          required: true
+
+  - type: input
+    attributes:
+      label: Version
+      description: Output of `bazel-language-server --version`
+      placeholder: 'bazel-language-server 0.1.0'
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Bazel Version
+      description: Output of `bazel --version`, or "not installed"
+      placeholder: 'bazel 9.2.0'
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Operating System
+      placeholder: 'macOS 15.0 / Ubuntu 24.04'
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: LSP Client
+      description: Editor and LSP client plugin used
+      placeholder: 'Neovim 0.12 + nvim-lspconfig / Helix 24.07'
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Description
+      description: What happened, and what did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Steps to Reproduce
+      placeholder: |
+        1. Open a BUILD file containing ...
+        2. Trigger ... action
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Minimal Reproduction
+      description:
+        Minimal workspace or BUILD file that reproduces the issue
+      render: python
