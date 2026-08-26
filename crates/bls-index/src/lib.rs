@@ -23,7 +23,7 @@ use rustc_hash::FxHashMap;
 use starlark_cst::ast::{AstNode, CallExpr, Expr, File, LiteralExpr, Stmt};
 use starlark_cst::{Dialect, SyntaxElement, SyntaxKind, classify, parse};
 
-use crate::label::{Label, parse_label};
+use crate::label::{Label, make_variable_labels, parse_label};
 use crate::line_index::utf16_len;
 
 /// Where a target was declared.
@@ -360,40 +360,6 @@ fn label_strings(call: &CallExpr) -> impl Iterator<Item = (String, usize)> + use
                 .collect();
             std::iter::once((value, start)).chain(expansions)
         })
-}
-
-/// Labels inside `$(location …)` and its siblings, with their offsets in the
-/// string.
-///
-/// These expansions are the one place Bazel reads a label out of a string that
-/// is not itself a label, so they are the one place a label can hide from a
-/// whole-string parse.
-fn make_variable_labels(text: &str) -> impl Iterator<Item = (String, usize)> + use<'_> {
-    /// Every make variable that takes a label, per the Bazel documentation.
-    const TAKES_A_LABEL: [&str; 8] = [
-        "location",
-        "locations",
-        "rootpath",
-        "rootpaths",
-        "execpath",
-        "execpaths",
-        "rlocationpath",
-        "rlocationpaths",
-    ];
-
-    text.match_indices("$(").filter_map(|(open, _)| {
-        let rest = &text[open + 2..];
-        let close = rest.find(')')?;
-        let inner = &rest[..close];
-        let (function, argument) = inner.split_once(char::is_whitespace)?;
-        if !TAKES_A_LABEL.contains(&function) {
-            return None;
-        }
-        // Bazel tolerates padding around the label; the offset has to follow it.
-        let padding = argument.len() - argument.trim_start().len();
-        let label = argument.trim();
-        (!label.is_empty()).then(|| (label.to_string(), open + 2 + function.len() + 1 + padding))
-    })
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
-use bls_index::label::{Label, parse_label};
+use bls_index::label::{Label, make_variable_labels, parse_label};
 use lsp_types::{
     BaseSymbolInformation, Diagnostic, DiagnosticSeverity, DocumentHighlight,
     DocumentHighlightKind, DocumentSymbol, Hover, Location, LocationLink, MarkupContent,
@@ -293,9 +293,35 @@ fn string_at(root: &SyntaxNode, offset: u32, kind: FileKind) -> Option<StringAt>
     let range = u32::from(range.start())..u32::from(range.end());
     // The content range excludes the quotes, so a cursor on one is not on the
     // label. Its far end counts: that is where the caret sits after typing.
-    (range.start..=range.end)
-        .contains(&offset)
-        .then_some(StringAt { value, range, role })
+    if !(range.start..=range.end).contains(&offset) {
+        return None;
+    }
+
+    // A `cmd` is not a label, but `$(location :srcs)` inside it holds one, and
+    // that is what the cursor is on. The index already reads these, so without
+    // this the same label is findable by references and not by navigation.
+    if let Some(inner) = expansion_at(&value, range.start, offset) {
+        return Some(inner);
+    }
+
+    Some(StringAt { value, range, role })
+}
+
+/// The label of a make-variable expansion under the cursor, in file coordinates.
+///
+/// `content` is where the string's content begins, and `string_value` returns
+/// the raw slice rather than an unescaped copy, so an offset within the value
+/// is that offset within the file.
+fn expansion_at(value: &str, content: u32, offset: u32) -> Option<StringAt> {
+    make_variable_labels(value).find_map(|(label, at)| {
+        let start = content + u32::try_from(at).ok()?;
+        let end = start + u32::try_from(label.len()).ok()?;
+        (start..=end).contains(&offset).then_some(StringAt {
+            value: label,
+            range: start..end,
+            role: StringRole::Label,
+        })
+    })
 }
 
 /// Whether a string is the `name` of a rule call at the top level of the file.
@@ -1418,6 +1444,41 @@ alias(
         // The torture root has a MODULE.bazel and no BUILD file, so it is not
         // a package at all.
         assert_eq!(enclosing_package(&root, &root.join("MODULE.bazel")), None);
+    }
+
+    /// The index reads labels out of `$(location …)`, so navigation has to as
+    /// well: a label that find-references reports and go-to-definition shrugs at
+    /// looks like the definition is missing rather than the reader.
+    #[test]
+    fn a_label_inside_a_command_is_navigable() {
+        let fixture = Fixture::torture();
+        let file = fixture.root.join("lib/BUILD.bazel");
+        let text = std::fs::read_to_string(&file).expect("fixture");
+        let lines = LineIndex::new(&text);
+        let cmd = text.find("$(location :srcs)").expect("the genrule cmd");
+
+        let on = |offset: usize| {
+            definition(
+                &text,
+                &file,
+                &fixture.root,
+                &fixture.index,
+                lines.position(&text, offset),
+            )
+        };
+
+        // Inside the label, navigation resolves it.
+        let jumps = on(cmd + "$(location :".len() + 1);
+        assert_eq!(jumps.len(), 1, "got {jumps:?}");
+        let origin = jumps[0].origin_selection_range.expect("an origin range");
+        assert_eq!(
+            &text[lines.offset(&text, origin.start)..lines.offset(&text, origin.end)],
+            ":srcs",
+            "the origin covers the label alone, not the command around it"
+        );
+
+        // On the prose around it, there is no label and nothing to offer.
+        assert!(on(cmd.saturating_sub(2)).is_empty());
     }
 
     /// `module(name = "x")` is a top-level call with a `name`, and so is every
