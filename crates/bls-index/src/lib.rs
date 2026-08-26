@@ -227,6 +227,53 @@ mod tests {
         assert_eq!(handle.load().len(), 1);
     }
 
+    /// The `bazel-<workspace>` convenience symlink points at the execroot,
+    /// whose symlink forest re-enters the source tree. Following it finds
+    /// 94,118 BUILD files in a tree that has 74,001, and neither walkdir's
+    /// ancestor-loop detection nor rust-analyzer's `path_might_be_cyclic`
+    /// notices — rust-analyzer walks Bazel workspaces twice.
+    #[test]
+    fn bazel_symlinks_are_not_followed() {
+        let root = std::env::temp_dir().join("bls-symlink-test");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("MODULE.bazel"), "module(name='t')\n").unwrap();
+        std::fs::write(
+            root.join("lib/BUILD.bazel"),
+            "filegroup(name = \"srcs\", srcs = [])\n",
+        )
+        .unwrap();
+
+        // The execroot link: points back at the tree it lives in. Caught by
+        // `follow_links(false)`.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, root.join("bazel-t")).unwrap();
+
+        // A real `bazel-out` directory holding generated BUILD files. Nothing
+        // about symlinks helps here; only the `bazel-*` prune keeps these out,
+        // and indexing them would invent targets that are not in the source.
+        std::fs::create_dir_all(root.join("bazel-out/k8-fastbuild/gen")).unwrap();
+        std::fs::write(
+            root.join("bazel-out/k8-fastbuild/gen/BUILD.bazel"),
+            "filegroup(name = \"generated\", srcs = [])\n",
+        )
+        .unwrap();
+
+        let index = build_static(&root);
+        assert_eq!(index.len(), 1, "each target must appear exactly once");
+        assert!(index.target("//lib:srcs").is_some());
+        assert!(
+            index
+                .targets
+                .keys()
+                .all(|label| !label.contains("bazel-out")),
+            "generated output must not be indexed: {:?}",
+            index.targets.keys().collect::<Vec<_>>()
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn package_labels() {
         let root = Path::new("/ws");
