@@ -16,14 +16,15 @@ use std::path::{Path, PathBuf};
 
 use crate::bazel::{BazelClient, BazelConfig};
 use crate::index::IndexHandle;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use lsp_server::{Connection, Message, Response};
 use lsp_types::{
-    Definition, DefinitionRequest, DefinitionResponse, DidChangeTextDocumentNotification,
-    DidChangeTextDocumentParams, DidCloseTextDocumentNotification, DidCloseTextDocumentParams,
-    DidOpenTextDocumentNotification, DidOpenTextDocumentParams, DocumentFormattingRequest,
-    DocumentHighlightRequest, DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest,
+    CodeLensRequest, Definition, DefinitionRequest, DefinitionResponse,
+    DidChangeTextDocumentNotification, DidChangeTextDocumentParams,
+    DidCloseTextDocumentNotification, DidCloseTextDocumentParams, DidOpenTextDocumentNotification,
+    DidOpenTextDocumentParams, DocumentFormattingRequest, DocumentHighlightRequest,
+    DocumentLinkRequest, DocumentSymbolRequest, ExecuteCommandRequest, FoldingRangeRequest,
     HoverRequest, ImplementationRequest, InitializeParams, Location, LocationLink,
     LspNotificationMethod, LspRequestMethod, Notification, PrepareRenameRequest,
     PrepareRenameResult, PublishDiagnosticsNotification, PublishDiagnosticsParams,
@@ -151,6 +152,11 @@ fn run_server() -> Result<()> {
         // Advertised whether or not buildifier is installed, the way the rest
         // of the server is advertised without Bazel: a capability withdrawn at
         // startup is one the user cannot get back by installing the tool.
+        code_lens_provider: Some(lsp_types::CodeLensOptions::default()),
+        execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
+            commands: vec![handlers::RUN_COMMAND.to_string()],
+            ..Default::default()
+        }),
         implementation_provider: Some(lsp_types::ImplementationProvider::Bool(true)),
         semantic_tokens_provider: Some(lsp_types::SemanticTokensProvider::SemanticTokensOptions(
             lsp_types::SemanticTokensOptions {
@@ -308,31 +314,19 @@ fn respond(
     } else if method == PrepareRenameRequest::METHOD {
         Response::new_ok(id, prepare_rename(request, docs, index, root)?)
     } else if method == FoldingRangeRequest::METHOD {
-        let params: lsp_types::FoldingRangeParams = serde_json::from_value(request.params.clone())?;
-        let uri = params.text_document.uri;
-        let (dialect, _) = Documents::classify_uri(&uri);
-        let ranges = docs
-            .texts
-            .get(&uri)
-            .map_or_else(Vec::new, |text| handlers::folding_ranges(text, dialect));
-        tracing::debug!(?uri, count = ranges.len(), "foldingRange");
-        Response::new_ok(id, ranges)
+        Response::new_ok(id, folding_ranges(request, docs)?)
     } else if method == SelectionRangeRequest::METHOD {
-        let params: lsp_types::SelectionRangeParams =
-            serde_json::from_value(request.params.clone())?;
-        let uri = params.text_document.uri;
-        let (dialect, _) = Documents::classify_uri(&uri);
-        let ranges = docs.texts.get(&uri).map_or_else(Vec::new, |text| {
-            handlers::selection_ranges(text, dialect, &params.positions)
-        });
-        tracing::debug!(?uri, count = ranges.len(), "selectionRange");
-        Response::new_ok(id, ranges)
+        Response::new_ok(id, selection_ranges(request, docs)?)
     } else if method == DocumentLinkRequest::METHOD {
         Response::new_ok(id, document_links(request, docs, index, root)?)
     } else if method == SemanticTokensRequest::METHOD {
         Response::new_ok(id, semantic_tokens(request, docs)?)
     } else if method == ImplementationRequest::METHOD {
         Response::new_ok(id, implementation(request, docs, root)?)
+    } else if method == CodeLensRequest::METHOD {
+        Response::new_ok(id, code_lenses(request, docs, root)?)
+    } else if method == ExecuteCommandRequest::METHOD {
+        Response::new_ok(id, execute_command(request, root)?)
     } else if method == WorkspaceSymbolRequest::METHOD {
         let params: lsp_types::WorkspaceSymbolParams =
             serde_json::from_value(request.params.clone())?;
@@ -425,6 +419,99 @@ fn formatting(request: &lsp_server::Request, docs: &Documents) -> Result<Vec<Tex
     let edits = format::format(text, kind)?;
     tracing::debug!(?uri, ?kind, count = edits.len(), "formatting");
     Ok(edits)
+}
+
+/// What a reader can collapse.
+fn folding_ranges(
+    request: &lsp_server::Request,
+    docs: &Documents,
+) -> Result<Vec<lsp_types::FoldingRange>> {
+    let params: lsp_types::FoldingRangeParams = serde_json::from_value(request.params.clone())?;
+    let uri = params.text_document.uri;
+    let (dialect, _) = Documents::classify_uri(&uri);
+    let ranges = docs
+        .texts
+        .get(&uri)
+        .map_or_else(Vec::new, |text| handlers::folding_ranges(text, dialect));
+    tracing::debug!(?uri, count = ranges.len(), "foldingRange");
+    Ok(ranges)
+}
+
+/// The syntax around each requested position.
+fn selection_ranges(
+    request: &lsp_server::Request,
+    docs: &Documents,
+) -> Result<Vec<lsp_types::SelectionRange>> {
+    let params: lsp_types::SelectionRangeParams = serde_json::from_value(request.params.clone())?;
+    let uri = params.text_document.uri;
+    let (dialect, _) = Documents::classify_uri(&uri);
+    let ranges = docs.texts.get(&uri).map_or_else(Vec::new, |text| {
+        handlers::selection_ranges(text, dialect, &params.positions)
+    });
+    tracing::debug!(?uri, count = ranges.len(), "selectionRange");
+    Ok(ranges)
+}
+
+/// The Bazel commands each target line affords.
+fn code_lenses(
+    request: &lsp_server::Request,
+    docs: &Documents,
+    root: Option<&Path>,
+) -> Result<Vec<lsp_types::CodeLens>> {
+    let params: lsp_types::CodeLensParams = serde_json::from_value(request.params.clone())?;
+    let uri = params.text_document.uri;
+    let lenses = match (docs.texts.get(&uri), root) {
+        (Some(text), Some(root)) => {
+            handlers::code_lenses(text, Path::new(&uri_to_path(&uri)), root)
+        }
+        _ => Vec::new(),
+    };
+    tracing::debug!(?uri, count = lenses.len(), "codeLens");
+    Ok(lenses)
+}
+
+/// Run the Bazel invocation a lens offered.
+///
+/// This is the one place the server starts Bazel, and it is not a request
+/// handler answering about a buffer: the user clicked "test //x", so the
+/// invocation *is* the answer. It is detached rather than awaited, because a
+/// build takes minutes and the request loop serves every other document.
+///
+/// Nothing is reported back beyond that it started. LSP has no channel for a
+/// subprocess's output, and inventing one here would be a worse terminal than
+/// the one the user already has.
+fn execute_command(
+    request: &lsp_server::Request,
+    root: Option<&Path>,
+) -> Result<Option<serde_json::Value>> {
+    let params: lsp_types::ExecuteCommandParams = serde_json::from_value(request.params.clone())?;
+    if params.command != handlers::RUN_COMMAND {
+        anyhow::bail!("unknown command: {}", params.command);
+    }
+    let arguments: Vec<String> = params
+        .arguments
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str().map(ToString::to_string))
+        .collect();
+    let [verb, label] = arguments.as_slice() else {
+        anyhow::bail!("expected a verb and a label, got {arguments:?}");
+    };
+    let Some(root) = root else {
+        anyhow::bail!("no workspace to run in");
+    };
+
+    tracing::info!(%verb, %label, "bazel");
+    std::process::Command::new("bazel")
+        .arg(verb)
+        .arg(label)
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("running `bazel {verb} {label}`"))?;
+    Ok(None)
 }
 
 /// The function behind the rule under the cursor.

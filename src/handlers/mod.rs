@@ -16,12 +16,13 @@ mod folding;
 mod highlight;
 mod hover;
 mod implementation;
+mod lens;
 mod links;
 mod references;
 mod rename;
 mod selection;
 mod semantic;
-mod symbols;
+pub(super) mod symbols;
 
 #[cfg(test)]
 mod fixture;
@@ -32,6 +33,7 @@ pub use folding::folding_ranges;
 pub use highlight::document_highlight;
 pub use hover::hover;
 pub use implementation::implementation;
+pub use lens::{RUN_COMMAND, code_lenses};
 pub use links::document_links;
 pub use references::references;
 pub use rename::{prepare_rename, rename};
