@@ -12,16 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: bazel-language-server
-      - uses: actions/checkout@v7
-        with:
-          repository: barrettruth/starlark-cst
-          token: ${{ secrets.STARLARK_CST_TOKEN }}
-          path: starlark-cst
       - uses: DeterminateSystems/nix-installer-action@v22
       - name: Format
-        working-directory: bazel-language-server
         run: nix develop .#ci --command just format
 
   lint:
@@ -29,16 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: bazel-language-server
-      - uses: actions/checkout@v7
-        with:
-          repository: barrettruth/starlark-cst
-          token: ${{ secrets.STARLARK_CST_TOKEN }}
-          path: starlark-cst
       - uses: DeterminateSystems/nix-installer-action@v22
       - name: Lint
-        working-directory: bazel-language-server
         run: nix develop .#ci --command just lint
 
   test:
@@ -46,14 +30,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: bazel-language-server
-      - uses: actions/checkout@v7
-        with:
-          repository: barrettruth/starlark-cst
-          token: ${{ secrets.STARLARK_CST_TOKEN }}
-          path: starlark-cst
       - uses: DeterminateSystems/nix-installer-action@v22
       - name: Test
-        working-directory: bazel-language-server
         run: nix develop .#ci --command just test
