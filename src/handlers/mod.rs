@@ -17,6 +17,7 @@ mod highlight;
 mod hover;
 mod references;
 mod rename;
+mod selection;
 mod symbols;
 
 #[cfg(test)]
@@ -29,4 +30,5 @@ pub use highlight::document_highlight;
 pub use hover::hover;
 pub use references::references;
 pub use rename::{prepare_rename, rename};
+pub use selection::selection_ranges;
 pub use symbols::{document_symbols, workspace_symbols};
