@@ -15,24 +15,23 @@
         pkgs = import nixpkgs { inherit system overlays; };
         toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         commonBuildInputs = [
-          # bazel_8 is offline; bazelisk fetches whatever .bazelversion asks for.
           pkgs.bazel_8
           pkgs.bazelisk
           pkgs.bazel-buildtools
-          pkgs.gh
-          pkgs.jq
+          pkgs.biome
           pkgs.just
-          pkgs.protobuf
-          pkgs.shellcheck
-          pkgs.shfmt
+          pkgs.nodejs_22
+          pkgs.openssh
+          pkgs.pnpm
+          pkgs.rsync
         ];
       in
       {
-        # No `packages.default` yet: starlark-cst is a path dependency pointing
-        # outside this tree, which a nix build cannot see. Restore this once
-        # starlark-cst is on crates.io and the path dep becomes a version.
-
         devShells.default = pkgs.mkShell {
+          buildInputs = [ toolchain ] ++ commonBuildInputs;
+        };
+
+        devShells.ci = pkgs.mkShell {
           buildInputs = [ toolchain ] ++ commonBuildInputs;
         };
       }
