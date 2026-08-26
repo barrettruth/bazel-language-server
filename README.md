@@ -14,7 +14,7 @@ side:
 git clone https://github.com/barrettruth/starlark-cst.git
 git clone https://github.com/barrettruth/bazel-language-server.git
 cd bazel-language-server
-cargo install --path crates/bazel-language-server
+cargo install --path .
 ```
 
 ## Usage
