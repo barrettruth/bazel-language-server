@@ -13,8 +13,16 @@ cargo install bazel-language-server
 
 ## Nix
 
+Run directly:
+
 ```sh
 nix run github:barrettruth/bazel-language-server
+```
+
+Or add to your flake inputs:
+
+```nix
+inputs.vimdoc-ls.url = "github:barrettruth/bazel-language-server";
 ```
 
 ## From source
@@ -41,10 +49,6 @@ vim.lsp.config('bazel_ls', {
 
 vim.lsp.enable('bazel_ls')
 ```
-
-The workspace root is taken from `workspaceFolders`, falling back to `rootUri`,
-`rootPath`, and then the working directory. Whichever one answered is logged at
-startup on stderr.
 
 ## Bazel
 
