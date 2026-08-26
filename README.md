@@ -26,9 +26,10 @@ and all four need the graph.
 | `textDocument/definition` | working, main repo only |
 | `textDocument/references` | working, main repo only |
 | `textDocument/documentHighlight` | working, current file only |
+| `textDocument/hover` | working, resolved labels and `load()` paths |
 | `textDocument/rename` | working, main repo only |
 | `textDocument/formatting` | working where `buildifier` is installed |
-| completion, hover | not yet |
+| completion, rule documentation | not yet |
 
 The server runs with no Bazel installed, and stays useful when it does: the
 static tier is parsed from BUILD files directly. Targets declared by legacy

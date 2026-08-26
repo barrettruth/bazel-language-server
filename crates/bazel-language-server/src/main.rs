@@ -20,8 +20,8 @@ use lsp_types::{
     Definition, DefinitionRequest, DefinitionResponse, DidChangeTextDocumentNotification,
     DidChangeTextDocumentParams, DidCloseTextDocumentNotification, DidCloseTextDocumentParams,
     DidOpenTextDocumentNotification, DidOpenTextDocumentParams, DocumentFormattingRequest,
-    DocumentHighlightRequest, DocumentSymbolRequest, InitializeParams, Location, LocationLink,
-    LspNotificationMethod, LspRequestMethod, Notification, PrepareRenameRequest,
+    DocumentHighlightRequest, DocumentSymbolRequest, HoverRequest, InitializeParams, Location,
+    LocationLink, LspNotificationMethod, LspRequestMethod, Notification, PrepareRenameRequest,
     PrepareRenameResult, PublishDiagnosticsNotification, PublishDiagnosticsParams,
     ReferencesRequest, RenameOptions, RenameRequest, Request as _, ServerCapabilities,
     TextDocumentSync, TextDocumentSyncKind, TextEdit, Uri, WorkspaceSymbolRequest,
@@ -142,6 +142,7 @@ fn run_server() -> Result<()> {
         definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
         references_provider: Some(lsp_types::ReferencesProvider::Bool(true)),
         document_highlight_provider: Some(lsp_types::DocumentHighlightProvider::Bool(true)),
+        hover_provider: Some(lsp_types::HoverProvider::Bool(true)),
         // Advertised whether or not buildifier is installed, the way the rest
         // of the server is advertised without Bazel: a capability withdrawn at
         // startup is one the user cannot get back by installing the tool.
@@ -245,11 +246,9 @@ fn respond(
         let params: lsp_types::DefinitionParams = serde_json::from_value(request.params.clone())?;
         let position = params.text_document_position_params;
         let uri = position.text_document.uri;
-        let (dialect, _) = Documents::classify_uri(&uri);
         let links = match (docs.texts.get(&uri), root) {
             (Some(text), Some(root)) => handlers::definition(
                 text,
-                dialect,
                 Path::new(&uri_to_path(&uri)),
                 root,
                 &index.load(),
@@ -263,11 +262,9 @@ fn respond(
         let params: lsp_types::ReferenceParams = serde_json::from_value(request.params.clone())?;
         let position = params.text_document_position_params;
         let uri = position.text_document.uri;
-        let (dialect, _) = Documents::classify_uri(&uri);
         let locations = match (docs.texts.get(&uri), root) {
             (Some(text), Some(root)) => handlers::references(
                 text,
-                dialect,
                 Path::new(&uri_to_path(&uri)),
                 root,
                 &index.load(),
@@ -280,6 +277,8 @@ fn respond(
         Response::new_ok(id, locations)
     } else if method == DocumentHighlightRequest::METHOD {
         Response::new_ok(id, document_highlight(request, docs, index, root)?)
+    } else if method == HoverRequest::METHOD {
+        Response::new_ok(id, hover(request, docs, index, root)?)
     } else if method == DocumentFormattingRequest::METHOD {
         Response::new_ok(id, formatting(request, docs)?)
     } else if method == RenameRequest::METHOD {
@@ -317,13 +316,11 @@ fn document_highlight(
         serde_json::from_value(request.params.clone())?;
     let position = params.text_document_position_params;
     let uri = position.text_document.uri;
-    let (dialect, _) = Documents::classify_uri(&uri);
     let (Some(text), Some(root)) = (docs.texts.get(&uri), root) else {
         return Ok(Vec::new());
     };
     let highlights = handlers::document_highlight(
         text,
-        dialect,
         Path::new(&uri_to_path(&uri)),
         root,
         &index.load(),
@@ -331,6 +328,33 @@ fn document_highlight(
     );
     tracing::debug!(?uri, count = highlights.len(), "documentHighlight");
     Ok(highlights)
+}
+
+/// What the label under the cursor names, as a card.
+///
+/// Nothing to say is `null` rather than an empty card: a client renders the
+/// latter as a blank popup that the user has to dismiss.
+fn hover(
+    request: &lsp_server::Request,
+    docs: &Documents,
+    index: &IndexHandle,
+    root: Option<&Path>,
+) -> Result<Option<lsp_types::Hover>> {
+    let params: lsp_types::HoverParams = serde_json::from_value(request.params.clone())?;
+    let position = params.text_document_position_params;
+    let uri = position.text_document.uri;
+    let (Some(text), Some(root)) = (docs.texts.get(&uri), root) else {
+        return Ok(None);
+    };
+    let card = handlers::hover(
+        text,
+        Path::new(&uri_to_path(&uri)),
+        root,
+        &index.load(),
+        position.position,
+    );
+    tracing::debug!(?uri, answered = card.is_some(), "hover");
+    Ok(card)
 }
 
 /// buildifier's opinion of the open buffer, as one whole-document edit.
@@ -370,13 +394,11 @@ fn rename(
     let params: lsp_types::RenameParams = serde_json::from_value(request.params.clone())?;
     let position = params.text_document_position_params;
     let uri = position.text_document.uri;
-    let (dialect, _) = Documents::classify_uri(&uri);
     let (Some(text), Some(root)) = (docs.texts.get(&uri), root) else {
         return Ok(None);
     };
     let edit = handlers::rename(
         text,
-        dialect,
         Path::new(&uri_to_path(&uri)),
         root,
         &index.load(),
@@ -398,13 +420,11 @@ fn prepare_rename(
     let params: lsp_types::PrepareRenameParams = serde_json::from_value(request.params.clone())?;
     let position = params.text_document_position_params;
     let uri = position.text_document.uri;
-    let (dialect, _) = Documents::classify_uri(&uri);
     let (Some(text), Some(root)) = (docs.texts.get(&uri), root) else {
         return Ok(None);
     };
     let range = handlers::prepare_rename(
         text,
-        dialect,
         Path::new(&uri_to_path(&uri)),
         root,
         &index.load(),
