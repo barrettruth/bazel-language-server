@@ -4,8 +4,9 @@ Language server for Bazel build files — `BUILD`, `*.bzl`, `MODULE.bazel`,
 `WORKSPACE`, `*.scl`, `.bazelrc`.
 
 > [!WARNING]
-> Early scaffold. `documentSymbol`, `workspace/symbol` and syntax diagnostics
-> work; the Bazel-backed half does not exist yet. See `ROADMAP.md`.
+> Early scaffold. `documentSymbol`, `workspace/symbol`, goto-definition and
+> syntax diagnostics work; the Bazel-backed half does not exist yet. See
+> `ROADMAP.md`.
 
 ## Why
 
@@ -22,7 +23,7 @@ and all four need the graph.
 | syntax diagnostics | working |
 | `textDocument/documentSymbol` | working |
 | `workspace/symbol` | working, static tier only |
-| goto-definition | not yet |
+| `textDocument/definition` | working, main repo only |
 | completion, hover | not yet |
 | find-references, rename | not yet |
 
