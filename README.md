@@ -24,8 +24,9 @@ and all four need the graph.
 | `textDocument/documentSymbol` | working |
 | `workspace/symbol` | working, static tier only |
 | `textDocument/definition` | working, main repo only |
+| `textDocument/references` | working, main repo only |
 | completion, hover | not yet |
-| find-references, rename | not yet |
+| rename | not yet |
 
 The server runs with no Bazel installed, and stays useful when it does: the
 static tier is parsed from BUILD files directly. Targets declared by legacy

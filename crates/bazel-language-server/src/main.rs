@@ -20,8 +20,9 @@ use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentNotification, DidCloseTextDocumentParams,
     DidOpenTextDocumentNotification, DidOpenTextDocumentParams, DocumentSymbolRequest,
     InitializeParams, Location, LocationLink, LspNotificationMethod, LspRequestMethod,
-    Notification, PublishDiagnosticsNotification, PublishDiagnosticsParams, Request as _,
-    ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, Uri, WorkspaceSymbolRequest,
+    Notification, PublishDiagnosticsNotification, PublishDiagnosticsParams, ReferencesRequest,
+    Request as _, ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, Uri,
+    WorkspaceSymbolRequest,
 };
 use starlark_cst::{Dialect, FileKind, classify};
 
@@ -137,6 +138,7 @@ fn run_server() -> Result<()> {
         document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
         workspace_symbol_provider: Some(lsp_types::WorkspaceSymbolProvider::Bool(true)),
         definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
+        references_provider: Some(lsp_types::ReferencesProvider::Bool(true)),
         ..Default::default()
     };
     // `Connection::initialize` wraps its argument in `{"capabilities": …}`, so
@@ -230,6 +232,25 @@ fn respond(
         };
         tracing::debug!(?uri, count = links.len(), "definition");
         Response::new_ok(id, definition_response(links, link_support))
+    } else if method == ReferencesRequest::METHOD {
+        let params: lsp_types::ReferenceParams = serde_json::from_value(request.params.clone())?;
+        let position = params.text_document_position_params;
+        let uri = position.text_document.uri;
+        let (dialect, _) = Documents::classify_uri(&uri);
+        let locations = match (docs.texts.get(&uri), root) {
+            (Some(text), Some(root)) => handlers::references(
+                text,
+                dialect,
+                Path::new(&uri_to_path(&uri)),
+                root,
+                &index.load(),
+                position.position,
+                params.context.include_declaration,
+            ),
+            _ => Vec::new(),
+        };
+        tracing::debug!(?uri, count = locations.len(), "references");
+        Response::new_ok(id, locations)
     } else if method == WorkspaceSymbolRequest::METHOD {
         let params: lsp_types::WorkspaceSymbolParams =
             serde_json::from_value(request.params.clone())?;

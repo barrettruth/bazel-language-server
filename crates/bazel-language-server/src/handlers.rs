@@ -7,11 +7,12 @@
 
 use std::path::{Path, PathBuf};
 
+use bls_index::label::{Label, parse_label};
 use lsp_types::{
     BaseSymbolInformation, Diagnostic, DiagnosticSeverity, DocumentSymbol, Location, LocationLink,
     Position, Range, SymbolKind, Uri, WorkspaceSymbol,
 };
-use starlark_cst::ast::{AstNode, Expr, File, LiteralExpr, LoadItem, LoadStmt, Stmt};
+use starlark_cst::ast::{Arg, AstNode, Expr, File, LiteralExpr, LoadItem, LoadStmt, Stmt};
 use starlark_cst::{Dialect, FileKind, SyntaxElement, SyntaxKind, SyntaxNode, parse};
 
 use crate::line_index::LineIndex;
@@ -192,6 +193,11 @@ enum StringRole {
     /// this jumps to the file that defines it instead. Landing in the right
     /// file is most of the value and none of the risk.
     LoadSymbol(String),
+    /// The `name` of a top-level rule call: the target being declared rather
+    /// than a label pointing at one. `name = "srcs"` in `//lib` is `//lib:srcs`
+    /// and nothing else, where a label of the same text would first have to be
+    /// resolved against the package that wrote it.
+    TargetName,
     /// Anything else. In a build file that means a label.
     Label,
 }
@@ -236,11 +242,12 @@ fn string_at(root: &SyntaxNode, offset: u32) -> Option<StringAt> {
         (item.value()?, item.value_range()?, role)
     } else {
         let literal = LiteralExpr::cast(parent)?;
-        (
-            literal.string_value()?,
-            literal.string_value_range()?,
-            StringRole::Label,
-        )
+        let role = if declares_a_target(&literal) {
+            StringRole::TargetName
+        } else {
+            StringRole::Label
+        };
+        (literal.string_value()?, literal.string_value_range()?, role)
     };
 
     let range = u32::from(range.start())..u32::from(range.end());
@@ -251,93 +258,27 @@ fn string_at(root: &SyntaxNode, offset: u32) -> Option<StringAt> {
         .then_some(StringAt { value, range, role })
 }
 
-/// A label resolved against the package that names it.
-#[derive(Debug)]
-struct Label {
-    /// Workspace-relative package directory. Empty for the root package.
-    package: String,
-    /// The target name. For a source file this is a package-relative path,
-    /// which is why it may contain slashes.
-    name: String,
-}
-
-impl Label {
-    /// The index key: `//pkg:name`, and `//:name` at the root.
-    fn key(&self) -> String {
-        format!("//{}:{}", self.package, self.name)
-    }
-
-    /// Where a source file of this name would sit, relative to the workspace.
-    fn path(&self) -> PathBuf {
-        Path::new(&self.package).join(&self.name)
-    }
-}
-
-/// Normalise a label written in `package` to its absolute form.
+/// Whether a string is the `name` of a rule call at the top level of the file.
 ///
-/// Handled: `//pkg:target`, `//:target`, `//pkg` (shorthand for
-/// `//pkg:<last component>`), `:target`, and a bare `target`. `@//pkg:target`
-/// and `@@//pkg:target` name the main repository explicitly and are the same
-/// thing.
-///
-/// Refused, because a guess here is worse than nothing: any other `@repo//` or
-/// `@@canonical//` label, which needs the repo mapping only Bazel can produce,
-/// and every target *pattern* — `...`, `//pkg:all`, `//pkg:*` — which names a
-/// set rather than a target.
-fn parse_label(raw: &str, package: Option<&str>) -> Option<Label> {
-    let raw = if let Some(rest) = raw.strip_prefix("@@").or_else(|| raw.strip_prefix('@')) {
-        if !rest.starts_with("//") {
-            tracing::debug!(
-                label = raw,
-                "external repository: the apparent name maps to a canonical one only Bazel knows, \
-                 and the repo may not be fetched at all"
-            );
-            return None;
-        }
-        rest
-    } else {
-        raw
+/// Only the top level declares targets: `name = "x"` inside a `select()` or a
+/// nested call is an argument that happens to be called `name`, and treating it
+/// as a declaration would attribute every reference to the wrong label.
+fn declares_a_target(literal: &LiteralExpr) -> bool {
+    let Some(arg) = literal.syntax().parent().and_then(Arg::cast) else {
+        return false;
     };
-
-    if raw.contains("...") {
-        tracing::debug!(label = raw, "target pattern, not a label");
-        return None;
+    if arg.name().as_deref() != Some("name") {
+        return false;
     }
-
-    let (package, name) = if let Some(rest) = raw.strip_prefix("//") {
-        match rest.split_once(':') {
-            Some((package, name)) => (package, name),
-            // `//pkg` means `//pkg:pkg`, taking the last component.
-            None => (rest, rest.rsplit('/').next()?),
-        }
-    } else if let Some(name) = raw.strip_prefix(':') {
-        (package?, name)
-    } else {
-        // A bare name is relative to the current package. A colon anywhere but
-        // the front does not make a label at all: `pkg:target` is not one.
-        if raw.contains(':') {
-            return None;
-        }
-        (package?, raw)
-    };
-
-    if name.is_empty() || package.starts_with('/') || package.ends_with('/') {
-        return None;
-    }
-    if matches!(name, "all" | "*" | "all-targets") {
-        tracing::debug!(label = raw, "target pattern, not a label");
-        return None;
-    }
-    // Bazel allows a wide alphabet in target names but no whitespace, so this
-    // rejects prose that merely happens to sit in a string.
-    if raw.chars().any(char::is_whitespace) {
-        return None;
-    }
-
-    Some(Label {
-        package: package.to_string(),
-        name: name.to_string(),
-    })
+    // ARG -> ARG_LIST -> CALL_EXPR -> EXPR_STMT -> FILE
+    arg.syntax()
+        .parent()
+        .and_then(|list| list.parent())
+        .filter(|call| call.kind() == SyntaxKind::CALL_EXPR)
+        .and_then(|call| call.parent())
+        .filter(|stmt| stmt.kind() == SyntaxKind::EXPR_STMT)
+        .and_then(|stmt| stmt.parent())
+        .is_some_and(|file| file.kind() == SyntaxKind::FILE)
 }
 
 /// The package a file belongs to, as a workspace-relative directory.
@@ -441,6 +382,10 @@ pub fn definition(
         StringRole::LoadSymbol(module) => {
             parse_label(module, package.as_deref()).and_then(|label| file_site(root, &label))
         }
+        // The cursor is on the declaration already, so there is nowhere to go.
+        // Jumping to the line it is sitting on reads as the server having
+        // failed. The variant earns its keep in `references`.
+        StringRole::TargetName => None,
         StringRole::Label => parse_label(&found.value, package.as_deref()).and_then(|label| {
             target_site(index, &label)
                 .or_else(|| file_site(root, &label))
@@ -477,12 +422,231 @@ pub fn definition(
     }]
 }
 
+/// Every place in the main repository that names the target under the cursor.
+///
+/// The cursor may be on a label (`"//lib:srcs"`, `":srcs"`) or on the `name` of
+/// the rule declaring it; both resolve to the same target.
+///
+/// **Partial by construction, in two ways a caller must not paper over.**
+/// External repositories are not searched, because resolving `@repo//…` needs
+/// the repo mapping only Bazel can produce. And the static tier cannot see
+/// targets or references that legacy macros compute at evaluation time — a
+/// macro emitting `deps = [name + "_lib"]` is invisible here. Both wait on the
+/// graph tier; see `ROADMAP.md` G4.
+#[must_use]
+pub fn references(
+    text: &str,
+    dialect: Dialect,
+    file: &Path,
+    root: &Path,
+    index: &bls_index::Index,
+    position: Position,
+    include_declaration: bool,
+) -> Vec<Location> {
+    let lines = LineIndex::new(text);
+    let Ok(offset) = u32::try_from(lines.offset(text, position)) else {
+        return Vec::new();
+    };
+    let Some(found) = string_at(&parse(text, dialect).syntax(), offset) else {
+        return Vec::new();
+    };
+
+    let package = enclosing_package(root, file);
+    let key = match &found.role {
+        // A declaration names its own package; a label has to be resolved
+        // against the package that wrote it.
+        StringRole::TargetName => match package.as_deref() {
+            Some(package) => Label::new(package, &found.value).key(),
+            None => return Vec::new(),
+        },
+        StringRole::Label => match parse_label(&found.value, package.as_deref()) {
+            Some(label) => label.key(),
+            None => return Vec::new(),
+        },
+        // A `.bzl` file is not a target, so it has no referring labels. Finding
+        // the files that `load()` it is a different question, and answering
+        // this one with those would be a wrong answer rather than none.
+        StringRole::LoadModule | StringRole::LoadSymbol(_) => return Vec::new(),
+    };
+
+    let mut sites: Vec<(PathBuf, Position)> = index
+        .references(&key)
+        .iter()
+        .filter_map(|reference| {
+            Some((
+                index.path(reference.file)?.to_path_buf(),
+                Position {
+                    line: reference.line,
+                    character: reference.character,
+                },
+            ))
+        })
+        .collect();
+
+    if include_declaration && let Some(target) = index.target(&key) {
+        if let Some(path) = index.path(target.file) {
+            sites.push((
+                path.to_path_buf(),
+                Position {
+                    line: target.line,
+                    character: target.character,
+                },
+            ));
+        }
+    }
+
+    // Stable between calls, so a picker does not reshuffle under the user.
+    sites.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.line.cmp(&b.1.line))
+            .then(a.1.character.cmp(&b.1.character))
+    });
+    sites.dedup();
+
+    tracing::debug!(label = key, count = sites.len(), "references");
+    sites
+        .into_iter()
+        .filter_map(|(path, at)| {
+            Some(Location {
+                uri: file_uri(&path)?,
+                range: Range { start: at, end: at },
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const BUILD: &str = "\
 filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\")\n";
+
+    /// `name` identifies a declaration only at the top level. Nested, it is an
+    /// argument that happens to share the spelling, and counting it as a
+    /// declaration would hang every reference off the wrong label.
+    #[test]
+    fn only_a_top_level_name_declares_a_target() {
+        let role = |text: &str, needle: &str| {
+            let offset = u32::try_from(text.find(needle).expect("needle") + 1).unwrap();
+            string_at(&parse(text, Dialect::Bazel).syntax(), offset).map(|found| found.role)
+        };
+
+        assert!(matches!(
+            role("filegroup(name = \"srcs\")\n", "srcs"),
+            Some(StringRole::TargetName)
+        ));
+        // An argument called `name` on a call nested inside another.
+        assert!(matches!(
+            role("filegroup(srcs = glob(name = \"inner\"))\n", "inner"),
+            Some(StringRole::Label)
+        ));
+        // Any other attribute, at the top level.
+        assert!(matches!(
+            role("filegroup(srcs = [\"//lib:a\"])\n", "//lib:a"),
+            Some(StringRole::Label)
+        ));
+    }
+
+    /// Goto-definition on a declaration must not jump to the line the cursor is
+    /// already on; that reads as the server having misfired.
+    #[test]
+    fn definition_on_a_declaration_goes_nowhere() {
+        let fixture = Fixture::torture();
+        let file = fixture.root.join("lib/BUILD.bazel");
+        let text = std::fs::read_to_string(&file).expect("fixture");
+        let offset = text.find("\"srcs\"").expect("the srcs declaration") + 2;
+        let lines = LineIndex::new(&text);
+
+        let jumps = definition(
+            &text,
+            Dialect::Bazel,
+            &file,
+            &fixture.root,
+            &bls_index::Index::default(),
+            lines.position(&text, offset),
+        );
+        assert!(jumps.is_empty(), "got {jumps:?}");
+    }
+
+    /// From the declaration and from a label pointing at it, the answer is the
+    /// same target — and `includeDeclaration` is what decides whether the
+    /// declaring line is in it.
+    #[test]
+    fn references_agree_from_either_end() {
+        let fixture = Fixture::torture();
+        let index = bls_index::build_static(&fixture.root);
+        let file = fixture.root.join("lib/BUILD.bazel");
+        let text = std::fs::read_to_string(&file).expect("fixture");
+        let lines = LineIndex::new(&text);
+
+        let at = |needle: &str, skip: usize| {
+            let offset = text.find(needle).expect("needle") + skip;
+            references(
+                &text,
+                Dialect::Bazel,
+                &file,
+                &fixture.root,
+                &index,
+                lines.position(&text, offset),
+                false,
+            )
+        };
+
+        // `//lib:srcs` is referenced by `:srcs` from the alias, the genrule,
+        // a select() branch and a rule attribute.
+        let from_declaration = at("\"srcs\"", 2);
+        assert_eq!(
+            from_declaration.len(),
+            4,
+            "expected every referrer, got {from_declaration:?}"
+        );
+
+        // From a label pointing at it: `actual = ":srcs"`.
+        let from_label = at("actual = \":srcs\"", 11);
+        assert_eq!(
+            from_label, from_declaration,
+            "a label and its declaration name the same target"
+        );
+
+        // The declaration is a separate site, added only when asked for.
+        let offset = text.find("\"srcs\"").expect("needle") + 2;
+        let with_declaration = references(
+            &text,
+            Dialect::Bazel,
+            &file,
+            &fixture.root,
+            &index,
+            lines.position(&text, offset),
+            true,
+        );
+        assert_eq!(with_declaration.len(), from_declaration.len() + 1);
+    }
+
+    /// A `.bzl` path is not a target. Answering with the files that `load()` it
+    /// would be a different question answered wrongly.
+    #[test]
+    fn references_of_a_load_path_are_empty() {
+        let fixture = Fixture::torture();
+        let index = bls_index::build_static(&fixture.root);
+        let file = fixture.root.join("lib/BUILD.bazel");
+        let text = std::fs::read_to_string(&file).expect("fixture");
+        let lines = LineIndex::new(&text);
+        let offset = text.find("//macros:legacy.bzl").expect("a load path") + 4;
+
+        assert!(
+            references(
+                &text,
+                Dialect::Bazel,
+                &file,
+                &fixture.root,
+                &index,
+                lines.position(&text, offset),
+                true,
+            )
+            .is_empty()
+        );
+    }
 
     #[test]
     fn finds_every_declaration() {
@@ -527,99 +691,6 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
                 .to_string()
                 .is_empty()
         );
-    }
-
-    fn key(raw: &str, package: Option<&str>) -> Option<String> {
-        parse_label(raw, package).map(|label| label.key())
-    }
-
-    #[test]
-    fn absolute_labels_are_already_keys() {
-        assert_eq!(key("//lib:srcs", None).as_deref(), Some("//lib:srcs"));
-        assert_eq!(
-            key("//lib/sub:sub_srcs", None).as_deref(),
-            Some("//lib/sub:sub_srcs")
-        );
-        // The root package: the index writes it `//:name`, not `//name`.
-        assert_eq!(key("//:beacon", None).as_deref(), Some("//:beacon"));
-        // A source file in a subdirectory of its package keeps the slashes.
-        assert_eq!(
-            key("//app:nested/data.txt", None).as_deref(),
-            Some("//app:nested/data.txt")
-        );
-    }
-
-    #[test]
-    fn a_package_alone_names_its_last_component() {
-        assert_eq!(
-            key("//lib/config", None).as_deref(),
-            Some("//lib/config:config")
-        );
-        assert_eq!(key("//lib", None).as_deref(), Some("//lib:lib"));
-    }
-
-    #[test]
-    fn relative_labels_take_the_enclosing_package() {
-        assert_eq!(key(":srcs", Some("lib")).as_deref(), Some("//lib:srcs"));
-        assert_eq!(key("srcs", Some("lib")).as_deref(), Some("//lib:srcs"));
-        assert_eq!(
-            key("main.sh", Some("app/cli")).as_deref(),
-            Some("//app/cli:main.sh")
-        );
-        assert_eq!(key(":beacon", Some("")).as_deref(), Some("//:beacon"));
-
-        // No package means no answer. A file in no package has nothing for a
-        // relative label to be relative to.
-        assert_eq!(key(":srcs", None), None);
-        assert_eq!(key("srcs", None), None);
-    }
-
-    #[test]
-    fn the_main_repository_may_be_named_explicitly() {
-        assert_eq!(key("@//lib:srcs", None).as_deref(), Some("//lib:srcs"));
-        assert_eq!(key("@@//lib:srcs", None).as_deref(), Some("//lib:srcs"));
-    }
-
-    /// An apparent repo name maps to a canonical one that only `bazel mod
-    /// dump_repo_mapping` knows, and the repo may not be fetched at all.
-    /// Guessing `@rules_go` is `rules_go+` was already wrong once, when the
-    /// format changed in Bazel 8.
-    #[test]
-    fn external_repositories_are_refused() {
-        assert_eq!(key("@platforms//os:linux", Some("lib")), None);
-        assert_eq!(
-            key("@bazel_skylib//rules:write_file.bzl", Some("lib")),
-            None
-        );
-        assert_eq!(key("@@rules_go+//go:def.bzl", Some("lib")), None);
-        assert_eq!(key("@sh//:__subpackages__", Some("lib")), None);
-    }
-
-    /// A pattern names a set. Picking one of its members would be a guess, and
-    /// invariant 4 rates a wrong jump worse than no jump.
-    #[test]
-    fn target_patterns_are_not_labels() {
-        assert_eq!(key("//lib:all", None), None);
-        assert_eq!(key("//lib:*", None), None);
-        assert_eq!(key("//lib:all-targets", None), None);
-        assert_eq!(key("//...", None), None);
-        assert_eq!(key("//lib/...", None), None);
-        assert_eq!(key("...", Some("lib")), None);
-        assert_eq!(key(":all", Some("lib")), None);
-    }
-
-    #[test]
-    fn strings_that_are_not_labels_resolve_to_nothing() {
-        assert_eq!(key("", Some("lib")), None);
-        assert_eq!(key(":", Some("lib")), None);
-        assert_eq!(key("//", None), None);
-        assert_eq!(key("//lib:", None), None);
-        assert_eq!(key("///lib:srcs", None), None);
-        // Prose, and a shell command with a label buried in it. Neither is one.
-        assert_eq!(key("hello world", Some("lib")), None);
-        assert_eq!(key("cat $(location :srcs) > $@", Some("lib")), None);
-        // A relative label may not carry a package: `pkg:target` is not legal.
-        assert_eq!(key("lib:srcs", Some("app")), None);
     }
 
     fn torture() -> PathBuf {
