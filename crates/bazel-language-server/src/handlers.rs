@@ -4,8 +4,8 @@
 //! That is invariant 1, expressed as a module boundary.
 
 use lsp_types::{
-    BaseSymbolInformation, Diagnostic, DiagnosticSeverity, DocumentSymbol, Location, Range,
-    SymbolKind, WorkspaceSymbol,
+    BaseSymbolInformation, Diagnostic, DiagnosticSeverity, DocumentSymbol, Location, Position,
+    Range, SymbolKind, WorkspaceSymbol,
 };
 use starlark_cst::ast::{AstNode, Expr, File, Stmt};
 use starlark_cst::{Dialect, FileKind, parse};
@@ -82,8 +82,8 @@ pub fn document_symbols(text: &str, dialect: Dialect, kind: FileKind) -> Vec<Doc
         .into_iter()
         .map(|d| DocumentSymbol {
             name: format!(":{}", d.name),
+            kind: symbol_kind(&d.rule),
             detail: Some(d.rule),
-            kind: SymbolKind::Object,
             tags: None,
             #[allow(deprecated)]
             deprecated: None,
@@ -117,6 +117,25 @@ pub fn syntax_diagnostics(text: &str, dialect: Dialect) -> Vec<Diagnostic> {
         .collect()
 }
 
+/// A `SymbolKind` chosen so a picker's kind column says something.
+///
+/// LSP has no kind for "build target", so every target sharing one renders as a
+/// column of identical `[Object]` — noise in a list of hundreds. Grouping by
+/// what the rule *does* makes tests and binaries findable at a glance. The rule
+/// name is still carried exactly, in `containerName`.
+fn symbol_kind(rule: &str) -> SymbolKind {
+    match rule {
+        r if r.ends_with("_test") || r == "test_suite" => SymbolKind::Event,
+        r if r.ends_with("_binary") => SymbolKind::Function,
+        r if r.ends_with("_library") || r.ends_with("_module") => SymbolKind::Module,
+        "alias" => SymbolKind::Interface,
+        "filegroup" | "exports_files" | "pkg_files" => SymbolKind::File,
+        "genrule" | "run_binary" => SymbolKind::Constructor,
+        r if r.ends_with("_setting") || r.ends_with("_flag") => SymbolKind::Constant,
+        _ => SymbolKind::Struct,
+    }
+}
+
 /// Workspace symbols from the static index.
 ///
 /// Undercounts until the graph tier lands, which is why the caller must not
@@ -132,19 +151,20 @@ pub fn workspace_symbols(index: &bls_index::Index, query: &str) -> Vec<Workspace
         .filter_map(|(label, target)| {
             let path = index.path(target.file)?;
             let uri: lsp_types::Uri = format!("file://{}", path.display()).parse().ok()?;
+            let at = Position {
+                line: target.line,
+                character: target.character,
+            };
             Some(WorkspaceSymbol {
-                // Offsets need the file's text to become positions, and the
-                // index deliberately does not retain it. Resolved lazily by
-                // `workspaceSymbol/resolve` once that lands.
                 location: Location {
                     uri,
-                    range: Range::default(),
+                    range: Range { start: at, end: at },
                 }
                 .into(),
                 data: None,
                 base_symbol_information: BaseSymbolInformation {
                     name: label.clone(),
-                    kind: SymbolKind::Object,
+                    kind: symbol_kind(&target.rule),
                     tags: None,
                     container_name: Some(target.rule.to_string()),
                 },
