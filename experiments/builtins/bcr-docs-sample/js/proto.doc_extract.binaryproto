@@ -1,0 +1,91 @@
+ý
+js_proto_toolchain‰
+nameThe name of the toolchain. A target named [name]_toolchain is also created, which is the one to be used in register_toolchains. ÿ
+plugin_nameíThe `NAME` of the plugin program, used in command-line flags to protoc, as follows:
+
+> `protoc --plugin=protoc-gen-NAME=path/to/mybinary --NAME_out=OUT_DIR`
+
+See https://protobuf.dev/reference/cpp/api-docs/google.protobuf.compiler.plugin Ö
+plugin_optionsÁ(List of strings) Command line flags used to invoke the plugin, based on documentation for the generator.
+
+For example, for `@bufbuild/protoc-gen-es`, reference the documentation at
+https://github.com/bufbuild/protobuf-es/tree/main/packages/protoc-gen-es#plugin-options
+to arrive at a value like `["import_extension=js"]` q
+
+plugin_binaThe plugin to use. This should be the label of a binary target that you declared in step 2 above. ÷
+runtimeéThe runtime to use, which is imported by the generated code. For example, "//:node_modules/@bufbuild/protobuf".
+
+Note that node module resolution requires the runtime to be in a parent folder of any package containing generated code. ´
+out_dts_extension’The suffix that should replace ".proto" in determining the .d.ts output file name, or None if the plugin does not produce a type declaration file.
+"_pb.d.ts"Ü
+out_js_extension½The suffix that should replace ".proto" in determining the .js output file name.
+
+Each of the two options above has a default value for backward compatibility, but should be set explicitly."_pb.js"W
+target_settings@List of target config settings the toolchain is compatible with.[]g
+exec_compatible_withKList of constraint_values that the target platform must be compatible with.[]l
+target_compatible_withNList of constraint values that the execution platform must be compatible with.[]’
+kwargs‡Additional arguments to pass to the [proto_lang_toolchain](https://bazel.build/reference/be/protocol-buffer#proto_lang_toolchain) rule.‘Define a proto_lang_toolchain that uses the plugin.
+
+Example:
+
+```starlark
+js_proto_toolchain(
+    name = "gen_es_toolchain",
+    out_dts_extension = "_pb.d.ts",
+    out_js_extension = "_pb.js",
+    plugin_bin = ":protoc_gen_es",
+    plugin_name = "es",
+    # See https://github.com/bufbuild/protobuf-es/tree/main/packages/protoc-gen-es#plugin-options
+    plugin_options = [
+        "keep_empty_files=true",
+        "target=js+dts",
+        "import_extension=js",
+    ],
+    runtime = "//:node_modules/@bufbuild/protobuf",
+)
+```
+2$
+js_proto_toolchain//js:proto.bzl*ý**EXPERIMENTAL**: Protobuf and gRPC support for JavaScript and TypeScript.
+
+This API is subject to breaking changes outside our usual semver policy.
+In a future release of rules_js this should become stable.
+
+### Typical setup
+
+1. Choose any code generator plugin for protoc.
+   In this example we'll show `@bufbuild/protoc-gen-es` that produces both message marshaling and service stubs for JavaScript and TypeScript.
+   It should be added as a devDependency in your `package.json`, typically under a `/tools` directory.
+   The generator is expected to produce `.js` and `.d.ts` files for each .proto file.
+2. Declare a binary target that runs the generator, typically using its package_json.bzl entry point, for example in `tools/toolchains/BUILD`:
+
+```starlark
+load("@npm//tools:@bufbuild/protoc-gen-es/package_json.bzl", gen_es = "bin")
+gen_es.protoc_gen_es_binary(name = "protoc_gen_es")
+```
+3. Define a `js_proto_toolchain` that uses the plugin. See the rule documentation below.
+4. Update `MODULE.bazel` to register it, typically with a simple statement like `register_toolchains("//tools/toolchains:all")`
+
+See the protobuf examples under e2e/ for how to set up the toolchain for various code generator plugins.
+
+### Usage
+
+Just write `proto_library` targets as usual, or have Gazelle generate them.
+Then reference them anywhere a `js_library` could appear, for example:
+
+```starlark
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+
+proto_library(
+    name = "eliza_proto",
+    srcs = ["eliza.proto"],
+)
+
+js_library(
+    name = "proto",
+    srcs = ["package.json"],
+    deps = [":eliza_proto"],
+)
+```
+
+The generator you setup earlier will be invoked automatically as an action to generate the `.js` and `.d.ts` files.2//js:proto.bzl

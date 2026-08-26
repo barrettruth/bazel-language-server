@@ -1,0 +1,173 @@
+
+˜
+js_rpc_libraryƒGenerates RPC client stubs from `proto_library` targets using a configurable protoc plugin.
+
+Runs a protoc plugin (such as `protoc-gen-connect-query`) on the specified `proto_library`
+targets and provides the generated files as `JsInfo`, allowing them to be used as deps
+in any rule that accepts `JsInfo` (`js_library`, `js_binary`, `js_test`, etc.).
+
+Unlike `js_library` with proto deps (which uses `js_proto_aspect` to generate message
+serialization code), `js_rpc_library` operates only on its immediate deps and generates
+RPC-specific output such as TanStack Query hooks. The expected output filenames must
+be declared explicitly in the `outs` attribute; this is required because some plugins
+(like `protoc-gen-connect-query`) generate a variable number of files depending on the
+number of service definitions in the proto file.
+
+Note that targets using `js_rpc_library` also need access to the message types from
+the same proto files, which are provided by a `js_library` that lists the same
+`proto_library` targets in its deps.
+
+Example:
+
+```starlark
+load("@aspect_rules_js//js:defs.bzl", "js_library", "js_test")
+load("@aspect_rules_js//js:rpc.bzl", "js_rpc_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+
+proto_library(
+    name = "eliza_proto",
+    srcs = ["eliza.proto"],
+)
+
+# Generates message serialization code (eliza_pb.js) via js_proto_aspect
+js_library(
+    name = "eliza_js",
+    deps = [":eliza_proto"],
+)
+
+# Generates one file per service definition in eliza.proto
+js_rpc_library(
+    name = "eliza_rpc",
+    deps = [":eliza_proto"],
+    outs = [
+        "eliza-ElizaService_connectquery.js",
+        "eliza-ElizaService_connectquery.d.ts",
+    ],
+)
+
+js_test(
+    name = "test",
+    entry_point = "test.js",
+    data = [":eliza_js", ":eliza_rpc"],
+)
+```*
+nameA unique name for this target. Ê
+depsw`proto_library` targets whose sources will be passed to the RPC plugin.
+
+There must be exactly one target in this list.*C
+	ProtoInfo6
+	ProtoInfo)@@_builtins//:common/proto/proto_info.bzl2[]Þ
+outsÏExplicit list of files the plugin will generate, relative to the package directory.
+
+This parameter must be specified if and only if the registered `js_rpc_toolchain`
+does not specify `out_js_extension` or `out_dts_extension`.
+
+These must match exactly the files that the plugin will emit. For `protoc-gen-connect-query`,
+one file per service is generated with the naming pattern:
+  `{proto_name}-{ServiceName}_connectquery.{js,d.ts}`
+
+For example, for `eliza.proto` containing `service ElizaService`:
+  `outs = ["eliza-ElizaService_connectquery.js", "eliza-ElizaService_connectquery.d.ts"]`2[]"&
+js_rpc_library//js/private:rpc.bzl‘
+js_rpc_toolchain…
+name{The name of the toolchain. A target named [name]_toolchain is also created, which is the one to use in register_toolchains. ÿ
+plugin_nameíThe `NAME` of the plugin program, used in command-line flags to protoc, as follows:
+
+> `protoc --plugin=protoc-gen-NAME=path/to/mybinary --NAME_out=OUT_DIR`
+
+See https://protobuf.dev/reference/cpp/api-docs/google.protobuf.compiler.plugin Z
+plugin_optionsF(List of strings) Option strings passed to the plugin via --NAME_opt=. ˆ
+
+plugin_binxThe plugin binary. This should be the label of a binary target declared using the plugin's package_json.bzl entry point. È
+runtimeºThe npm package that the generated code imports from at runtime.
+
+Note that node module resolution requires the runtime to be in a parent folder of any package containing generated code. ®
+out_dts_extension’The suffix that should replace ".proto" in determining the .d.ts output file name, or None if the plugin does not produce a type declaration file.None÷
+out_js_extensionÜThe suffix that should replace ".proto" in determining the .js output file name.
+
+If neither of the two above parameters are set, then each js_rpc_library target must indicate its expected outputs via the outs parameter.NoneW
+target_settings@List of target config settings the toolchain is compatible with.[]j
+exec_compatible_withNList of constraint_values that the execution platform must be compatible with.[]i
+target_compatible_withKList of constraint values that the target platform must be compatible with.[]>
+kwargs4Additional arguments to pass to the underlying rule.ƒDefine a toolchain for a protoc plugin that generates RPC client code.
+
+Example:
+
+```starlark
+js_rpc_toolchain(
+    name = "connect_query_toolchain",
+    plugin_bin = ":protoc_gen_connect_query",
+    plugin_name = "connect-query",
+    plugin_options = [
+        "target=js+dts",
+        "import_extension=js",
+    ],
+    runtime = "//:node_modules/@connectrpc/connect-query-core",
+)
+```
+2 
+js_rpc_toolchain//js:rpc.bzl*ê**EXPERIMENTAL**: RPC support for JavaScript and TypeScript.
+
+Note that if you are using Connect, you do not need any additional setup beyond
+registering protoc-gen-es with a js_proto_toolchain. As of v2, protoc-gen-es
+generates code for Connect right alongside the protobuf-es code, in the same
+file.
+
+This API is subject to breaking changes outside our usual semver policy.
+In a future release of rules_js this should become stable.
+
+### Typical setup
+
+1. Choose a protoc plugin that generates RPC client code.
+   A common choice is `@connectrpc/protoc-gen-connect-query`, which generates
+   TanStack Query hooks for services defined in your proto files.
+   Add it as a devDependency in `package.json` under a `/tools` directory.
+
+2. Declare a binary target that runs the generator, in `tools/toolchains/BUILD`:
+
+```starlark
+load("@npm//tools:@connectrpc/protoc-gen-connect-query/package_json.bzl", connect_query = "bin")
+connect_query.protoc_gen_connect_query_binary(name = "protoc_gen_connect_query")
+```
+
+3. Define a `js_rpc_toolchain` that uses the plugin. See the rule documentation below.
+
+4. Update `MODULE.bazel` to register it:
+```starlark
+register_toolchains("//tools/toolchains:all")
+```
+
+### Usage
+
+Write `proto_library` targets with `service` definitions as usual. Use `js_library`
+with proto deps to generate message serialization code, and `js_rpc_library` to generate
+the RPC client stubs:
+
+```starlark
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("@aspect_rules_js//js:rpc.bzl", "js_rpc_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+
+proto_library(
+    name = "eliza_proto",
+    srcs = ["eliza.proto"],
+)
+
+# Generates message serialization code (eliza_pb.js) via js_proto_aspect
+js_library(
+    name = "eliza_js",
+    deps = [":eliza_proto"],
+)
+
+# Generates one file per service via protoc-gen-connect-query
+js_rpc_library(
+    name = "eliza_rpc",
+    deps = [":eliza_proto"],
+    outs = [
+        "eliza-ElizaService_connectquery.js",
+        "eliza-ElizaService_connectquery.d.ts",
+    ],
+)
+```
+
+See the e2e/protobuf-es example for a ConnectQuery setup, or e2e/protobuf-google for a grpc-js setup.2//js:rpc.bzl

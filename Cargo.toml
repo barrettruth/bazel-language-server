@@ -1,0 +1,46 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Barrett Ruth <br@barrettruth.com>"]
+license = "MIT"
+repository = "https://github.com/barrettruth/bazel-language-server"
+
+[workspace.dependencies]
+bls-bazel = { path = "crates/bls-bazel" }
+bls-index = { path = "crates/bls-index" }
+
+# Published from this machine's checkout until starlark-cst is on crates.io.
+starlark-cst = { path = "../starlark-cst" }
+
+anyhow = "1"
+arc-swap = "1"
+clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
+lsp-server = "0.10"
+# rust-analyzer's replacement for lsp-types 0.97, which has been stale since
+# 2024-06-04. Generated from the official LSP metaModel. Not a drop-in.
+# `fluent-uri` rather than `url`: 20 crates in the tree instead of 45, because
+# `url` drags in the whole icu + idna chain for URIs we only ever treat as paths.
+lsp-types = { version = "0.11", package = "gen-lsp-types", features = [
+  "fluent-uri",
+] }
+rustc-hash = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+walkdir = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = "warn"
+
+[profile.release]
+opt-level = 3
