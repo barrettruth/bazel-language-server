@@ -8,7 +8,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -59,12 +58,7 @@ impl Default for BazelConfig {
     }
 }
 
-impl BazelConfig {
-    #[must_use]
-    pub fn timeout(&self) -> Duration {
-        Duration::from_secs(self.timeout_seconds)
-    }
-}
+impl BazelConfig {}
 
 /// A located Bazel workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +99,6 @@ pub struct Invocation {
     pub stdout: Vec<u8>,
     pub stderr: String,
     pub status: Option<i32>,
-    pub elapsed: Duration,
 }
 
 impl Invocation {
@@ -134,11 +127,6 @@ impl BazelClient {
             workspace,
             output_base,
         }
-    }
-
-    #[must_use]
-    pub fn config(&self) -> &BazelConfig {
-        &self.config
     }
 
     /// Whether Bazel is enabled and the binary can actually be run.
@@ -172,13 +160,12 @@ impl BazelClient {
     /// completion while the command lock is held by a dead pid; every later
     /// invocation then fails with `Another command (pid=…) is running`. `SIGINT`
     /// is what the client turns into a `Cancel` RPC, and releases the lock in
-    /// 13-42 ms. See `research/stack/05-measurements-and-decisions.md` §2.1.
+    /// 13-42 ms.
     ///
     /// # Errors
     ///
     /// If the process cannot be spawned or its output cannot be collected.
     pub fn run(&self, args: &[&str]) -> Result<Invocation> {
-        let start = Instant::now();
         let mut command = Command::new(&self.config.path);
         command.current_dir(&self.workspace);
         if let Some(base) = &self.output_base {
@@ -195,7 +182,6 @@ impl BazelClient {
             stdout: output.stdout,
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             status: output.status.code(),
-            elapsed: start.elapsed(),
         })
     }
 }

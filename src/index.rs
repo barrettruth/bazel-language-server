@@ -1,24 +1,22 @@
 //! The target index.
 //!
-//! Two tiers, per invariant 6 in `ROADMAP.md`:
+//! Two tiers:
 //!
-//! - **static** — every target this crate can see by parsing BUILD files. Cheap:
+//! - **static** — every target that can be seen by parsing BUILD files. Cheap:
 //!   measured at 219 MB/s and 69 bytes per target, so ~1.4 s and ~13 MB for a
 //!   74k-package repo. Rebuilt outright rather than incrementally.
 //! - **graph** — targets only Bazel knows about, because legacy macros compute
-//!   names at evaluation time. Not implemented yet; see `ROADMAP.md` G4.
+//!   names at evaluation time. Not implemented yet.
 //!
 //! Readers never block. An [`IndexHandle`] hands out an [`Arc<Index>`] snapshot
 //! that stays consistent for the life of a request while a writer swaps in a
 //! freshly built one.
 
-pub mod label;
-pub mod line_index;
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use lsp_types::Position;
 use rustc_hash::FxHashMap;
 use starlark_cst::ast::{AstNode, CallExpr, Expr, File, LiteralExpr, Stmt};
 use starlark_cst::{Dialect, SyntaxElement, SyntaxKind, classify, parse};
@@ -107,11 +105,6 @@ impl Index {
     #[must_use]
     pub fn len(&self) -> usize {
         self.targets.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.targets.is_empty()
     }
 }
 
@@ -291,7 +284,7 @@ fn collect(
                 Some(range) => range.start(),
                 None => call.range().start(),
             };
-            let (line, character) = lines.position(text, usize::from(anchor));
+            let Position { line, character } = lines.position(text, usize::from(anchor));
             let length = utf16_len(&value);
             targets.insert(
                 label.key(),
@@ -313,7 +306,8 @@ fn collect(
             };
             // The name, not the whole label: a rename rewrites `srcs` and
             // leaves `//lib:` where the author put it.
-            let (line, character) = lines.position(text, anchor + label.name_offset(&raw));
+            let Position { line, character } =
+                lines.position(text, anchor + label.name_offset(&raw));
             references.entry(label.key()).or_default().push(Reference {
                 file,
                 line,

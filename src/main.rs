@@ -5,15 +5,18 @@
 //!
 //! stdout is the LSP transport. Everything human-readable goes to stderr.
 
+mod bazel;
 mod format;
 mod handlers;
+mod index;
+mod label;
 mod line_index;
 
 use std::path::{Path, PathBuf};
 
+use crate::bazel::{BazelClient, BazelConfig};
+use crate::index::IndexHandle;
 use anyhow::Result;
-use bls_bazel::{BazelClient, BazelConfig};
-use bls_index::IndexHandle;
 use clap::{Parser, Subcommand};
 use lsp_server::{Connection, Message, Response};
 use lsp_types::{
@@ -78,7 +81,7 @@ fn main() -> Result<()> {
 }
 
 fn cmd_index(path: &std::path::Path) {
-    let root = bls_bazel::find_workspace(path).map_or_else(
+    let root = crate::bazel::find_workspace(path).map_or_else(
         || path.to_path_buf(),
         |workspace| {
             println!(
@@ -90,7 +93,7 @@ fn cmd_index(path: &std::path::Path) {
         },
     );
     let started = std::time::Instant::now();
-    let index = bls_index::build_static(&root);
+    let index = crate::index::build_static(&root);
     println!(
         "indexed {} BUILD files, {} targets in {:.2}s",
         index.files.len(),
@@ -106,7 +109,7 @@ fn cmd_index(path: &std::path::Path) {
 }
 
 fn cmd_doctor(path: &std::path::Path) {
-    let workspace = bls_bazel::find_workspace(path);
+    let workspace = crate::bazel::find_workspace(path);
     match &workspace {
         Some(w) => println!("workspace  {} (via {})", w.root.display(), w.marker),
         None => println!("workspace  not found - static features only"),
@@ -176,7 +179,7 @@ fn run_server() -> Result<()> {
     if let Some(root) = root.clone() {
         // Synchronous: ~1.4 s on a 74k-package repo, which is cheaper than the
         // machinery to report progress on it would be.
-        index.store(bls_index::build_static(&root));
+        index.store(crate::index::build_static(&root));
     }
     tracing::info!(targets = index.load().len(), "ready");
 
@@ -569,7 +572,7 @@ fn workspace_root(init: &InitializeParams) -> Option<PathBuf> {
         .or(from_root_path)
         .or(from_cwd)?;
 
-    let root = bls_bazel::find_workspace(&candidate).map_or(candidate, |w| w.root);
+    let root = crate::bazel::find_workspace(&candidate).map_or(candidate, |w| w.root);
     tracing::info!(?root, source, "workspace root");
     Some(root)
 }

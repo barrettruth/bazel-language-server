@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::label::{Label, make_variable_labels, parse_label};
 use anyhow::{Result, bail};
-use bls_index::label::{Label, make_variable_labels, parse_label};
 use lsp_types::{
     BaseSymbolInformation, Diagnostic, DiagnosticSeverity, DocumentHighlight,
     DocumentHighlightKind, DocumentSymbol, Hover, Location, LocationLink, MarkupContent,
@@ -149,7 +149,7 @@ fn symbol_kind(rule: &str) -> SymbolKind {
 /// Undercounts until the graph tier lands, which is why the caller must not
 /// present this as exhaustive. See `ROADMAP.md` G4.
 #[must_use]
-pub fn workspace_symbols(index: &bls_index::Index, query: &str) -> Vec<WorkspaceSymbol> {
+pub fn workspace_symbols(index: &crate::index::Index, query: &str) -> Vec<WorkspaceSymbol> {
     let needle = query.to_lowercase();
     index
         .targets
@@ -380,7 +380,7 @@ struct Site {
 }
 
 /// The declaring rule call, from the index snapshot.
-fn target_site(index: &bls_index::Index, label: &Label) -> Option<Site> {
+fn target_site(index: &crate::index::Index, label: &Label) -> Option<Site> {
     let target = index.target(&label.key())?;
     Some(Site {
         path: index.path(target.file)?.to_path_buf(),
@@ -426,7 +426,7 @@ pub fn definition(
     text: &str,
     file: &Path,
     root: &Path,
-    index: &bls_index::Index,
+    index: &crate::index::Index,
     position: Position,
 ) -> Vec<LocationLink> {
     let lines = LineIndex::new(text);
@@ -512,7 +512,7 @@ pub fn hover(
     text: &str,
     file: &Path,
     root: &Path,
-    index: &bls_index::Index,
+    index: &crate::index::Index,
     position: Position,
 ) -> Option<Hover> {
     let lines = LineIndex::new(text);
@@ -587,7 +587,7 @@ fn card(label: &str, detail: &str) -> String {
 }
 
 /// The card for a target the index has seen declared.
-fn declared_card(index: &bls_index::Index, root: &Path, label: &Label) -> Option<String> {
+fn declared_card(index: &crate::index::Index, root: &Path, label: &Label) -> Option<String> {
     let target = index.target(&label.key())?;
     let file = index.path(target.file)?;
     Some(card(
@@ -601,7 +601,7 @@ fn declared_card(index: &bls_index::Index, root: &Path, label: &Label) -> Option
 /// The count is a property of the static index and not of the target: labels
 /// that legacy macros compute are invisible to it, so the true number is this
 /// one or larger. A bare "5 references" would be read as the answer.
-fn tally(index: &bls_index::Index, label: &Label) -> String {
+fn tally(index: &crate::index::Index, label: &Label) -> String {
     let counted = match index.references(&label.key()).len() {
         0 => "No references".to_string(),
         1 => "1 reference".to_string(),
@@ -638,7 +638,7 @@ pub fn references(
     text: &str,
     file: &Path,
     root: &Path,
-    index: &bls_index::Index,
+    index: &crate::index::Index,
     position: Position,
     include_declaration: bool,
 ) -> Vec<Location> {
@@ -687,7 +687,7 @@ pub fn document_highlight(
     text: &str,
     file: &Path,
     root: &Path,
-    index: &bls_index::Index,
+    index: &crate::index::Index,
     position: Position,
 ) -> Vec<DocumentHighlight> {
     let lines = LineIndex::new(text);
@@ -746,7 +746,7 @@ fn target_label(found: &StringAt, package: Option<&str>) -> Option<Label> {
 /// Sorted, so a picker does not reshuffle between calls and a file's edits
 /// arrive in the order they appear in it.
 fn name_sites(
-    index: &bls_index::Index,
+    index: &crate::index::Index,
     key: &str,
     include_declaration: bool,
 ) -> Vec<(PathBuf, Range)> {
@@ -776,7 +776,7 @@ fn name_sites(
 
 /// Where the target's own `name` is written, in the same shape as the sites
 /// referring to it, so the declaration is recognisable among them.
-fn declaration_site(index: &bls_index::Index, key: &str) -> Option<(PathBuf, Range)> {
+fn declaration_site(index: &crate::index::Index, key: &str) -> Option<(PathBuf, Range)> {
     let target = index.target(key)?;
     Some((
         index.path(target.file)?.to_path_buf(),
@@ -844,7 +844,7 @@ pub fn rename(
     text: &str,
     file: &Path,
     root: &Path,
-    index: &bls_index::Index,
+    index: &crate::index::Index,
     position: Position,
     new_name: &str,
 ) -> Result<Option<WorkspaceEdit>> {
@@ -881,7 +881,7 @@ pub fn prepare_rename(
     text: &str,
     file: &Path,
     root: &Path,
-    index: &bls_index::Index,
+    index: &crate::index::Index,
     position: Position,
 ) -> Option<Range> {
     let (name, _) = renameable(text, file, root, index, position)?;
@@ -902,7 +902,7 @@ fn renameable(
     text: &str,
     file: &Path,
     root: &Path,
-    index: &bls_index::Index,
+    index: &crate::index::Index,
     position: Position,
 ) -> Option<(std::ops::Range<u32>, String)> {
     let lines = LineIndex::new(text);
@@ -989,7 +989,7 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
     /// already on; that reads as the server having misfired.
     #[test]
     fn definition_on_a_declaration_goes_nowhere() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         let file = fixture.root.join("lib/BUILD.bazel");
         let text = std::fs::read_to_string(&file).expect("fixture");
         let offset = text.find("\"srcs\"").expect("the srcs declaration") + 2;
@@ -999,7 +999,7 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
             &text,
             &file,
             &fixture.root,
-            &bls_index::Index::default(),
+            &crate::index::Index::default(),
             lines.position(&text, offset),
         );
         assert!(jumps.is_empty(), "got {jumps:?}");
@@ -1010,8 +1010,8 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
     /// declaring line is in it.
     #[test]
     fn references_agree_from_either_end() {
-        let fixture = Fixture::torture();
-        let index = bls_index::build_static(&fixture.root);
+        let fixture = Fixture::workspace();
+        let index = crate::index::build_static(&fixture.root);
         let file = fixture.root.join("lib/BUILD.bazel");
         let text = std::fs::read_to_string(&file).expect("fixture");
         let lines = LineIndex::new(&text);
@@ -1062,8 +1062,8 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
     /// would be a different question answered wrongly.
     #[test]
     fn a_load_path_names_no_target() {
-        let fixture = Fixture::torture();
-        let index = bls_index::build_static(&fixture.root);
+        let fixture = Fixture::workspace();
+        let index = crate::index::build_static(&fixture.root);
         let file = fixture.root.join("lib/BUILD.bazel");
         let text = std::fs::read_to_string(&file).expect("fixture");
         let lines = LineIndex::new(&text);
@@ -1092,7 +1092,7 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
     /// question agree, as they do for references.
     #[test]
     fn document_highlight_writes_the_declaration_and_reads_its_labels() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         let expected = [
             "Write 11:12 srcs",
             "Read 35:15 srcs",
@@ -1117,7 +1117,7 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
     /// range the client would paint over the wrong text.
     #[test]
     fn document_highlight_stops_at_the_file_it_was_asked_about() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         assert_eq!(
             fixture.highlights("lib/BUILD.bazel", "//lib/sub:sub_srcs"),
             [
@@ -1137,7 +1137,7 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
     /// target, and the empty answer is logged rather than silent.
     #[test]
     fn document_highlight_declines_off_a_string() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         for needle in ["filegroup(", "# Cross-package", "cc_library_placeholder"] {
             let found = fixture.highlights("lib/BUILD.bazel", needle);
             assert!(found.is_empty(), "cursor on {needle:?} found {found:?}");
@@ -1165,7 +1165,7 @@ alias(
     /// result compared to text in full.
     struct Renaming {
         root: PathBuf,
-        index: bls_index::Index,
+        index: crate::index::Index,
     }
 
     impl Renaming {
@@ -1179,7 +1179,7 @@ alias(
                 std::fs::create_dir_all(path.parent().expect("a package directory")).unwrap();
                 std::fs::write(path, text).unwrap();
             }
-            let index = bls_index::build_static(&root);
+            let index = crate::index::build_static(&root);
             Self { root, index }
         }
 
@@ -1418,16 +1418,16 @@ alias(
         );
     }
 
-    fn torture() -> PathBuf {
+    fn fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../experiments/torture")
+            .join("tests/workspace")
             .canonicalize()
-            .expect("the torture workspace is checked in")
+            .expect("the test workspace is checked in")
     }
 
     #[test]
     fn a_package_is_the_nearest_build_file() {
-        let root = torture();
+        let root = fixture_root();
         assert_eq!(
             enclosing_package(&root, &root.join("lib/BUILD.bazel")).as_deref(),
             Some("lib")
@@ -1451,7 +1451,7 @@ alias(
     /// looks like the definition is missing rather than the reader.
     #[test]
     fn a_label_inside_a_command_is_navigable() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         let file = fixture.root.join("lib/BUILD.bazel");
         let text = std::fs::read_to_string(&file).expect("fixture");
         let lines = LineIndex::new(&text);
@@ -1498,7 +1498,7 @@ alias(
             line: 0,
             character: 15,
         };
-        let index = bls_index::Index::default();
+        let index = crate::index::Index::default();
 
         // The same cursor in a BUILD file is a declaration, so the position is
         // right and the file kind is what decides.
@@ -1528,13 +1528,13 @@ alias(
     /// in the middle of `needle`, and report where it lands.
     struct Fixture {
         root: PathBuf,
-        index: bls_index::Index,
+        index: crate::index::Index,
     }
 
     impl Fixture {
-        fn torture() -> Self {
-            let root = torture();
-            let index = bls_index::build_static(&root);
+        fn workspace() -> Self {
+            let root = fixture_root();
+            let index = crate::index::build_static(&root);
             Self { root, index }
         }
 
@@ -1606,7 +1606,7 @@ alias(
 
     #[test]
     fn labels_resolve_through_the_index() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
 
         // An absolute label into another package.
         assert_eq!(
@@ -1632,7 +1632,7 @@ alias(
     /// `srcs = ["tool.sh"]` names a source file, and a source file is a target.
     #[test]
     fn source_files_are_definitions() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         assert_eq!(
             fixture.go("app/BUILD.bazel", "tool.sh").as_deref(),
             Some("app/tool.sh:0:0")
@@ -1650,7 +1650,7 @@ alias(
 
     #[test]
     fn load_paths_and_their_symbols_reach_the_file() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         assert_eq!(
             fixture
                 .go("lib/BUILD.bazel", "//macros:legacy.bzl")
@@ -1677,7 +1677,7 @@ alias(
 
     #[test]
     fn external_labels_yield_nothing() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         assert!(
             fixture
                 .links("lib/BUILD.bazel", "@platforms//os:linux")
@@ -1692,7 +1692,7 @@ alias(
 
     #[test]
     fn a_label_naming_nothing_yields_nothing() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         // The torture workspace has this deliberately dangling label.
         assert!(
             fixture
@@ -1716,8 +1716,8 @@ alias(
     fn a_cursor_outside_a_string_yields_nothing() {
         let text = "filegroup(\n    name = \"srcs\",\n    srcs = [\"//lib:a\"],\n)\n";
         let lines = LineIndex::new(text);
-        let root = torture();
-        let index = bls_index::Index::default();
+        let root = fixture_root();
+        let index = crate::index::Index::default();
 
         for needle in ["filegroup", "name", "srcs = [", ")"] {
             let at = text.find(needle).unwrap();
@@ -1750,7 +1750,7 @@ alias(
     /// point at.
     #[test]
     fn the_origin_range_is_the_label_without_its_quotes() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         let link = fixture
             .links("lib/BUILD.bazel", "//lib/sub:sub_srcs")
             .into_iter()
@@ -1768,7 +1768,7 @@ alias(
     /// that declares it, and the file that holds it.
     #[test]
     fn hover_on_a_label_says_what_it_resolves_to() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
 
         assert_eq!(
             fixture
@@ -1800,7 +1800,7 @@ alias(
     /// the target, which only the graph tier can give.
     #[test]
     fn hover_on_a_declaration_counts_what_the_index_holds() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         assert_eq!(
             fixture.card("lib/BUILD.bazel", "\"srcs\"").as_deref(),
             Some(
@@ -1826,7 +1826,7 @@ alias(
     /// what is in it: that would need a second parse and a symbol table.
     #[test]
     fn hover_on_a_load_path_resolves_the_file() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         assert_eq!(
             fixture
                 .card("lib/BUILD.bazel", "//macros:legacy.bzl")
@@ -1845,7 +1845,7 @@ alias(
     /// about the index.
     #[test]
     fn hover_declines_wherever_it_would_have_to_guess() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         let nothing = [
             // The torture workspace's deliberately dangling label.
             ("lib/sub/BUILD.bazel", "//lib:does_not_exist"),
@@ -1887,7 +1887,7 @@ alias(
         // the kind comes from the path, so the test has to use real ones.
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         std::fs::write(root.join("pkg/BUILD.bazel"), module).unwrap();
-        let index = bls_index::build_static(&root);
+        let index = crate::index::build_static(&root);
         let lines = LineIndex::new(module);
         let at = module.find("beacon").expect("the module's name");
         let card = |relative: &str| {
@@ -1911,7 +1911,7 @@ alias(
     /// did not point at.
     #[test]
     fn the_hover_range_is_the_label_without_its_quotes() {
-        let fixture = Fixture::torture();
+        let fixture = Fixture::workspace();
         let (file, text, position) = fixture.cursor("lib/BUILD.bazel", "//lib/sub:sub_srcs");
         let hovered = hover(&text, &file, &fixture.root, &fixture.index, position)
             .expect("the label resolves");
