@@ -118,6 +118,33 @@ fn is_excluded(entry: &walkdir::DirEntry) -> bool {
     name.starts_with("bazel-") || name == ".git" || name == ".jj"
 }
 
+/// Workspace-relative directories listed in `.bazelignore`.
+///
+/// Bazel does not load packages under these, so neither may we: indexing them
+/// invents targets that no label can resolve to. One path per line, relative to
+/// the root, `#` for comments, and no wildcards — Bazel matches literally.
+fn read_bazelignore(root: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(root.join(".bazelignore")) else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| line.trim_end_matches('/').replace('\\', "/"))
+        .collect()
+}
+
+fn is_ignored(root: &Path, entry: &walkdir::DirEntry, ignored: &[String]) -> bool {
+    if ignored.is_empty() {
+        return false;
+    }
+    let Ok(rel) = entry.path().strip_prefix(root) else {
+        return false;
+    };
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    ignored.contains(&rel)
+}
+
 /// Build the static tier by parsing every BUILD file under `root`.
 ///
 /// Targets declared by legacy macros are invisible here by construction — the
@@ -125,11 +152,12 @@ fn is_excluded(entry: &walkdir::DirEntry) -> bool {
 #[must_use]
 pub fn build_static(root: &Path) -> Index {
     let mut index = Index::default();
+    let ignored = read_bazelignore(root);
 
     let walk = walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| !is_excluded(e));
+        .filter_entry(|e| !is_excluded(e) && !is_ignored(root, e, &ignored));
 
     for entry in walk.filter_map(Result::ok) {
         if !entry.file_type().is_file() {
@@ -270,6 +298,37 @@ mod tests {
             "generated output must not be indexed: {:?}",
             index.targets.keys().collect::<Vec<_>>()
         );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Bazel refuses to load packages under `.bazelignore`, so a target found
+    /// there is one no label can resolve to. Offering it is worse than missing
+    /// it — invariant 4.
+    #[test]
+    fn bazelignore_directories_are_skipped() {
+        let root = std::env::temp_dir().join("bls-bazelignore-test");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::create_dir_all(root.join("broken/nested")).unwrap();
+        std::fs::create_dir_all(root.join("vendor")).unwrap();
+        std::fs::write(root.join("MODULE.bazel"), "module(name='t')\n").unwrap();
+        std::fs::write(
+            root.join(".bazelignore"),
+            "# a comment\n\nbroken\nvendor/\n",
+        )
+        .unwrap();
+        for dir in ["lib", "broken", "broken/nested", "vendor"] {
+            std::fs::write(
+                root.join(dir).join("BUILD.bazel"),
+                "filegroup(name = \"t\", srcs = [])\n",
+            )
+            .unwrap();
+        }
+
+        let index = build_static(&root);
+        let labels: Vec<_> = index.targets.keys().cloned().collect();
+        assert_eq!(labels, vec!["//lib:t".to_string()], "got {labels:?}");
 
         std::fs::remove_dir_all(&root).ok();
     }
