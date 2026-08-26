@@ -30,12 +30,14 @@ jobs:
             exit 1
           fi
 
+      # Outside the working tree: cargo publish refuses to package a dirty
+      # checkout, and an asset built into the repo is exactly that.
       - name: Build release asset
         run: |
           nix develop .#ci --command just build
-          mkdir -p dist
+          mkdir -p "$RUNNER_TEMP/dist"
           cp target/release/bazel-language-server \
-            "dist/bazel-language-server-x86_64-unknown-linux-gnu"
+            "$RUNNER_TEMP/dist/bazel-language-server-x86_64-unknown-linux-gnu"
 
       - name: Publish crate dry run
         run: nix develop .#ci --command cargo publish --dry-run --locked
@@ -57,4 +59,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            dist/*
+            "$RUNNER_TEMP"/dist/*

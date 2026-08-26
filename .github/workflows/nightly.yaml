@@ -26,9 +26,9 @@ jobs:
       - name: Build nightly asset
         run: |
           nix develop .#ci --command just build
-          mkdir -p dist
+          mkdir -p "$RUNNER_TEMP/dist"
           cp target/release/bazel-language-server \
-            "dist/bazel-language-server-nightly-x86_64-unknown-linux-gnu"
+            "$RUNNER_TEMP/dist/bazel-language-server-nightly-x86_64-unknown-linux-gnu"
 
       - name: Move the nightly tag
         run: |
@@ -45,4 +45,4 @@ jobs:
             --notes "Built from ${GITHUB_SHA} on $(date -u +%Y-%m-%dT%H:%M:%SZ)." \
             --prerelease \
             --target "$GITHUB_SHA" \
-            dist/*
+            "$RUNNER_TEMP"/dist/*
