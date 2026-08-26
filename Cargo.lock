@@ -456,9 +456,9 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "starlark-cst"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4c89bfbd6b994908f2f8fdbaee42843a75033ef1aad1e3d2678f4b9f9342f42"
+checksum = "c3a6a64fdd9e666647d10e27741756eeed2c9e5447e88233f8bdff0c17cefb8e"
 dependencies = [
  "rowan",
 ]
