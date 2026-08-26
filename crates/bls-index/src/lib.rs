@@ -13,6 +13,7 @@
 //! freshly built one.
 
 pub mod label;
+pub mod line_index;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -259,17 +260,7 @@ fn collect(
     let Some(root) = File::cast(parse(text, dialect).syntax()) else {
         return;
     };
-    let line_starts: Vec<usize> = std::iter::once(0)
-        .chain(text.match_indices('\n').map(|(i, _)| i + 1))
-        .collect();
-    let position = |offset: usize| -> (u32, u32) {
-        let line = line_starts.partition_point(|&s| s <= offset) - 1;
-        let column: usize = text
-            .get(line_starts[line]..offset)
-            .map_or(0, |s| s.chars().map(char::len_utf16).sum());
-        #[allow(clippy::cast_possible_truncation)]
-        (line as u32, column as u32)
-    };
+    let lines = crate::line_index::LineIndex::new(text);
 
     for stmt in root.stmts() {
         let Stmt::Expr(expr) = stmt else { continue };
@@ -290,7 +281,7 @@ fn collect(
                 Some(range) => range.start(),
                 None => call.range().start(),
             };
-            let (line, character) = position(usize::from(anchor));
+            let (line, character) = lines.position(text, usize::from(anchor));
             targets.insert(
                 label.key(),
                 Target {
@@ -308,7 +299,7 @@ fn collect(
             let Some(label) = parse_label(&raw, Some(package)) else {
                 continue;
             };
-            let (line, character) = position(anchor);
+            let (line, character) = lines.position(text, anchor);
             references.entry(label.key()).or_default().push(Reference {
                 file,
                 line,
