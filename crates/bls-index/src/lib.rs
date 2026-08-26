@@ -30,6 +30,13 @@ pub struct Target {
     pub file: FileId,
     /// Byte offset of the declaring call within its file.
     pub offset: u32,
+    /// Zero-based line of the target's name, and its column in UTF-16 code
+    /// units — the encoding LSP positions use.
+    ///
+    /// Resolved here rather than on demand because the alternative is re-reading
+    /// and re-scanning the file for every symbol a picker displays.
+    pub line: u32,
+    pub character: u32,
 }
 
 /// Index into [`Index::files`].
@@ -209,6 +216,18 @@ fn collect_targets(
     let Some(root) = File::cast(parse(text, dialect).syntax()) else {
         return;
     };
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let position = |offset: usize| -> (u32, u32) {
+        let line = line_starts.partition_point(|&s| s <= offset) - 1;
+        let column: usize = text
+            .get(line_starts[line]..offset)
+            .map_or(0, |s| s.chars().map(char::len_utf16).sum());
+        #[allow(clippy::cast_possible_truncation)]
+        (line as u32, column as u32)
+    };
+
     for stmt in root.stmts() {
         let Stmt::Expr(expr) = stmt else { continue };
         let Some(Expr::Call(call)) = expr.expr() else {
@@ -225,6 +244,13 @@ fn collect_targets(
         } else {
             format!("{package}:{value}")
         };
+        // Point at the name string, not the call: jumping to `cc_library(` is
+        // less useful than landing on the target you searched for.
+        let anchor = match name.string_value_range() {
+            Some(range) => range.start(),
+            None => call.range().start(),
+        };
+        let (line, character) = position(usize::from(anchor));
         out.insert(
             label,
             Target {
@@ -232,6 +258,8 @@ fn collect_targets(
                 rule: rule.into_boxed_str(),
                 file,
                 offset: u32::from(call.range().start()),
+                line,
+                character,
             },
         );
     }
@@ -254,6 +282,8 @@ mod tests {
                 rule: "filegroup".into(),
                 file: FileId(0),
                 offset: 0,
+                line: 0,
+                character: 0,
             },
         );
         handle.store(next);
