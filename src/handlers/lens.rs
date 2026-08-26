@@ -5,7 +5,8 @@ use std::path::Path;
 use lsp_types::{CodeLens, Command, Range};
 use starlark_cst::FileKind;
 
-use super::cursor::{classify_file, enclosing_package};
+use super::cursor::enclosing_package;
+use crate::document::Document;
 
 /// The command a lens runs, and what `workspace/executeCommand` answers to.
 pub const RUN_COMMAND: &str = "bazel-language-server.run";
@@ -19,15 +20,14 @@ pub const RUN_COMMAND: &str = "bazel-language-server.run";
 /// Only BUILD files: a `.bzl` declares no targets, and `MODULE.bazel`'s
 /// top-level calls carry names that are not labels.
 #[must_use]
-pub fn code_lenses(text: &str, file: &Path, root: &Path) -> Vec<CodeLens> {
-    let (dialect, kind) = classify_file(file, root);
-    if kind != FileKind::Build {
+pub fn code_lenses(document: &Document, root: &Path) -> Vec<CodeLens> {
+    if document.kind() != FileKind::Build {
         return Vec::new();
     }
-    let Some(package) = enclosing_package(root, file) else {
+    let Some(package) = enclosing_package(root, document.path()) else {
         return Vec::new();
     };
-    super::symbols::declarations(text, dialect, kind)
+    super::symbols::declarations(document)
         .into_iter()
         .flat_map(|declaration| {
             let label = format!("//{package}:{}", declaration.name);
@@ -64,9 +64,7 @@ mod tests {
 
     fn titles(relative: &str) -> Vec<String> {
         let fixture = Fixture::workspace();
-        let file = fixture.root.join(relative);
-        let text = std::fs::read_to_string(&file).expect("fixture");
-        code_lenses(&text, &file, &fixture.root)
+        code_lenses(&fixture.open(relative), &fixture.root)
             .into_iter()
             .filter_map(|lens| lens.command.map(|command| command.title))
             .collect()

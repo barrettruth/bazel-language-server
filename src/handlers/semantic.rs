@@ -6,8 +6,10 @@
 //! already gets right is left alone.
 
 use lsp_types::{SemanticToken, SemanticTokens};
+use starlark_cst::SyntaxKind;
 use starlark_cst::ast::{Arg, AstNode, CallExpr, LiteralExpr, LoadStmt};
-use starlark_cst::{Dialect, SyntaxKind, parse};
+
+use crate::document::Document;
 
 use crate::line_index::LineIndex;
 
@@ -25,9 +27,10 @@ const STRING: u32 = 3;
 
 /// One token per rule name, attribute name, `load()` path and label.
 #[must_use]
-pub fn semantic_tokens(text: &str, dialect: Dialect) -> SemanticTokens {
-    let lines = LineIndex::new(text);
-    let root = parse(text, dialect).syntax();
+pub fn semantic_tokens(document: &Document) -> SemanticTokens {
+    let text = document.text();
+    let lines = document.line_index();
+    let root = document.parse().syntax();
     let mut absolute: Vec<(u32, u32, u32, u32)> = Vec::new();
 
     for node in root.descendants() {
@@ -149,7 +152,9 @@ fn encode(absolute: &[(u32, u32, u32, u32)]) -> Vec<SemanticToken> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::fixture::document;
     use super::*;
+    use crate::line_index::LineIndex;
 
     const BUILD: &str = "\
 load(\"//tools:defs.bzl\", \"thing\")
@@ -178,7 +183,7 @@ filegroup(
 
     fn tokens_of(text: &str) -> Vec<(String, u32)> {
         let lines = LineIndex::new(text);
-        decode(&semantic_tokens(text, Dialect::Bazel))
+        decode(&semantic_tokens(&document("BUILD.bazel", text)))
             .into_iter()
             .map(|(line, start, length, token_type)| {
                 let at = lines.offset(text, lsp_types::Position::new(line, start));

@@ -3,12 +3,9 @@
 use std::path::Path;
 
 use lsp_types::{DocumentHighlight, DocumentHighlightKind, Position};
-use starlark_cst::parse;
 
-use super::cursor::{
-    classify_file, declaration_site, enclosing_package, name_sites, string_at, target_label,
-};
-use crate::line_index::LineIndex;
+use super::cursor::{declaration_site, enclosing_package, name_sites, string_at, target_label};
+use crate::document::Document;
 
 /// Every occurrence of the target under the cursor, within one file.
 ///
@@ -21,23 +18,17 @@ use crate::line_index::LineIndex;
 /// targets legacy macros compute at evaluation time wait on the graph tier.
 #[must_use]
 pub fn document_highlight(
-    text: &str,
-    file: &Path,
+    document: &Document,
     root: &Path,
     index: &crate::index::Index,
     position: Position,
 ) -> Vec<DocumentHighlight> {
-    let lines = LineIndex::new(text);
-    let label = u32::try_from(lines.offset(text, position))
+    let label = u32::try_from(document.offset(position))
         .ok()
-        .and_then(|offset| {
-            string_at(
-                &parse(text, classify_file(file, root).0).syntax(),
-                offset,
-                classify_file(file, root).1,
-            )
-        })
-        .and_then(|found| target_label(&found, enclosing_package(root, file).as_deref()));
+        .and_then(|offset| string_at(&document.parse().syntax(), offset, document.kind()))
+        .and_then(|found| {
+            target_label(&found, enclosing_package(root, document.path()).as_deref())
+        });
     let Some(label) = label else {
         tracing::debug!("the cursor is on no label and no target name, so nothing is highlighted");
         return Vec::new();
@@ -47,7 +38,7 @@ pub fn document_highlight(
     let declaration = declaration_site(index, &key);
     let highlights: Vec<DocumentHighlight> = name_sites(index, &key, true)
         .into_iter()
-        .filter(|site| site.0 == file)
+        .filter(|site| site.0 == document.path())
         .map(|site| DocumentHighlight {
             range: site.1,
             kind: Some(if declaration.as_ref() == Some(&site) {

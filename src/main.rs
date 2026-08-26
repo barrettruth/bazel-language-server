@@ -6,6 +6,7 @@
 //! stdout is the LSP transport. Everything human-readable goes to stderr.
 
 mod bazel;
+mod document;
 mod format;
 mod handlers;
 mod index;
@@ -15,6 +16,7 @@ mod line_index;
 use std::path::{Path, PathBuf};
 
 use crate::bazel::{BazelClient, BazelConfig};
+use crate::document::Document;
 use crate::index::IndexHandle;
 use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
@@ -32,7 +34,6 @@ use lsp_types::{
     SemanticTokensRequest, ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, TextEdit,
     Uri, WorkspaceSymbolRequest,
 };
-use starlark_cst::{Dialect, FileKind, classify};
 
 type FxHashMap<K, V> = std::collections::HashMap<K, V>;
 
@@ -127,14 +128,7 @@ fn cmd_doctor(path: &std::path::Path) {
 
 /// Open documents. Text is retained so ranges can be computed without re-reading.
 struct Documents {
-    texts: FxHashMap<Uri, String>,
-}
-
-impl Documents {
-    fn classify_uri(uri: &Uri) -> (Dialect, FileKind) {
-        let path = PathBuf::from(uri_to_path(uri));
-        classify(&path, None).unwrap_or((Dialect::Standard, FileKind::Bzl))
-    }
+    texts: FxHashMap<Uri, Document>,
 }
 
 fn run_server() -> Result<()> {
@@ -237,7 +231,7 @@ fn run_server() -> Result<()> {
                 };
                 connection.sender.send(Message::Response(response))?;
             }
-            Message::Notification(note) => match apply(&note, &mut docs) {
+            Message::Notification(note) => match apply(&note, &mut docs, root.as_deref()) {
                 Ok(Some(uri)) => publish(&connection, &docs, &uri)?,
                 Ok(None) => {}
                 // A notification has no reply, so this is the only report.
@@ -316,16 +310,10 @@ fn document_highlight(
         serde_json::from_value(request.params.clone())?;
     let position = params.text_document_position_params;
     let uri = position.text_document.uri;
-    let (Some(text), Some(root)) = (docs.texts.get(&uri), root) else {
+    let (Some(document), Some(root)) = (docs.texts.get(&uri), root) else {
         return Ok(Vec::new());
     };
-    let highlights = handlers::document_highlight(
-        text,
-        Path::new(&uri_to_path(&uri)),
-        root,
-        &index.load(),
-        position.position,
-    );
+    let highlights = handlers::document_highlight(document, root, &index.load(), position.position);
     tracing::debug!(?uri, count = highlights.len(), "documentHighlight");
     Ok(highlights)
 }
@@ -343,16 +331,10 @@ fn hover(
     let params: lsp_types::HoverParams = serde_json::from_value(request.params.clone())?;
     let position = params.text_document_position_params;
     let uri = position.text_document.uri;
-    let (Some(text), Some(root)) = (docs.texts.get(&uri), root) else {
+    let (Some(document), Some(root)) = (docs.texts.get(&uri), root) else {
         return Ok(None);
     };
-    let card = handlers::hover(
-        text,
-        Path::new(&uri_to_path(&uri)),
-        root,
-        &index.load(),
-        position.position,
-    );
+    let card = handlers::hover(document, root, &index.load(), position.position);
     tracing::debug!(?uri, answered = card.is_some(), "hover");
     Ok(card)
 }
@@ -370,12 +352,11 @@ fn formatting(request: &lsp_server::Request, docs: &Documents) -> Result<Vec<Tex
     let params: lsp_types::DocumentFormattingParams =
         serde_json::from_value(request.params.clone())?;
     let uri = params.text_document.uri;
-    let (_, kind) = Documents::classify_uri(&uri);
-    let Some(text) = docs.texts.get(&uri) else {
+    let Some(document) = docs.texts.get(&uri) else {
         return Ok(Vec::new());
     };
-    let edits = format::format(text, kind)?;
-    tracing::debug!(?uri, ?kind, count = edits.len(), "formatting");
+    let edits = format::format(document.text(), document.kind())?;
+    tracing::debug!(?uri, count = edits.len(), "formatting");
     Ok(edits)
 }
 
@@ -386,10 +367,10 @@ fn document_symbols(
 ) -> Result<Vec<lsp_types::DocumentSymbol>> {
     let params: lsp_types::DocumentSymbolParams = serde_json::from_value(request.params.clone())?;
     let uri = params.text_document.uri;
-    let (dialect, kind) = Documents::classify_uri(&uri);
-    let symbols = docs.texts.get(&uri).map_or_else(Vec::new, |text| {
-        handlers::document_symbols(text, dialect, kind)
-    });
+    let symbols = docs
+        .texts
+        .get(&uri)
+        .map_or_else(Vec::new, handlers::document_symbols);
     tracing::debug!(?uri, count = symbols.len(), "documentSymbol");
     Ok(symbols)
 }
@@ -406,13 +387,9 @@ fn definition(
     let position = params.text_document_position_params;
     let uri = position.text_document.uri;
     let links = match (docs.texts.get(&uri), root) {
-        (Some(text), Some(root)) => handlers::definition(
-            text,
-            Path::new(&uri_to_path(&uri)),
-            root,
-            &index.load(),
-            position.position,
-        ),
+        (Some(document), Some(root)) => {
+            handlers::definition(document, root, &index.load(), position.position)
+        }
         _ => Vec::new(),
     };
     tracing::debug!(?uri, count = links.len(), "definition");
@@ -430,9 +407,8 @@ fn references(
     let position = params.text_document_position_params;
     let uri = position.text_document.uri;
     let locations = match (docs.texts.get(&uri), root) {
-        (Some(text), Some(root)) => handlers::references(
-            text,
-            Path::new(&uri_to_path(&uri)),
+        (Some(document), Some(root)) => handlers::references(
+            document,
             root,
             &index.load(),
             position.position,
@@ -469,13 +445,9 @@ fn inlay_hints(
     let params: lsp_types::InlayHintParams = serde_json::from_value(request.params.clone())?;
     let uri = params.text_document.uri;
     let hints = match (docs.texts.get(&uri), root) {
-        (Some(text), Some(root)) => handlers::inlay_hints(
-            text,
-            Path::new(&uri_to_path(&uri)),
-            root,
-            &index.load(),
-            params.range,
-        ),
+        (Some(document), Some(root)) => {
+            handlers::inlay_hints(document, root, &index.load(), params.range)
+        }
         _ => Vec::new(),
     };
     tracing::debug!(?uri, count = hints.len(), "inlayHint");
@@ -489,11 +461,10 @@ fn folding_ranges(
 ) -> Result<Vec<lsp_types::FoldingRange>> {
     let params: lsp_types::FoldingRangeParams = serde_json::from_value(request.params.clone())?;
     let uri = params.text_document.uri;
-    let (dialect, _) = Documents::classify_uri(&uri);
     let ranges = docs
         .texts
         .get(&uri)
-        .map_or_else(Vec::new, |text| handlers::folding_ranges(text, dialect));
+        .map_or_else(Vec::new, handlers::folding_ranges);
     tracing::debug!(?uri, count = ranges.len(), "foldingRange");
     Ok(ranges)
 }
@@ -505,9 +476,8 @@ fn selection_ranges(
 ) -> Result<Vec<lsp_types::SelectionRange>> {
     let params: lsp_types::SelectionRangeParams = serde_json::from_value(request.params.clone())?;
     let uri = params.text_document.uri;
-    let (dialect, _) = Documents::classify_uri(&uri);
-    let ranges = docs.texts.get(&uri).map_or_else(Vec::new, |text| {
-        handlers::selection_ranges(text, dialect, &params.positions)
+    let ranges = docs.texts.get(&uri).map_or_else(Vec::new, |document| {
+        handlers::selection_ranges(document, &params.positions)
     });
     tracing::debug!(?uri, count = ranges.len(), "selectionRange");
     Ok(ranges)
@@ -522,9 +492,7 @@ fn code_lenses(
     let params: lsp_types::CodeLensParams = serde_json::from_value(request.params.clone())?;
     let uri = params.text_document.uri;
     let lenses = match (docs.texts.get(&uri), root) {
-        (Some(text), Some(root)) => {
-            handlers::code_lenses(text, Path::new(&uri_to_path(&uri)), root)
-        }
+        (Some(document), Some(root)) => handlers::code_lenses(document, root),
         _ => Vec::new(),
     };
     tracing::debug!(?uri, count = lenses.len(), "codeLens");
@@ -585,9 +553,7 @@ fn implementation(
     let position = params.text_document_position_params;
     let uri = position.text_document.uri;
     let found = match (docs.texts.get(&uri), root) {
-        (Some(text), Some(root)) => {
-            handlers::implementation(text, Path::new(&uri_to_path(&uri)), root, position.position)
-        }
+        (Some(document), Some(_)) => handlers::implementation(document, position.position),
         _ => Vec::new(),
     };
     tracing::debug!(?uri, count = found.len(), "implementation");
@@ -601,11 +567,10 @@ fn semantic_tokens(
 ) -> Result<lsp_types::SemanticTokens> {
     let params: lsp_types::SemanticTokensParams = serde_json::from_value(request.params.clone())?;
     let uri = params.text_document.uri;
-    let (dialect, _) = Documents::classify_uri(&uri);
     let tokens = docs
         .texts
         .get(&uri)
-        .map(|text| handlers::semantic_tokens(text, dialect))
+        .map(handlers::semantic_tokens)
         .unwrap_or_default();
     tracing::debug!(?uri, count = tokens.data.len(), "semanticTokens");
     Ok(tokens)
@@ -621,9 +586,7 @@ fn document_links(
     let params: lsp_types::DocumentLinkParams = serde_json::from_value(request.params.clone())?;
     let uri = params.text_document.uri;
     let links = match (docs.texts.get(&uri), root) {
-        (Some(text), Some(root)) => {
-            handlers::document_links(text, Path::new(&uri_to_path(&uri)), root, &index.load())
-        }
+        (Some(document), Some(root)) => handlers::document_links(document, root, &index.load()),
         _ => Vec::new(),
     };
     tracing::debug!(?uri, count = links.len(), "documentLink");
@@ -645,12 +608,11 @@ fn rename(
     let params: lsp_types::RenameParams = serde_json::from_value(request.params.clone())?;
     let position = params.text_document_position_params;
     let uri = position.text_document.uri;
-    let (Some(text), Some(root)) = (docs.texts.get(&uri), root) else {
+    let (Some(document), Some(root)) = (docs.texts.get(&uri), root) else {
         return Ok(None);
     };
     let edit = handlers::rename(
-        text,
-        Path::new(&uri_to_path(&uri)),
+        document,
         root,
         &index.load(),
         position.position,
@@ -671,16 +633,10 @@ fn prepare_rename(
     let params: lsp_types::PrepareRenameParams = serde_json::from_value(request.params.clone())?;
     let position = params.text_document_position_params;
     let uri = position.text_document.uri;
-    let (Some(text), Some(root)) = (docs.texts.get(&uri), root) else {
+    let (Some(document), Some(root)) = (docs.texts.get(&uri), root) else {
         return Ok(None);
     };
-    let range = handlers::prepare_rename(
-        text,
-        Path::new(&uri_to_path(&uri)),
-        root,
-        &index.load(),
-        position.position,
-    );
+    let range = handlers::prepare_rename(document, root, &index.load(), position.position);
     tracing::debug!(?uri, renameable = range.is_some(), "prepareRename");
     Ok(range.map(PrepareRenameResult::Range))
 }
@@ -688,12 +644,19 @@ fn prepare_rename(
 /// Apply a notification to the open-document map.
 ///
 /// Returns the document whose diagnostics are now stale, if any.
-fn apply(note: &lsp_server::Notification, docs: &mut Documents) -> Result<Option<Uri>> {
+fn apply(
+    note: &lsp_server::Notification,
+    docs: &mut Documents,
+    root: Option<&Path>,
+) -> Result<Option<Uri>> {
     let method: LspNotificationMethod<'_> = note.method.as_str().into();
     if method == DidOpenTextDocumentNotification::METHOD {
         let params: DidOpenTextDocumentParams = serde_json::from_value(note.params.clone())?;
         let uri = params.text_document.uri;
-        docs.texts.insert(uri.clone(), params.text_document.text);
+        docs.texts.insert(
+            uri.clone(),
+            Document::new(uri_to_path(&uri).into(), params.text_document.text, root),
+        );
         return Ok(Some(uri));
     }
     if method == DidChangeTextDocumentNotification::METHOD {
@@ -704,7 +667,10 @@ fn apply(note: &lsp_server::Notification, docs: &mut Documents) -> Result<Option
                 lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(whole) => whole.text,
                 lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangePartial(partial) => partial.text,
             };
-            docs.texts.insert(uri.clone(), text);
+            docs.texts.insert(
+                uri.clone(),
+                Document::new(uri_to_path(&uri).into(), text, root),
+            );
         }
         return Ok(Some(uri));
     }
@@ -752,13 +718,12 @@ fn definition_response(links: Vec<LocationLink>, link_support: bool) -> Option<D
 }
 
 fn publish(connection: &Connection, docs: &Documents, uri: &Uri) -> Result<()> {
-    let Some(text) = docs.texts.get(uri) else {
+    let Some(document) = docs.texts.get(uri) else {
         return Ok(());
     };
-    let (dialect, kind) = Documents::classify_uri(uri);
-    let mut diagnostics = handlers::syntax_diagnostics(text, dialect);
+    let mut diagnostics = handlers::syntax_diagnostics(document);
     if diagnostics.is_empty() {
-        diagnostics.extend(format::lint(text, kind));
+        diagnostics.extend(format::lint(document.text(), document.kind()));
     }
     let params = PublishDiagnosticsParams {
         uri: uri.clone(),

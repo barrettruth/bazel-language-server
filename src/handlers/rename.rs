@@ -6,12 +6,9 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use lsp_types::{Position, Range, TextEdit, Uri, WorkspaceEdit};
-use starlark_cst::parse;
 
-use super::cursor::{
-    classify_file, enclosing_package, file_uri, name_sites, string_at, target_label,
-};
-use crate::line_index::LineIndex;
+use super::cursor::{enclosing_package, file_uri, name_sites, string_at, target_label};
+use crate::document::Document;
 
 /// The punctuation Bazel allows in a target name, alongside `a-zA-Z0-9`.
 const NAME_PUNCTUATION: &str = "!%-@^_\"#$&'()*-+,;<=>?[]{|}~/.";
@@ -58,8 +55,7 @@ fn validate_name(name: &str) -> Result<()> {
 ///
 /// When `new_name` is not a legal Bazel target name.
 pub fn rename(
-    text: &str,
-    file: &Path,
+    document: &Document,
     root: &Path,
     index: &crate::index::Index,
     position: Position,
@@ -67,7 +63,7 @@ pub fn rename(
 ) -> Result<Option<WorkspaceEdit>> {
     validate_name(new_name)?;
 
-    let Some((_, key)) = renameable(text, file, root, index, position) else {
+    let Some((_, key)) = renameable(document, root, index, position) else {
         return Ok(None);
     };
 
@@ -95,17 +91,16 @@ pub fn rename(
 /// not to offer a rename that would come back empty.
 #[must_use]
 pub fn prepare_rename(
-    text: &str,
-    file: &Path,
+    document: &Document,
     root: &Path,
     index: &crate::index::Index,
     position: Position,
 ) -> Option<Range> {
-    let (name, _) = renameable(text, file, root, index, position)?;
-    let lines = LineIndex::new(text);
+    let (name, _) = renameable(document, root, index, position)?;
+    let lines = document.line_index();
     Some(Range {
-        start: lines.position(text, name.start as usize),
-        end: lines.position(text, name.end as usize),
+        start: lines.position(document.text(), name.start as usize),
+        end: lines.position(document.text(), name.end as usize),
     })
 }
 
@@ -116,20 +111,14 @@ pub fn prepare_rename(
 /// the labels alone would point every one of them at a target that does not
 /// exist — invariant 4.
 fn renameable(
-    text: &str,
-    file: &Path,
+    document: &Document,
     root: &Path,
     index: &crate::index::Index,
     position: Position,
 ) -> Option<(std::ops::Range<u32>, String)> {
-    let lines = LineIndex::new(text);
-    let offset = u32::try_from(lines.offset(text, position)).ok()?;
-    let found = string_at(
-        &parse(text, classify_file(file, root).0).syntax(),
-        offset,
-        classify_file(file, root).1,
-    )?;
-    let label = target_label(&found, enclosing_package(root, file).as_deref())?;
+    let offset = u32::try_from(document.offset(position)).ok()?;
+    let found = string_at(&document.parse().syntax(), offset, document.kind())?;
+    let label = target_label(&found, enclosing_package(root, document.path()).as_deref())?;
 
     let key = label.key();
     if index.target(&key).is_none() {
@@ -148,6 +137,7 @@ fn renameable(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::line_index::LineIndex;
     use std::path::PathBuf;
 
     const LIB: &str = r#"filegroup(
@@ -190,15 +180,16 @@ alias(
         }
 
         /// The document, and the cursor in the middle of `needle`.
-        fn cursor(&self, relative: &str, needle: &str) -> (PathBuf, String, Position) {
+        fn cursor(&self, relative: &str, needle: &str) -> (Document, Position) {
             let file = self.root.join(relative);
             let text = std::fs::read_to_string(&file).expect("fixture file");
             let at = text
                 .find(needle)
                 .unwrap_or_else(|| panic!("{needle:?} is not in {relative}"))
                 + needle.len() / 2;
-            let position = LineIndex::new(&text).position(&text, at);
-            (file, text, position)
+            let document = Document::new(file, text, Some(&self.root));
+            let position = document.position(at);
+            (document, position)
         }
 
         fn rename(
@@ -207,16 +198,17 @@ alias(
             needle: &str,
             new_name: &str,
         ) -> Result<Option<WorkspaceEdit>> {
-            let (file, text, position) = self.cursor(relative, needle);
-            rename(&text, &file, &self.root, &self.index, position, new_name)
+            let (document, position) = self.cursor(relative, needle);
+            rename(&document, &self.root, &self.index, position, new_name)
         }
 
         /// The text `prepareRename` would put in the editor's prompt.
         fn prepared(&self, relative: &str, needle: &str) -> Option<String> {
-            let (file, text, position) = self.cursor(relative, needle);
-            let range = prepare_rename(&text, &file, &self.root, &self.index, position)?;
-            let lines = LineIndex::new(&text);
-            Some(text[lines.offset(&text, range.start)..lines.offset(&text, range.end)].to_string())
+            let (document, position) = self.cursor(relative, needle);
+            let range = prepare_rename(&document, &self.root, &self.index, position)?;
+            let text = document.text();
+            let lines = document.line_index();
+            Some(text[lines.offset(text, range.start)..lines.offset(text, range.end)].to_string())
         }
 
         /// One file, as an editor applying the edits would leave it.

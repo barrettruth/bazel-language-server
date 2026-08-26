@@ -3,11 +3,10 @@
 use std::path::{Path, PathBuf};
 
 use lsp_types::{LocationLink, Position, Range};
-use starlark_cst::parse;
 
-use super::cursor::{StringRole, classify_file, enclosing_package, file_uri, string_at};
+use super::cursor::{StringRole, enclosing_package, file_uri, string_at};
+use crate::document::Document;
 use crate::label::{Label, parse_label};
-use crate::line_index::LineIndex;
 
 /// Where a definition lives, and the position to reveal in it.
 pub(super) struct Site {
@@ -65,25 +64,21 @@ pub(super) fn file_site(root: &Path, label: &Label) -> Option<Site> {
 /// yields nothing rather than a guess.
 #[must_use]
 pub fn definition(
-    text: &str,
-    file: &Path,
+    document: &Document,
     root: &Path,
     index: &crate::index::Index,
     position: Position,
 ) -> Vec<LocationLink> {
-    let lines = LineIndex::new(text);
+    let text = document.text();
+    let lines = document.line_index();
     let Ok(offset) = u32::try_from(lines.offset(text, position)) else {
         return Vec::new();
     };
-    let Some(found) = string_at(
-        &parse(text, classify_file(file, root).0).syntax(),
-        offset,
-        classify_file(file, root).1,
-    ) else {
+    let Some(found) = string_at(&document.parse().syntax(), offset, document.kind()) else {
         return Vec::new();
     };
 
-    let package = enclosing_package(root, file);
+    let package = enclosing_package(root, document.path());
     let site = match &found.role {
         // A load path names a file, never a target, so the index is not
         // consulted: a rule that happened to be called `defs.bzl` is not it.
@@ -143,17 +138,18 @@ mod tests {
     #[test]
     fn definition_on_a_declaration_goes_nowhere() {
         let fixture = Fixture::workspace();
-        let file = fixture.root.join("lib/BUILD.bazel");
-        let text = std::fs::read_to_string(&file).expect("fixture");
-        let offset = text.find("\"srcs\"").expect("the srcs declaration") + 2;
-        let lines = LineIndex::new(&text);
+        let document = fixture.open("lib/BUILD.bazel");
+        let offset = document
+            .text()
+            .find("\"srcs\"")
+            .expect("the srcs declaration")
+            + 2;
 
         let jumps = definition(
-            &text,
-            &file,
+            &document,
             &fixture.root,
             &crate::index::Index::default(),
-            lines.position(&text, offset),
+            document.position(offset),
         );
         assert!(jumps.is_empty(), "got {jumps:?}");
     }
@@ -164,18 +160,17 @@ mod tests {
     #[test]
     fn a_label_inside_a_command_is_navigable() {
         let fixture = Fixture::workspace();
-        let file = fixture.root.join("lib/BUILD.bazel");
-        let text = std::fs::read_to_string(&file).expect("fixture");
-        let lines = LineIndex::new(&text);
+        let document = fixture.open("lib/BUILD.bazel");
+        let text = document.text();
+        let lines = document.line_index();
         let cmd = text.find("$(location :srcs)").expect("the genrule cmd");
 
         let on = |offset: usize| {
             definition(
-                &text,
-                &file,
+                &document,
                 &fixture.root,
                 &fixture.index,
-                lines.position(&text, offset),
+                document.position(offset),
             )
         };
 
@@ -184,7 +179,7 @@ mod tests {
         assert_eq!(jumps.len(), 1, "got {jumps:?}");
         let origin = jumps[0].origin_selection_range.expect("an origin range");
         assert_eq!(
-            &text[lines.offset(&text, origin.start)..lines.offset(&text, origin.end)],
+            &text[lines.offset(text, origin.start)..lines.offset(text, origin.end)],
             ":srcs",
             "the origin covers the label alone, not the command around it"
         );
@@ -304,34 +299,19 @@ mod tests {
     #[test]
     fn a_cursor_outside_a_string_yields_nothing() {
         let text = "filegroup(\n    name = \"srcs\",\n    srcs = [\"//lib:a\"],\n)\n";
-        let lines = LineIndex::new(text);
         let root = fixture_root();
+        let document = Document::new(root.join("lib/BUILD.bazel"), text.to_string(), Some(&root));
         let index = crate::index::Index::default();
 
         for needle in ["filegroup", "name", "srcs = [", ")"] {
             let at = text.find(needle).unwrap();
-            let found = definition(
-                text,
-                &root.join("lib/BUILD.bazel"),
-                &root,
-                &index,
-                lines.position(text, at),
-            );
+            let found = definition(&document, &root, &index, document.position(at));
             assert!(found.is_empty(), "cursor on {needle:?} found {found:?}");
         }
 
         // The quotes are not part of the label either.
         let quote = text.find("\"//lib:a\"").unwrap();
-        assert!(
-            definition(
-                text,
-                &root.join("lib/BUILD.bazel"),
-                &root,
-                &index,
-                lines.position(text, quote),
-            )
-            .is_empty()
-        );
+        assert!(definition(&document, &root, &index, document.position(quote)).is_empty());
     }
 
     /// The origin range is what the editor underlines. It has to be the label
@@ -345,11 +325,12 @@ mod tests {
             .into_iter()
             .next()
             .expect("the label resolves");
-        let text = std::fs::read_to_string(fixture.root.join("lib/BUILD.bazel")).unwrap();
-        let lines = LineIndex::new(&text);
+        let document = fixture.open("lib/BUILD.bazel");
+        let text = document.text();
+        let lines = document.line_index();
         let origin = link.origin_selection_range.expect("an origin range");
-        let start = lines.offset(&text, origin.start);
-        let end = lines.offset(&text, origin.end);
+        let start = lines.offset(text, origin.start);
+        let end = lines.offset(text, origin.end);
         assert_eq!(&text[start..end], "//lib/sub:sub_srcs");
     }
 }

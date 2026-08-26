@@ -3,11 +3,12 @@
 use std::path::Path;
 
 use lsp_types::{InlayHint, InlayHintKind, Label, Range};
-use starlark_cst::{SyntaxElement, SyntaxKind, parse};
+use starlark_cst::{SyntaxElement, SyntaxKind};
 
-use super::cursor::{classify_file, enclosing_package, string_at};
+use crate::document::Document;
+
+use super::cursor::{enclosing_package, string_at};
 use crate::label::parse_label;
-use crate::line_index::LineIndex;
 
 /// The resolved package in front of every relative label in range.
 ///
@@ -20,20 +21,19 @@ use crate::line_index::LineIndex;
 /// against is a guess, and a guess rendered as fact is worse than nothing.
 #[must_use]
 pub fn inlay_hints(
-    text: &str,
-    file: &Path,
+    document: &Document,
     root: &Path,
     index: &crate::index::Index,
     range: Range,
 ) -> Vec<InlayHint> {
-    let (dialect, kind) = classify_file(file, root);
-    let Some(package) = enclosing_package(root, file) else {
+    let text = document.text();
+    let Some(package) = enclosing_package(root, document.path()) else {
         return Vec::new();
     };
-    let lines = LineIndex::new(text);
+    let lines = document.line_index();
     let from = lines.offset(text, range.start);
     let to = lines.offset(text, range.end);
-    let syntax = parse(text, dialect).syntax();
+    let syntax = document.parse().syntax();
 
     let mut hints = Vec::new();
     for token in syntax
@@ -45,8 +45,11 @@ pub fn inlay_hints(
         if start < from || start > to {
             continue;
         }
-        let Some(found) = string_at(&syntax, u32::from(token.text_range().start()) + 1, kind)
-        else {
+        let Some(found) = string_at(
+            &syntax,
+            u32::from(token.text_range().start()) + 1,
+            document.kind(),
+        ) else {
             continue;
         };
         if found.value.starts_with("//") || found.value.starts_with('@') {
@@ -74,6 +77,8 @@ pub fn inlay_hints(
 
 #[cfg(test)]
 mod tests {
+    use crate::line_index::LineIndex;
+
     use super::super::fixture::Fixture;
     use super::*;
 
@@ -87,17 +92,22 @@ mod tests {
             end: lines.position(&text, text.len()),
         };
 
-        inlay_hints(&text, &file, &fixture.root, &fixture.index, whole)
-            .into_iter()
-            .map(|hint| {
-                let at = lines.offset(&text, hint.position);
-                let rest = text[at..].split('"').next().unwrap_or_default().to_string();
-                let Label::String(label) = hint.label else {
-                    unreachable!("only string labels are produced")
-                };
-                (rest, label)
-            })
-            .collect()
+        inlay_hints(
+            &fixture.open(relative),
+            &fixture.root,
+            &fixture.index,
+            whole,
+        )
+        .into_iter()
+        .map(|hint| {
+            let at = lines.offset(&text, hint.position);
+            let rest = text[at..].split('"').next().unwrap_or_default().to_string();
+            let Label::String(label) = hint.label else {
+                unreachable!("only string labels are produced")
+            };
+            (rest, label)
+        })
+        .collect()
     }
 
     #[test]

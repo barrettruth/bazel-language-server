@@ -1,13 +1,12 @@
 //! `textDocument/implementation`: from a rule to the function behind it.
 
-use std::path::Path;
-
 use lsp_types::{Location, Range};
 use starlark_cst::ast::{AstNode, CallExpr, File, Stmt};
-use starlark_cst::{SyntaxKind, TextRange, parse};
+use starlark_cst::{SyntaxKind, TextRange};
 
-use super::cursor::{classify_file, file_uri};
-use crate::line_index::LineIndex;
+use crate::document::Document;
+
+use super::cursor::file_uri;
 
 /// The `def` named by the `implementation` of the rule under the cursor.
 ///
@@ -19,19 +18,13 @@ use crate::line_index::LineIndex;
 /// name resolution across `load()`, which is a symbol table this server does
 /// not have and `starlark-cst` deliberately declines to build.
 #[must_use]
-pub fn implementation(
-    text: &str,
-    file: &Path,
-    root: &Path,
-    position: lsp_types::Position,
-) -> Vec<Location> {
-    let (dialect, _) = classify_file(file, root);
-    let lines = LineIndex::new(text);
+pub fn implementation(document: &Document, position: lsp_types::Position) -> Vec<Location> {
+    let text = document.text();
+    let lines = document.line_index();
     let Ok(offset) = u32::try_from(lines.offset(text, position)) else {
         return Vec::new();
     };
-    let parsed = parse(text, dialect);
-    let syntax = parsed.syntax();
+    let syntax = document.parse().syntax();
 
     let Some(wanted) = implementation_name(&syntax, offset) else {
         tracing::debug!("the cursor names no rule implementation");
@@ -41,7 +34,7 @@ pub fn implementation(
         tracing::debug!(function = wanted, "no `def` of that name in this file");
         return Vec::new();
     };
-    let Some(uri) = file_uri(file) else {
+    let Some(uri) = file_uri(document.path()) else {
         return Vec::new();
     };
 
@@ -120,7 +113,8 @@ fn definition_of(syntax: &starlark_cst::SyntaxNode, wanted: &str) -> Option<Text
 
 #[cfg(test)]
 mod tests {
-    use super::super::fixture::Fixture;
+    use crate::line_index::LineIndex;
+
     use super::*;
 
     const BZL: &str = "\
@@ -134,11 +128,10 @@ beacon_component = rule(
 ";
 
     fn jump(text: &str, needle: &str) -> Option<String> {
-        let root = Fixture::workspace().root;
-        let file = root.join("tools/scratch.bzl");
         let lines = LineIndex::new(text);
         let at = text.find(needle).expect("needle") + needle.len() / 2;
-        let found = implementation(text, &file, &root, lines.position(text, at));
+        let bzl = super::super::fixture::document("tools/scratch.bzl", text);
+        let found = implementation(&bzl, lines.position(text, at));
         found.first().map(|location| {
             let start = lines.offset(text, location.range.start);
             let end = lines.offset(text, location.range.end);

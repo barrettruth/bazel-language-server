@@ -4,7 +4,9 @@
 //! and whatever nodes survived still fold.
 
 use lsp_types::{FoldingRange, FoldingRangeKind};
-use starlark_cst::{Dialect, SyntaxKind, SyntaxNode, parse};
+use starlark_cst::{SyntaxKind, SyntaxNode};
+
+use crate::document::Document;
 
 use crate::line_index::LineIndex;
 
@@ -18,9 +20,10 @@ use crate::line_index::LineIndex;
 /// A region that begins and ends on one line is dropped: collapsing it hides
 /// nothing and clients draw a useless marker for it.
 #[must_use]
-pub fn folding_ranges(text: &str, dialect: Dialect) -> Vec<FoldingRange> {
-    let lines = LineIndex::new(text);
-    let root = parse(text, dialect).syntax();
+pub fn folding_ranges(document: &Document) -> Vec<FoldingRange> {
+    let text = document.text();
+    let lines = document.line_index();
+    let root = document.parse().syntax();
     let mut ranges = Vec::new();
 
     for node in root.descendants() {
@@ -103,6 +106,7 @@ fn push(ranges: &mut Vec<FoldingRange>, start: u32, end: u32, kind: Option<Foldi
 
 #[cfg(test)]
 mod tests {
+    use super::super::fixture::document;
     use super::*;
 
     const BUILD: &str = "\
@@ -125,7 +129,7 @@ filegroup(name = \"one_line\")
 ";
 
     fn fold(text: &str) -> Vec<(u32, u32, bool)> {
-        folding_ranges(text, Dialect::Bazel)
+        folding_ranges(&document("BUILD.bazel", text))
             .into_iter()
             .map(|range| {
                 (

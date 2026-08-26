@@ -1,18 +1,18 @@
 //! `textDocument/publishDiagnostics`: what the parser could not read.
 
+use crate::document::Document;
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
-use starlark_cst::{Dialect, parse};
-
-use crate::line_index::LineIndex;
 
 /// Syntax errors, as diagnostics.
 ///
 /// The parser always returns a tree, so this never suppresses other features;
 /// a file with errors still yields whatever symbols survived recovery.
 #[must_use]
-pub fn syntax_diagnostics(text: &str, dialect: Dialect) -> Vec<Diagnostic> {
-    let lines = LineIndex::new(text);
-    parse(text, dialect)
+pub fn syntax_diagnostics(document: &Document) -> Vec<Diagnostic> {
+    let text = document.text();
+    let lines = document.line_index();
+    document
+        .parse()
         .errors()
         .iter()
         .map(|error| Diagnostic {
@@ -30,15 +30,17 @@ pub fn syntax_diagnostics(text: &str, dialect: Dialect) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::fixture::document;
     use super::*;
 
     #[test]
     fn broken_input_still_yields_symbols() {
         let broken = "filegroup(name = \"a\",\n\ncc_library(name = \"b\")\n";
-        assert!(!syntax_diagnostics(broken, Dialect::Bazel).is_empty());
+        assert!(!syntax_diagnostics(&document("BUILD.bazel", broken)).is_empty());
         // Recovery is local, so the file is not written off entirely.
         assert!(
-            !parse(broken, Dialect::Bazel)
+            !document("BUILD.bazel", broken)
+                .parse()
                 .syntax()
                 .text()
                 .to_string()

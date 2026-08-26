@@ -3,12 +3,9 @@
 use std::path::Path;
 
 use lsp_types::{Location, Position};
-use starlark_cst::parse;
 
-use super::cursor::{
-    classify_file, enclosing_package, file_uri, name_sites, string_at, target_label,
-};
-use crate::line_index::LineIndex;
+use super::cursor::{enclosing_package, file_uri, name_sites, string_at, target_label};
+use crate::document::Document;
 
 /// Every place in the main repository that names the target under the cursor.
 ///
@@ -23,26 +20,20 @@ use crate::line_index::LineIndex;
 /// graph tier; see `ROADMAP.md` G4.
 #[must_use]
 pub fn references(
-    text: &str,
-    file: &Path,
+    document: &Document,
     root: &Path,
     index: &crate::index::Index,
     position: Position,
     include_declaration: bool,
 ) -> Vec<Location> {
-    let lines = LineIndex::new(text);
-    let Ok(offset) = u32::try_from(lines.offset(text, position)) else {
+    let Ok(offset) = u32::try_from(document.offset(position)) else {
         return Vec::new();
     };
-    let Some(found) = string_at(
-        &parse(text, classify_file(file, root).0).syntax(),
-        offset,
-        classify_file(file, root).1,
-    ) else {
+    let Some(found) = string_at(&document.parse().syntax(), offset, document.kind()) else {
         return Vec::new();
     };
 
-    let package = enclosing_package(root, file);
+    let package = enclosing_package(root, document.path());
     let Some(label) = target_label(&found, package.as_deref()) else {
         return Vec::new();
     };
@@ -73,18 +64,15 @@ mod tests {
     fn references_agree_from_either_end() {
         let fixture = Fixture::workspace();
         let index = crate::index::build_static(&fixture.root);
-        let file = fixture.root.join("lib/BUILD.bazel");
-        let text = std::fs::read_to_string(&file).expect("fixture");
-        let lines = LineIndex::new(&text);
+        let document = fixture.open("lib/BUILD.bazel");
 
         let at = |needle: &str, skip: usize| {
-            let offset = text.find(needle).expect("needle") + skip;
+            let offset = document.text().find(needle).expect("needle") + skip;
             references(
-                &text,
-                &file,
+                &document,
                 &fixture.root,
                 &index,
-                lines.position(&text, offset),
+                document.position(offset),
                 false,
             )
         };
@@ -107,13 +95,12 @@ mod tests {
         );
 
         // The declaration is a separate site, added only when asked for.
-        let offset = text.find("\"srcs\"").expect("needle") + 2;
+        let offset = document.text().find("\"srcs\"").expect("needle") + 2;
         let with_declaration = references(
-            &text,
-            &file,
+            &document,
             &fixture.root,
             &index,
-            lines.position(&text, offset),
+            document.position(offset),
             true,
         );
         assert_eq!(with_declaration.len(), from_declaration.len() + 1);
@@ -125,18 +112,19 @@ mod tests {
     fn a_load_path_names_no_target() {
         let fixture = Fixture::workspace();
         let index = crate::index::build_static(&fixture.root);
-        let file = fixture.root.join("lib/BUILD.bazel");
-        let text = std::fs::read_to_string(&file).expect("fixture");
-        let lines = LineIndex::new(&text);
-        let offset = text.find("//macros:legacy.bzl").expect("a load path") + 4;
+        let document = fixture.open("lib/BUILD.bazel");
+        let offset = document
+            .text()
+            .find("//macros:legacy.bzl")
+            .expect("a load path")
+            + 4;
 
         assert!(
             references(
-                &text,
-                &file,
+                &document,
                 &fixture.root,
                 &index,
-                lines.position(&text, offset),
+                document.position(offset),
                 true,
             )
             .is_empty()

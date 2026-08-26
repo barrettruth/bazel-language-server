@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::label::{Label, make_variable_labels, parse_label};
 use lsp_types::{Position, Range, Uri};
 use starlark_cst::ast::{Arg, AstNode, LiteralExpr, LoadItem, LoadStmt};
-use starlark_cst::{Dialect, FileKind, SyntaxElement, SyntaxKind, SyntaxNode, classify};
+use starlark_cst::{FileKind, SyntaxElement, SyntaxKind, SyntaxNode};
 
 pub(super) fn file_uri(path: &Path) -> Option<Uri> {
     let mut uri = String::from("file://");
@@ -36,14 +36,6 @@ pub(super) fn file_uri(path: &Path) -> Option<Uri> {
         }
     }
     uri.parse().ok()
-}
-
-/// The dialect and kind of a file in this workspace.
-///
-/// Both fall out of the path, so a handler derives them rather than taking them
-/// as arguments that a caller could pass inconsistently with each other.
-pub(super) fn classify_file(file: &Path, root: &Path) -> (Dialect, FileKind) {
-    classify(file, Some(root)).unwrap_or((Dialect::Standard, FileKind::Bzl))
 }
 
 /// What a string in a build file refers to, decided by where it sits.
@@ -281,7 +273,7 @@ mod tests {
     use super::*;
     use crate::handlers::fixture::fixture_root;
     use crate::handlers::{document_highlight, prepare_rename, references, rename};
-    use starlark_cst::parse;
+    use starlark_cst::{Dialect, parse};
 
     /// A path a client can parse, for every path a filesystem allows.
     ///
@@ -365,8 +357,8 @@ mod tests {
     #[test]
     fn only_a_build_file_declares_targets() {
         let root = PathBuf::from("/ws");
-        let file = root.join("MODULE.bazel");
         let text = "module(name = \"beacon\")\n";
+        let module = crate::handlers::fixture::document("MODULE.bazel", text);
         let position = Position {
             line: 0,
             character: 15,
@@ -387,11 +379,11 @@ mod tests {
 
         // `/ws/MODULE.bazel` classifies as a module, so every handler that
         // resolves a target name declines on it.
-        assert!(references(text, &file, &root, &index, position, true).is_empty());
-        assert!(document_highlight(text, &file, &root, &index, position).is_empty());
-        assert!(prepare_rename(text, &file, &root, &index, position).is_none());
+        assert!(references(&module, &root, &index, position, true).is_empty());
+        assert!(document_highlight(&module, &root, &index, position).is_empty());
+        assert!(prepare_rename(&module, &root, &index, position).is_none());
         assert!(
-            rename(text, &file, &root, &index, position, "renamed")
+            rename(&module, &root, &index, position, "renamed")
                 .expect("a legal name")
                 .is_none()
         );

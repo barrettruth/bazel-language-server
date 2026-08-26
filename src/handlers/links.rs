@@ -8,12 +8,12 @@
 use std::path::Path;
 
 use lsp_types::{DocumentLink, Range};
-use starlark_cst::{SyntaxElement, SyntaxKind, parse};
+use starlark_cst::{SyntaxElement, SyntaxKind};
 
-use super::cursor::{classify_file, enclosing_package, file_uri, string_at};
+use super::cursor::{enclosing_package, file_uri, string_at};
 use super::definition::{file_site, target_site};
+use crate::document::Document;
 use crate::label::parse_label;
-use crate::line_index::LineIndex;
 
 /// A link for every label and `load()` path that resolves.
 ///
@@ -23,15 +23,14 @@ use crate::line_index::LineIndex;
 /// here by design.
 #[must_use]
 pub fn document_links(
-    text: &str,
-    file: &Path,
+    document: &Document,
     root: &Path,
     index: &crate::index::Index,
 ) -> Vec<DocumentLink> {
-    let (dialect, kind) = classify_file(file, root);
-    let package = enclosing_package(root, file);
-    let lines = LineIndex::new(text);
-    let syntax = parse(text, dialect).syntax();
+    let text = document.text();
+    let package = enclosing_package(root, document.path());
+    let lines = document.line_index();
+    let syntax = document.parse().syntax();
 
     let mut resolved = Vec::new();
     for token in syntax
@@ -40,7 +39,7 @@ pub fn document_links(
         .filter(|token| token.kind() == SyntaxKind::STRING)
     {
         let offset = u32::from(token.text_range().start()) + 1;
-        let Some(found) = string_at(&syntax, offset, kind) else {
+        let Some(found) = string_at(&syntax, offset, document.kind()) else {
             continue;
         };
         let Some(label) = parse_label(&found.value, package.as_deref()) else {
@@ -70,6 +69,8 @@ pub fn document_links(
 
 #[cfg(test)]
 mod tests {
+    use crate::line_index::LineIndex;
+
     use super::super::fixture::Fixture;
     use super::*;
 
@@ -79,7 +80,7 @@ mod tests {
         let text = std::fs::read_to_string(&file).expect("fixture");
         let lines = LineIndex::new(&text);
 
-        document_links(&text, &file, &fixture.root, &fixture.index)
+        document_links(&fixture.open(relative), &fixture.root, &fixture.index)
             .into_iter()
             .map(|link| {
                 let start = lines.offset(&text, link.range.start);

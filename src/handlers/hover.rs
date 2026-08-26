@@ -3,12 +3,11 @@
 use std::path::Path;
 
 use lsp_types::{Hover, MarkupContent, MarkupKind, Position, Range};
-use starlark_cst::parse;
 
-use super::cursor::{StringRole, classify_file, enclosing_package, string_at};
+use super::cursor::{StringRole, enclosing_package, string_at};
 use super::definition::file_site;
+use crate::document::Document;
 use crate::label::{Label, parse_label};
-use crate::line_index::LineIndex;
 
 /// What the string under the cursor names.
 ///
@@ -28,20 +27,16 @@ use crate::line_index::LineIndex;
 /// `":srcs"` — which is most of what makes the card worth reading.
 #[must_use]
 pub fn hover(
-    text: &str,
-    file: &Path,
+    document: &Document,
     root: &Path,
     index: &crate::index::Index,
     position: Position,
 ) -> Option<Hover> {
-    let lines = LineIndex::new(text);
+    let text = document.text();
+    let lines = document.line_index();
     let offset = u32::try_from(lines.offset(text, position)).ok()?;
-    let found = string_at(
-        &parse(text, classify_file(file, root).0).syntax(),
-        offset,
-        classify_file(file, root).1,
-    )?;
-    let package = enclosing_package(root, file);
+    let found = string_at(&document.parse().syntax(), offset, document.kind())?;
+    let package = enclosing_package(root, document.path());
 
     let markdown = match &found.role {
         // A load path names a file, so the index is not consulted, exactly as
@@ -270,16 +265,11 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         std::fs::write(root.join("pkg/BUILD.bazel"), module).unwrap();
         let index = crate::index::build_static(&root);
-        let lines = LineIndex::new(module);
         let at = module.find("beacon").expect("the module's name");
         let card = |relative: &str| {
-            hover(
-                module,
-                &root.join(relative),
-                &root,
-                &index,
-                lines.position(module, at),
-            )
+            let document = Document::new(root.join(relative), module.to_string(), Some(&root));
+            let position = document.position(at);
+            hover(&document, &root, &index, position)
         };
 
         assert!(card("MODULE.bazel").is_none(), "a module is not a target");
@@ -294,14 +284,15 @@ mod tests {
     #[test]
     fn the_hover_range_is_the_label_without_its_quotes() {
         let fixture = Fixture::workspace();
-        let (file, text, position) = fixture.cursor("lib/BUILD.bazel", "//lib/sub:sub_srcs");
-        let hovered = hover(&text, &file, &fixture.root, &fixture.index, position)
-            .expect("the label resolves");
+        let (document, position) = fixture.cursor("lib/BUILD.bazel", "//lib/sub:sub_srcs");
+        let hovered =
+            hover(&document, &fixture.root, &fixture.index, position).expect("the label resolves");
 
-        let lines = LineIndex::new(&text);
+        let text = document.text();
+        let lines = document.line_index();
         let range = hovered.range.expect("a range");
-        let start = lines.offset(&text, range.start);
-        let end = lines.offset(&text, range.end);
+        let start = lines.offset(text, range.start);
+        let end = lines.offset(text, range.end);
         assert_eq!(&text[start..end], "//lib/sub:sub_srcs");
     }
 }

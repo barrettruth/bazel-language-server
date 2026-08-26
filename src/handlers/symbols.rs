@@ -4,11 +4,11 @@
 use lsp_types::{
     BaseSymbolInformation, DocumentSymbol, Location, Position, Range, SymbolKind, WorkspaceSymbol,
 };
+use starlark_cst::FileKind;
 use starlark_cst::ast::{AstNode, Expr, File, Stmt};
-use starlark_cst::{Dialect, FileKind, parse};
 
 use super::cursor::file_uri;
-use crate::line_index::LineIndex;
+use crate::document::Document;
 
 /// A target declared in a BUILD file, with the ranges an editor needs.
 pub(super) struct Declaration {
@@ -30,13 +30,13 @@ pub(super) struct Declaration {
 /// yields `x`, but the `x_0`, `x_1` it actually declares are computed at
 /// evaluation time and only Bazel knows them.
 #[must_use]
-pub(super) fn declarations(text: &str, dialect: Dialect, kind: FileKind) -> Vec<Declaration> {
-    if kind != FileKind::Build {
+pub(super) fn declarations(document: &Document) -> Vec<Declaration> {
+    if document.kind() != FileKind::Build {
         return Vec::new();
     }
-    let lines = LineIndex::new(text);
-    let parsed = parse(text, dialect);
-    let Some(file) = File::cast(parsed.syntax()) else {
+    let text = document.text();
+    let lines = document.line_index();
+    let Some(file) = File::cast(document.parse().syntax()) else {
         return Vec::new();
     };
 
@@ -75,8 +75,8 @@ pub(super) fn declarations(text: &str, dialect: Dialect, kind: FileKind) -> Vec<
 }
 
 #[must_use]
-pub fn document_symbols(text: &str, dialect: Dialect, kind: FileKind) -> Vec<DocumentSymbol> {
-    declarations(text, dialect, kind)
+pub fn document_symbols(document: &Document) -> Vec<DocumentSymbol> {
+    declarations(document)
         .into_iter()
         .map(|d| DocumentSymbol {
             name: format!(":{}", d.name),
@@ -150,13 +150,14 @@ pub fn workspace_symbols(index: &crate::index::Index, query: &str) -> Vec<Worksp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::fixture::document;
 
     const BUILD: &str = "\
 filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\")\n";
 
     #[test]
     fn finds_every_declaration() {
-        let found = declarations(BUILD, Dialect::Bazel, FileKind::Build);
+        let found = declarations(&document("BUILD.bazel", BUILD));
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].name, "srcs");
         assert_eq!(found[0].rule, "filegroup");
@@ -169,7 +170,7 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
 
     #[test]
     fn symbols_are_prefixed_like_labels() {
-        let symbols = document_symbols(BUILD, Dialect::Bazel, FileKind::Build);
+        let symbols = document_symbols(&document("BUILD.bazel", BUILD));
         assert_eq!(symbols[0].name, ":srcs");
         assert_eq!(symbols[0].detail.as_deref(), Some("filegroup"));
     }
@@ -177,11 +178,8 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
     #[test]
     fn module_bazel_declares_no_targets() {
         let module = "bazel_dep(name = \"rules_shell\", version = \"0.3.0\")\n";
-        assert!(declarations(module, Dialect::Bazel, FileKind::Module).is_empty());
+        assert!(declarations(&document("MODULE.bazel", module)).is_empty());
         // The same text read as a BUILD file would look like a target.
-        assert_eq!(
-            declarations(module, Dialect::Bazel, FileKind::Build).len(),
-            1
-        );
+        assert_eq!(declarations(&document("BUILD.bazel", module)).len(), 1);
     }
 }

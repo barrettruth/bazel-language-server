@@ -1,7 +1,9 @@
 //! `textDocument/selectionRange`: expand the selection along the syntax tree.
 
 use lsp_types::{Position, Range, SelectionRange};
-use starlark_cst::{Dialect, SyntaxNode, parse};
+use starlark_cst::SyntaxNode;
+
+use crate::document::Document;
 
 use crate::line_index::LineIndex;
 
@@ -16,13 +18,10 @@ use crate::line_index::LineIndex;
 /// the protocol expects one result per position and dropping one would
 /// misalign the client's array.
 #[must_use]
-pub fn selection_ranges(
-    text: &str,
-    dialect: Dialect,
-    positions: &[Position],
-) -> Vec<SelectionRange> {
-    let lines = LineIndex::new(text);
-    let root = parse(text, dialect).syntax();
+pub fn selection_ranges(document: &Document, positions: &[Position]) -> Vec<SelectionRange> {
+    let text = document.text();
+    let lines = document.line_index();
+    let root = document.parse().syntax();
 
     positions
         .iter()
@@ -67,14 +66,16 @@ fn chain(root: &SyntaxNode, text: &str, lines: &LineIndex, offset: usize) -> Sel
 
 #[cfg(test)]
 mod tests {
+    use super::super::fixture::document;
     use super::*;
+    use crate::line_index::LineIndex;
 
     const BUILD: &str = "filegroup(\n    name = \"srcs\",\n    srcs = [\"a.txt\"],\n)\n";
 
     fn widening(text: &str, needle: &str) -> Vec<String> {
         let lines = LineIndex::new(text);
         let at = text.find(needle).expect("needle") + 1;
-        let ranges = selection_ranges(text, Dialect::Bazel, &[lines.position(text, at)]);
+        let ranges = selection_ranges(&document("BUILD.bazel", text), &[lines.position(text, at)]);
         assert_eq!(ranges.len(), 1);
 
         let mut out = Vec::new();
@@ -125,7 +126,7 @@ mod tests {
             Position::new(999, 0),
         ];
         assert_eq!(
-            selection_ranges(BUILD, Dialect::Bazel, &positions).len(),
+            selection_ranges(&document("BUILD.bazel", BUILD), &positions).len(),
             positions.len()
         );
     }

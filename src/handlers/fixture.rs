@@ -7,13 +7,22 @@ use lsp_types::{LocationLink, MarkupKind, Position};
 use super::definition::definition;
 use super::highlight::document_highlight;
 use super::hover::hover;
-use crate::line_index::LineIndex;
+use crate::document::Document;
 
 pub(super) fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/workspace")
         .canonicalize()
         .expect("the test workspace is checked in")
+}
+
+/// A buffer that is not on disk, under a name that classifies it the way the
+/// request under test needs.
+///
+/// The kind of a file comes from its path, so a test asking about a BUILD file
+/// has to name one even when the bytes never leave memory.
+pub(super) fn document(name: &str, text: &str) -> Document {
+    Document::new(Path::new("/ws").join(name), text.to_string(), None)
 }
 
 /// Drives a handler the way the server does: read the file, put the cursor
@@ -30,32 +39,39 @@ impl Fixture {
         Self { root, index }
     }
 
-    /// The document, and the cursor in the middle of `needle`.
-    pub(super) fn cursor(&self, relative: &str, needle: &str) -> (PathBuf, String, Position) {
+    /// A file of the workspace, as the server holds it once opened.
+    pub(super) fn open(&self, relative: &str) -> Document {
         let file = self.root.join(relative);
         let text = std::fs::read_to_string(&file).expect("fixture file");
-        let at = text.find(needle).unwrap_or_else(|| {
+        Document::new(file, text, Some(&self.root))
+    }
+
+    /// The document, and the cursor in the middle of `needle`.
+    pub(super) fn cursor(&self, relative: &str, needle: &str) -> (Document, Position) {
+        let document = self.open(relative);
+        let at = document.text().find(needle).unwrap_or_else(|| {
             panic!("{needle:?} is not in {relative}");
         }) + needle.len() / 2;
-        let position = LineIndex::new(&text).position(&text, at);
-        (file, text, position)
+        let position = document.position(at);
+        (document, position)
     }
 
     pub(super) fn links(&self, relative: &str, needle: &str) -> Vec<LocationLink> {
-        let (file, text, position) = self.cursor(relative, needle);
-        definition(&text, &file, &self.root, &self.index, position)
+        let (document, position) = self.cursor(relative, needle);
+        definition(&document, &self.root, &self.index, position)
     }
 
     /// Every highlight, as `kind line:character text`, so a test reads the
     /// range's own contents rather than taking its word for them.
     pub(super) fn highlights(&self, relative: &str, needle: &str) -> Vec<String> {
-        let (file, text, position) = self.cursor(relative, needle);
-        let lines = LineIndex::new(&text);
-        document_highlight(&text, &file, &self.root, &self.index, position)
+        let (document, position) = self.cursor(relative, needle);
+        let text = document.text();
+        let lines = document.line_index();
+        document_highlight(&document, &self.root, &self.index, position)
             .into_iter()
             .map(|highlight| {
-                let start = lines.offset(&text, highlight.range.start);
-                let end = lines.offset(&text, highlight.range.end);
+                let start = lines.offset(text, highlight.range.start);
+                let end = lines.offset(text, highlight.range.end);
                 format!(
                     "{:?} {}:{} {}",
                     highlight.kind.expect("a kind"),
@@ -69,8 +85,8 @@ impl Fixture {
 
     /// The hover card, as the client would render it.
     pub(super) fn card(&self, relative: &str, needle: &str) -> Option<String> {
-        let (file, text, position) = self.cursor(relative, needle);
-        let hovered = hover(&text, &file, &self.root, &self.index, position)?;
+        let (document, position) = self.cursor(relative, needle);
+        let hovered = hover(&document, &self.root, &self.index, position)?;
         match hovered.contents {
             lsp_types::Contents::MarkupContent(markup) => {
                 assert_eq!(markup.kind, MarkupKind::Markdown, "markdown, not marked-up");
