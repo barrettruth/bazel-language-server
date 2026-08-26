@@ -173,6 +173,55 @@ Two further limits:
 crates against 34, and tonic has just moved to `grpc/grpc-rust` with breaking
 changes in preparation. Revisit when per-call latency actually matters.
 
+## 2.2 Watching — one recursive watch, never per-directory
+
+rust-analyzer calls `watcher.watch(dir, Recursive)` once **per directory**
+(`crates/vfs-notify/src/lib.rs:329-331`). Measured with notify 8.2.0 on macOS:
+
+| directories watched individually | result |
+| --- | --- |
+| 4,096 | 72 s setup, quadratic — 8.2.0 rebuilds the whole `FSEventStream` per call |
+| **4,100** | every `watch()` returns `Ok(())` and **zero events are delivered, ever** |
+
+Silent and total. FSEvents burns a file descriptor per stream path, so it is
+really `RLIMIT_NOFILE` (default 256) in disguise; notify 9.0.0-rc.4 at least
+reports the failure, and notify `main` added an `RLIMIT_NOFILE/12` budget with
+the note that past ~`/10` "FSEvents closes fd 0, which this process owns."
+
+**One recursive watch on the 74k-package root instead: 0.002 s setup, 15.8 ms
+to the deepest package, 2,000 writes → 4,048 events, no rescan flags.** The
+problem is the shape of the call, not the crate.
+
+**Own the watcher rather than using `workspace/didChangeWatchedFiles`.**
+`DidChangeWatchedFilesRegistrationOptions` has watchers and no exclude field, so
+"not under `bazel-out`" is inexpressible, and VS Code's default
+`files.watcherExclude` has no Bazel entries.
+
+### The symlink trap, measured
+
+`walkdir` with `follow_links(true)` and no pruning finds **94,118 BUILD files in
+a tree that has 74,001**. The `bazel-<workspace>` convenience symlink points at
+the execroot, whose symlink forest re-enters the source tree. Neither walkdir's
+ancestor-loop detection nor rust-analyzer's `path_might_be_cyclic` catches it —
+rust-analyzer walks Bazel workspaces twice. `bls_index::build_static` sets
+`follow_links(false)` and prunes `bazel-*`; `bazel_symlinks_are_not_followed`
+pins it.
+
+### Traversal and memory
+
+- `walkdir`, `ignore` and `jwalk` are identical serially (~37 K entries/s — the
+  filesystem is the ceiling). `ignore`'s parallel walker reaches 69 K/s at ×18.
+  Its gitignore machinery costs 2.27× **and is wrong**: Bazel does not honour
+  `.gitignore`. Use it with gitignore off, or stay on walkdir.
+- `jwalk` 0.9.0 is deprecated by its own author.
+- Real RSS for the light index over 74 K paths + 189 K entries: **15.58 MiB**
+  with `lasso`, 26.00 MiB if a name lookup is an `FxHashMap`, ~16.6 MiB if that
+  is flattened to CSR. `ThreadedRodeo` costs 2.8× `Rodeo`; `ustr` is worse than
+  plain `String`. This confirms the ~13 MB estimate in §1.
+- **`bincode` 3.0.0 is `compile_error!("https://xkcd.com/2347/")`** and `sled`
+  has not shipped since 2024-10-11. If persistence ever happens, neither is a
+  candidate.
+
 ## 3. Threading
 
 Three roles. Everything slow is off the main thread, and the index is published
