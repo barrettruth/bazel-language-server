@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use bls_index::label::{Label, parse_label};
 use lsp_types::{
-    BaseSymbolInformation, Diagnostic, DiagnosticSeverity, DocumentSymbol, Location, LocationLink,
-    Position, Range, SymbolKind, TextEdit, Uri, WorkspaceEdit, WorkspaceSymbol,
+    BaseSymbolInformation, Diagnostic, DiagnosticSeverity, DocumentHighlight,
+    DocumentHighlightKind, DocumentSymbol, Location, LocationLink, Position, Range, SymbolKind,
+    TextEdit, Uri, WorkspaceEdit, WorkspaceSymbol,
 };
 use starlark_cst::ast::{Arg, AstNode, Expr, File, LiteralExpr, LoadItem, LoadStmt, Stmt};
 use starlark_cst::{Dialect, FileKind, SyntaxElement, SyntaxKind, SyntaxNode, parse};
@@ -495,6 +496,52 @@ pub fn references(
         .collect()
 }
 
+/// Every occurrence of the target under the cursor, within one file.
+///
+/// `references` narrowed to the document the cursor is in, which is what an
+/// editor paints as you rest on a label. The declaration is a `Write` and the
+/// labels naming it are `Read`s, so a client can colour the definition apart
+/// from its uses.
+///
+/// Partial in the same two ways `references` is: external repositories and the
+/// targets legacy macros compute at evaluation time wait on the graph tier.
+#[must_use]
+pub fn document_highlight(
+    text: &str,
+    dialect: Dialect,
+    file: &Path,
+    root: &Path,
+    index: &bls_index::Index,
+    position: Position,
+) -> Vec<DocumentHighlight> {
+    let lines = LineIndex::new(text);
+    let label = u32::try_from(lines.offset(text, position))
+        .ok()
+        .and_then(|offset| string_at(&parse(text, dialect).syntax(), offset))
+        .and_then(|found| target_label(&found, enclosing_package(root, file).as_deref()));
+    let Some(label) = label else {
+        tracing::debug!("the cursor is on no label and no target name, so nothing is highlighted");
+        return Vec::new();
+    };
+
+    let key = label.key();
+    let declaration = declaration_site(index, &key);
+    let highlights: Vec<DocumentHighlight> = name_sites(index, &key, true)
+        .into_iter()
+        .filter(|site| site.0 == file)
+        .map(|site| DocumentHighlight {
+            range: site.1,
+            kind: Some(if declaration.as_ref() == Some(&site) {
+                DocumentHighlightKind::Write
+            } else {
+                DocumentHighlightKind::Read
+            }),
+        })
+        .collect();
+    tracing::debug!(label = key, count = highlights.len(), "documentHighlight");
+    highlights
+}
+
 /// The target a string names, whether it declares the target or points at it.
 ///
 /// A declaration names its own package; a label has to be resolved against the
@@ -532,13 +579,8 @@ fn name_sites(
         })
         .collect();
 
-    if include_declaration && let Some(target) = index.target(key) {
-        if let Some(path) = index.path(target.file) {
-            sites.push((
-                path.to_path_buf(),
-                name_range(target.line, target.character, target.length),
-            ));
-        }
+    if include_declaration && let Some(site) = declaration_site(index, key) {
+        sites.push(site);
     }
 
     sites.sort_by(|a, b| {
@@ -548,6 +590,16 @@ fn name_sites(
     });
     sites.dedup();
     sites
+}
+
+/// Where the target's own `name` is written, in the same shape as the sites
+/// referring to it, so the declaration is recognisable among them.
+fn declaration_site(index: &bls_index::Index, key: &str) -> Option<(PathBuf, Range)> {
+    let target = index.target(key)?;
+    Some((
+        index.path(target.file)?.to_path_buf(),
+        name_range(target.line, target.character, target.length),
+    ))
 }
 
 /// A name's range, from the UTF-16 columns the index recorded. A name never
@@ -824,7 +876,7 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
     /// A `.bzl` path is not a target. Answering with the files that `load()` it
     /// would be a different question answered wrongly.
     #[test]
-    fn references_of_a_load_path_are_empty() {
+    fn a_load_path_names_no_target() {
         let fixture = Fixture::torture();
         let index = bls_index::build_static(&fixture.root);
         let file = fixture.root.join("lib/BUILD.bazel");
@@ -844,6 +896,68 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
             )
             .is_empty()
         );
+        assert!(
+            fixture
+                .highlights("lib/BUILD.bazel", "//macros:legacy.bzl")
+                .is_empty()
+        );
+    }
+
+    /// The declaration is the write and every label naming it is a read, so an
+    /// editor can colour the definition apart from its uses. Both ends of the
+    /// question agree, as they do for references.
+    #[test]
+    fn document_highlight_writes_the_declaration_and_reads_its_labels() {
+        let fixture = Fixture::torture();
+        let expected = [
+            "Write 11:12 srcs",
+            "Read 35:15 srcs",
+            "Read 58:10 srcs",
+            "Read 63:27 srcs",
+            "Read 78:24 srcs",
+            "Read 88:12 srcs",
+        ];
+
+        let from_declaration = fixture.highlights("lib/BUILD.bazel", "\"srcs\"");
+        assert_eq!(from_declaration, expected);
+        // From a label pointing at it: `actual = ":srcs"`.
+        assert_eq!(
+            fixture.highlights("lib/BUILD.bazel", "\":srcs\","),
+            expected
+        );
+    }
+
+    /// Only this document. `//lib/sub:sub_srcs` is named three times in
+    /// `//lib` and declared in `//lib/sub`, and neither file sees the other's
+    /// occurrences — a highlight in a buffer the user is not looking at is a
+    /// range the client would paint over the wrong text.
+    #[test]
+    fn document_highlight_stops_at_the_file_it_was_asked_about() {
+        let fixture = Fixture::torture();
+        assert_eq!(
+            fixture.highlights("lib/BUILD.bazel", "//lib/sub:sub_srcs"),
+            [
+                "Read 23:23 sub_srcs",
+                "Read 59:19 sub_srcs",
+                "Read 63:55 sub_srcs"
+            ]
+        );
+        // The declaring file holds the write and none of the reads.
+        assert_eq!(
+            fixture.highlights("lib/sub/BUILD.bazel", "\"sub_srcs\""),
+            ["Write 3:12 sub_srcs"]
+        );
+    }
+
+    /// A cursor on an identifier, a comment or bare punctuation is on no
+    /// target, and the empty answer is logged rather than silent.
+    #[test]
+    fn document_highlight_declines_off_a_string() {
+        let fixture = Fixture::torture();
+        for needle in ["filegroup(", "# Cross-package", "cc_library_placeholder"] {
+            let found = fixture.highlights("lib/BUILD.bazel", needle);
+            assert!(found.is_empty(), "cursor on {needle:?} found {found:?}");
+        }
     }
 
     const LIB: &str = r#"filegroup(
@@ -1177,21 +1291,55 @@ alias(
             Self { root, index }
         }
 
-        fn links(&self, relative: &str, needle: &str) -> Vec<LocationLink> {
+        /// The document, and the cursor in the middle of `needle`.
+        fn cursor(&self, relative: &str, needle: &str) -> (PathBuf, String, Position) {
             let file = self.root.join(relative);
             let text = std::fs::read_to_string(&file).expect("fixture file");
             let at = text.find(needle).unwrap_or_else(|| {
                 panic!("{needle:?} is not in {relative}");
             }) + needle.len() / 2;
-            let lines = LineIndex::new(&text);
+            let position = LineIndex::new(&text).position(&text, at);
+            (file, text, position)
+        }
+
+        fn links(&self, relative: &str, needle: &str) -> Vec<LocationLink> {
+            let (file, text, position) = self.cursor(relative, needle);
             definition(
                 &text,
                 Dialect::Bazel,
                 &file,
                 &self.root,
                 &self.index,
-                lines.position(&text, at),
+                position,
             )
+        }
+
+        /// Every highlight, as `kind line:character text`, so a test reads the
+        /// range's own contents rather than taking its word for them.
+        fn highlights(&self, relative: &str, needle: &str) -> Vec<String> {
+            let (file, text, position) = self.cursor(relative, needle);
+            let lines = LineIndex::new(&text);
+            document_highlight(
+                &text,
+                Dialect::Bazel,
+                &file,
+                &self.root,
+                &self.index,
+                position,
+            )
+            .into_iter()
+            .map(|highlight| {
+                let start = lines.offset(&text, highlight.range.start);
+                let end = lines.offset(&text, highlight.range.end);
+                format!(
+                    "{:?} {}:{} {}",
+                    highlight.kind.expect("a kind"),
+                    highlight.range.start.line,
+                    highlight.range.start.character,
+                    &text[start..end]
+                )
+            })
+            .collect()
         }
 
         /// Where the cursor lands, as `path:line:character` relative to the

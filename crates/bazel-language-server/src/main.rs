@@ -18,11 +18,12 @@ use lsp_server::{Connection, Message, Response};
 use lsp_types::{
     Definition, DefinitionRequest, DefinitionResponse, DidChangeTextDocumentNotification,
     DidChangeTextDocumentParams, DidCloseTextDocumentNotification, DidCloseTextDocumentParams,
-    DidOpenTextDocumentNotification, DidOpenTextDocumentParams, DocumentSymbolRequest,
-    InitializeParams, Location, LocationLink, LspNotificationMethod, LspRequestMethod,
-    Notification, PrepareRenameRequest, PrepareRenameResult, PublishDiagnosticsNotification,
-    PublishDiagnosticsParams, ReferencesRequest, RenameOptions, RenameRequest, Request as _,
-    ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, Uri, WorkspaceSymbolRequest,
+    DidOpenTextDocumentNotification, DidOpenTextDocumentParams, DocumentHighlightRequest,
+    DocumentSymbolRequest, InitializeParams, Location, LocationLink, LspNotificationMethod,
+    LspRequestMethod, Notification, PrepareRenameRequest, PrepareRenameResult,
+    PublishDiagnosticsNotification, PublishDiagnosticsParams, ReferencesRequest, RenameOptions,
+    RenameRequest, Request as _, ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, Uri,
+    WorkspaceSymbolRequest,
 };
 use starlark_cst::{Dialect, FileKind, classify};
 
@@ -139,6 +140,7 @@ fn run_server() -> Result<()> {
         workspace_symbol_provider: Some(lsp_types::WorkspaceSymbolProvider::Bool(true)),
         definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
         references_provider: Some(lsp_types::ReferencesProvider::Bool(true)),
+        document_highlight_provider: Some(lsp_types::DocumentHighlightProvider::Bool(true)),
         rename_provider: Some(lsp_types::RenameProvider::RenameOptions(RenameOptions {
             prepare_provider: Some(true),
             ..Default::default()
@@ -271,6 +273,8 @@ fn respond(
         };
         tracing::debug!(?uri, count = locations.len(), "references");
         Response::new_ok(id, locations)
+    } else if method == DocumentHighlightRequest::METHOD {
+        Response::new_ok(id, document_highlight(request, docs, index, root)?)
     } else if method == RenameRequest::METHOD {
         Response::new_ok(id, rename(request, docs, index, root)?)
     } else if method == PrepareRenameRequest::METHOD {
@@ -293,6 +297,33 @@ fn respond(
             format!("unhandled: {}", request.method),
         )
     })
+}
+
+/// Every occurrence of the target under the cursor, in that document alone.
+fn document_highlight(
+    request: &lsp_server::Request,
+    docs: &Documents,
+    index: &IndexHandle,
+    root: Option<&Path>,
+) -> Result<Vec<lsp_types::DocumentHighlight>> {
+    let params: lsp_types::DocumentHighlightParams =
+        serde_json::from_value(request.params.clone())?;
+    let position = params.text_document_position_params;
+    let uri = position.text_document.uri;
+    let (dialect, _) = Documents::classify_uri(&uri);
+    let (Some(text), Some(root)) = (docs.texts.get(&uri), root) else {
+        return Ok(Vec::new());
+    };
+    let highlights = handlers::document_highlight(
+        text,
+        dialect,
+        Path::new(&uri_to_path(&uri)),
+        root,
+        &index.load(),
+        position.position,
+    );
+    tracing::debug!(?uri, count = highlights.len(), "documentHighlight");
+    Ok(highlights)
 }
 
 /// The edits a rename produces, or nothing where there is no target under the

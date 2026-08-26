@@ -25,6 +25,7 @@ and all four need the graph.
 | `workspace/symbol` | working, static tier only |
 | `textDocument/definition` | working, main repo only |
 | `textDocument/references` | working, main repo only |
+| `textDocument/documentHighlight` | working, current file only |
 | `textDocument/rename` | working, main repo only |
 | completion, hover | not yet |
 
