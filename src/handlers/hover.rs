@@ -110,7 +110,7 @@ fn card(label: &str, detail: &str) -> String {
 /// The card for a target the index has seen declared.
 fn declared_card(index: &crate::index::Index, root: &Path, label: &Label) -> Option<String> {
     let target = index.target(&label.key())?;
-    let file = index.path(target.file)?;
+    let file = &target.file;
     Some(card(
         &label.key(),
         &format!("`{}` declared in `{}`", target.rule, relative(root, file)),

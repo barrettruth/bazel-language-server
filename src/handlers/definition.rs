@@ -32,7 +32,7 @@ pub(super) fn target_site(
     label: &Label,
 ) -> Option<Site> {
     let target = index.target(&label.key())?;
-    let path = index.path(target.file)?.to_path_buf();
+    let path = target.file.to_path_buf();
     // The index carries where the name starts and not where the call ends, so
     // the range is empty. Clients reveal the line either way, and re-reading
     // the file to widen it would put IO in the request path.

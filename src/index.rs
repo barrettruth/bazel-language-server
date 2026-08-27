@@ -12,7 +12,7 @@
 //! that stays consistent for the life of a request while a writer swaps in a
 //! freshly built one.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -31,7 +31,7 @@ pub struct Target {
     pub name: Box<str>,
     /// The rule or macro that declared it, as written at the call site.
     pub rule: Box<str>,
-    pub file: FileId,
+    pub file: Arc<Path>,
     /// Byte offset of the declaring call within its file.
     pub offset: u32,
     /// Zero-based line of the target's name, and its column in UTF-16 code
@@ -54,9 +54,12 @@ pub struct Target {
 ///
 /// Ordered by position so a list of these sorts into the order a reader would
 /// read them in, which is also the order that keeps a client's list stable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Path first, so that order is the same from one run to the next: the walk
+/// that finds these visits directories in whatever order the filesystem hands
+/// back.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Reference {
-    pub file: FileId,
+    pub file: Arc<Path>,
     /// Zero-based line of the name within the label string, and its column in
     /// UTF-16 code units — the same convention as [`Target`].
     pub line: u32,
@@ -65,15 +68,13 @@ pub struct Reference {
     pub length: u32,
 }
 
-/// Index into [`Index::files`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct FileId(pub u32);
-
 /// An immutable snapshot. Cheap to clone behind an `Arc`; never mutated in
 /// place.
 #[derive(Debug, Default)]
 pub struct Index {
-    pub files: Vec<PathBuf>,
+    /// How many BUILD files this was built from, including those that declare
+    /// nothing. A count rather than a list: the paths live on the entries.
+    pub files: u32,
     /// Keyed by `//package:name`, the form a label resolves to.
     pub targets: FxHashMap<String, Target>,
     /// Every mention of a label in a rule-call argument, under the same key as
@@ -95,11 +96,6 @@ impl Index {
     #[must_use]
     pub fn references(&self, label: &str) -> &[Reference] {
         self.references.get(label).map_or(&[], Vec::as_slice)
-    }
-
-    #[must_use]
-    pub fn path(&self, id: FileId) -> Option<&Path> {
-        self.files.get(id.0 as usize).map(PathBuf::as_path)
     }
 
     #[must_use]
@@ -225,13 +221,11 @@ pub fn build_static(root: &Path) -> Index {
             continue;
         };
 
-        #[allow(clippy::cast_possible_truncation)]
-        let file = FileId(index.files.len() as u32);
-        index.files.push(path.to_path_buf());
+        index.files += 1;
         collect(
             &text,
             dialect,
-            file,
+            &Arc::from(path),
             &package,
             &mut index.targets,
             &mut index.references,
@@ -239,7 +233,7 @@ pub fn build_static(root: &Path) -> Index {
     }
 
     tracing::info!(
-        files = index.files.len(),
+        files = index.files,
         targets = index.targets.len(),
         labels_referenced = index.references.len(),
         "built static index"
@@ -284,7 +278,7 @@ pub fn declaration_in(text: &str, dialect: Dialect, name: &str) -> Option<Positi
 fn collect(
     text: &str,
     dialect: Dialect,
-    file: FileId,
+    file: &Arc<Path>,
     package: &str,
     targets: &mut FxHashMap<String, Target>,
     references: &mut FxHashMap<String, Vec<Reference>>,
@@ -319,7 +313,7 @@ fn collect(
                 Target {
                     name: value.into_boxed_str(),
                     rule: rule.into_boxed_str(),
-                    file,
+                    file: Arc::clone(file),
                     offset: u32::from(call.range().start()),
                     line,
                     character,
@@ -337,7 +331,7 @@ fn collect(
             let Position { line, character } =
                 lines.position(text, anchor + label.name_offset(&raw));
             references.entry(label.key()).or_default().push(Reference {
-                file,
+                file: Arc::clone(file),
                 line,
                 character,
                 length: utf16_len(&label.name),
@@ -420,7 +414,7 @@ mod tests {
             Target {
                 name: "srcs".into(),
                 rule: "filegroup".into(),
-                file: FileId(0),
+                file: Arc::from(Path::new("/ws/lib/BUILD.bazel")),
                 offset: 0,
                 line: 0,
                 character: 0,
@@ -568,7 +562,7 @@ mod tests {
         collect(
             text,
             Dialect::Bazel,
-            FileId(0),
+            &Arc::from(Path::new("/ws/lib/BUILD.bazel")),
             package,
             &mut targets,
             &mut references,

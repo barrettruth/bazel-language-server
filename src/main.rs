@@ -104,7 +104,7 @@ fn cmd_index(path: &std::path::Path) {
     let index = crate::index::build_static(&root);
     println!(
         "indexed {} BUILD files, {} targets in {:.2}s",
-        index.files.len(),
+        index.files,
         index.len(),
         started.elapsed().as_secs_f64()
     );

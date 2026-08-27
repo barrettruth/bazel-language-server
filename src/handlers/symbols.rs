@@ -124,7 +124,7 @@ pub fn workspace_symbols(index: &crate::index::Index, query: &str) -> Vec<Worksp
         .filter(|(label, _)| needle.is_empty() || label.to_lowercase().contains(&needle))
         .take(512)
         .filter_map(|(label, target)| {
-            let uri = file_uri(index.path(target.file)?)?;
+            let uri = file_uri(&target.file)?;
             let at = Position {
                 line: target.line,
                 character: target.character,

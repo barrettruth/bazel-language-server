@@ -226,11 +226,11 @@ pub(super) fn name_sites(
     let mut sites: Vec<(PathBuf, Range)> = index
         .references(key)
         .iter()
-        .filter_map(|reference| {
-            Some((
-                index.path(reference.file)?.to_path_buf(),
+        .map(|reference| {
+            (
+                reference.file.to_path_buf(),
                 name_range(reference.line, reference.character, reference.length),
-            ))
+            )
         })
         .collect();
 
@@ -252,7 +252,7 @@ pub(super) fn name_sites(
 pub(super) fn declaration_site(index: &crate::index::Index, key: &str) -> Option<(PathBuf, Range)> {
     let target = index.target(key)?;
     Some((
-        index.path(target.file)?.to_path_buf(),
+        target.file.to_path_buf(),
         name_range(target.line, target.character, target.length),
     ))
 }
