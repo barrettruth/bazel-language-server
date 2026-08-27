@@ -52,6 +52,19 @@ impl Label {
     }
 }
 
+/// Whether `raw` names a repository other than the main one.
+///
+/// The one refusal a reader can act on. Everything else [`parse_label`]
+/// declines is not a label at all, but this is a label whose answer exists and
+/// needs the graph tier to reach — so a request can say that rather than
+/// answering nothing, which reads as a feature that was never written.
+#[must_use]
+pub fn is_external(raw: &str) -> bool {
+    raw.strip_prefix("@@")
+        .or_else(|| raw.strip_prefix('@'))
+        .is_some_and(|rest| !rest.starts_with("//"))
+}
+
 /// Normalise a label written in `package` to its absolute form.
 ///
 /// Handled: `//pkg:target`, `//:target`, `//pkg` (shorthand for
@@ -65,19 +78,20 @@ impl Label {
 /// set rather than a target.
 #[must_use]
 pub fn parse_label(raw: &str, package: Option<&str>) -> Option<Label> {
-    let raw = if let Some(rest) = raw.strip_prefix("@@").or_else(|| raw.strip_prefix('@')) {
-        if !rest.starts_with("//") {
-            tracing::debug!(
-                label = raw,
-                "external repository: the apparent name maps to a canonical one only Bazel knows, \
-                 and the repo may not be fetched at all"
-            );
-            return None;
-        }
-        rest
-    } else {
-        raw
-    };
+    if is_external(raw) {
+        tracing::debug!(
+            label = raw,
+            "external repository: the apparent name maps to a canonical one only Bazel knows, \
+             and the repo may not be fetched at all"
+        );
+        return None;
+    }
+    // Past `is_external`, a leading `@` or `@@` is the main repository named
+    // explicitly, and what follows it is an ordinary absolute label.
+    let raw = raw
+        .strip_prefix("@@")
+        .or_else(|| raw.strip_prefix('@'))
+        .unwrap_or(raw);
 
     if raw.contains("...") {
         tracing::debug!(label = raw, "target pattern, not a label");
