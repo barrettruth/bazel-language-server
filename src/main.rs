@@ -195,6 +195,10 @@ fn run_server() -> Result<()> {
 
     let root = workspace_root(&init);
     let link_support = supports_definition_links(&init);
+    // The defaults until the client's settings are read: `bazel` on PATH, no
+    // extra flags. Held here so the one place that starts Bazel goes through
+    // the same configuration `doctor` reports on.
+    let bazel = BazelConfig::default();
     let index = IndexHandle::new();
     if let Some(root) = root.clone() {
         // Synchronous: ~1.4 s on a 74k-package repo, which is cheaper than the
@@ -217,8 +221,14 @@ fn run_server() -> Result<()> {
                     break;
                 }
                 let id = request.id.clone();
-                let response = match respond(&request, &docs, &index, root.as_deref(), link_support)
-                {
+                let response = match respond(
+                    &request,
+                    &docs,
+                    &index,
+                    root.as_deref(),
+                    link_support,
+                    &bazel,
+                ) {
                     Ok(response) => response,
                     Err(err) => {
                         tracing::error!(method = request.method, "{err:#}");
@@ -252,6 +262,7 @@ fn respond(
     index: &IndexHandle,
     root: Option<&Path>,
     link_support: bool,
+    bazel: &BazelConfig,
 ) -> Result<Response> {
     let id = request.id.clone();
     let method: LspRequestMethod<'_> = request.method.as_str().into();
@@ -284,7 +295,7 @@ fn respond(
     } else if method == CodeLensRequest::METHOD {
         Response::new_ok(id, code_lenses(request, docs, root)?)
     } else if method == ExecuteCommandRequest::METHOD {
-        Response::new_ok(id, execute_command(request, root)?)
+        Response::new_ok(id, execute_command(request, root, bazel)?)
     } else if method == InlayHintRequest::METHOD {
         Response::new_ok(id, inlay_hints(request, docs, index, root)?)
     } else if method == WorkspaceSymbolRequest::METHOD {
@@ -512,6 +523,7 @@ fn code_lenses(
 fn execute_command(
     request: &lsp_server::Request,
     root: Option<&Path>,
+    bazel: &BazelConfig,
 ) -> Result<Option<serde_json::Value>> {
     let params: lsp_types::ExecuteCommandParams = serde_json::from_value(request.params.clone())?;
     if params.command != handlers::RUN_COMMAND {
@@ -529,9 +541,14 @@ fn execute_command(
     let Some(root) = root else {
         anyhow::bail!("no workspace to run in");
     };
+    if !bazel.enable {
+        anyhow::bail!("the Bazel subsystem is disabled (bazel.enable = false)");
+    }
 
-    tracing::info!(%verb, %label, "bazel");
-    std::process::Command::new("bazel")
+    let binary = &bazel.path;
+    tracing::info!(%binary, %verb, %label, "bazel");
+    std::process::Command::new(binary)
+        .args(&bazel.args)
         .arg(verb)
         .arg(label)
         .current_dir(root)
@@ -539,7 +556,7 @@ fn execute_command(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .with_context(|| format!("running `bazel {verb} {label}`"))?;
+        .with_context(|| format!("running `{binary} {verb} {label}`"))?;
     Ok(None)
 }
 
