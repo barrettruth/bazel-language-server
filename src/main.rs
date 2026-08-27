@@ -662,10 +662,19 @@ fn apply(
     if method == DidChangeTextDocumentNotification::METHOD {
         let params: DidChangeTextDocumentParams = serde_json::from_value(note.params.clone())?;
         let uri = params.text_document.text_document_identifier.uri;
-        if let Some(change) = params.content_changes.into_iter().next() {
+        // Full sync is advertised, so a change carries the whole buffer and the
+        // last one is its current state. A partial change carries a range
+        // replacement instead; storing that as the document would leave every
+        // request answering about text the user cannot see, so it is refused
+        // and the last good text stands.
+        if let Some(change) = params.content_changes.into_iter().next_back() {
             let text = match change {
-                lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(whole) => whole.text,
-                lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangePartial(partial) => partial.text,
+                lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(
+                    whole,
+                ) => whole.text,
+                lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangePartial(_) => {
+                    anyhow::bail!("client sent an incremental change for a document synced in full")
+                }
             };
             docs.texts.insert(
                 uri.clone(),
