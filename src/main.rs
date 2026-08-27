@@ -143,6 +143,28 @@ fn cmd_doctor(path: &std::path::Path) {
     }
 }
 
+/// Say at startup what the Bazel tier will be able to answer.
+///
+/// The log line is the whole point of the call. Nothing reads the result yet,
+/// and a user who discovers that their Bazel is too old at the moment a label
+/// declines to resolve learns it in the worst possible place — invariant 3.
+///
+/// A workspace is required because Bazel is asked from inside one. Without a
+/// root there is no Bazel tier to report on and the static tier is the whole
+/// server.
+fn report_bazel(config: &BazelConfig, root: Option<&Path>) {
+    let Some(root) = root else { return };
+    match BazelClient::new(config.clone(), root.to_path_buf()).probe() {
+        Ok(probe) => tracing::info!(
+            version = %probe.version,
+            rule_schemas = probe.capabilities.rule_classes,
+            repo_mapping = probe.capabilities.repo_mapping,
+            "bazel"
+        ),
+        Err(err) => tracing::warn!("the Bazel tier is unavailable: {err:#}"),
+    }
+}
+
 /// Open documents. Text is retained so ranges can be computed without re-reading.
 struct Documents {
     texts: FxHashMap<Uri, Document>,
@@ -232,6 +254,7 @@ fn run_server() -> Result<()> {
     // Defaults until the client's settings are read, so the one place that
     // starts Bazel goes through the configuration `doctor` reports on.
     let bazel = BazelConfig::default();
+    report_bazel(&bazel, root.as_deref());
     let index = IndexHandle::new();
     if let Some(root) = root.clone() {
         // Synchronous: ~1.4 s on a 74k-package repo, which is cheaper than the
