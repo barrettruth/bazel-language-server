@@ -333,6 +333,7 @@ fn run_server() -> Result<()> {
         }
     }
 
+    drop(connection);
     io_threads.join()?;
     tracing::info!("shut down");
     Ok(())
