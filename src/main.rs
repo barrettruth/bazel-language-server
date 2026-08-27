@@ -13,6 +13,7 @@ mod handlers;
 mod index;
 mod label;
 mod line_index;
+mod watch;
 
 use std::path::{Path, PathBuf};
 
@@ -154,7 +155,7 @@ fn cmd_doctor(path: &std::path::Path) {
 /// `None` is the ordinary case rather than a failure. Without a workspace, or
 /// without a usable Bazel, the static tier is the whole server and invariant 2
 /// says that has to be enough.
-fn start_bazel(config: &BazelConfig, root: Option<&Path>) -> Option<Actor> {
+fn start_bazel(config: &BazelConfig, root: Option<&Path>) -> Option<std::sync::Arc<Actor>> {
     let client = BazelClient::new(config.clone(), root?.to_path_buf());
     match client.probe() {
         Ok(probe) => {
@@ -170,7 +171,7 @@ fn start_bazel(config: &BazelConfig, root: Option<&Path>) -> Option<Actor> {
             // overlaps with the user reading code instead of with their first
             // question.
             actor.refresh();
-            Some(actor)
+            Some(std::sync::Arc::new(actor))
         }
         Err(err) => {
             tracing::warn!("the Bazel tier is unavailable: {err:#}");
@@ -270,13 +271,20 @@ fn run_server() -> Result<()> {
     let bazel = BazelConfig::default();
     // Held for the life of the loop: dropping it stops the Bazel thread, so a
     // shutdown takes the subprocess with it rather than orphaning one.
-    let _actor = start_bazel(&bazel, root.as_deref());
+    let actor = start_bazel(&bazel, root.as_deref());
     let index = IndexHandle::new();
     if let Some(root) = root.clone() {
         // Synchronous: ~1.4 s on a 74k-package repo, which is cheaper than the
         // machinery to report progress on it would be.
         index.store(crate::index::build_static(&root));
     }
+    // Held alongside the actor: dropping either stops its thread, so a shutdown
+    // takes the watch and the subprocess with it.
+    let _watch = root.clone().and_then(|root| {
+        watch::spawn(root, index.clone(), actor.clone())
+            .inspect_err(|err| tracing::warn!("the workspace is not being watched: {err:#}"))
+            .ok()
+    });
     tracing::info!(targets = index.load().len(), "ready");
 
     let mut docs = Documents {
