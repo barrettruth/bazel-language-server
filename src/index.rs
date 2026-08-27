@@ -121,46 +121,68 @@ impl Index {
         }
     }
 
-    fn tiers(&self) -> [&Tier; 3] {
-        [&self.buffer, &self.disk, &self.graph]
+    /// The tiers that read the source, in precedence order.
+    ///
+    /// Coverage means something only between these two, because both are
+    /// readings of the same files and a fresher reading replaces an older one.
+    /// It says nothing about the graph: no parser can see a name a macro
+    /// computes, so a buffer that has just been re-read has not contradicted
+    /// Bazel about anything.
+    fn parsed(&self) -> [&Tier; 2] {
+        [&self.buffer, &self.disk]
     }
 
-    /// Whether a tier ahead of `nth` has already said everything true about
-    /// `file`.
+    /// Whether a parsed tier ahead of `nth` has already said everything true
+    /// about `file`.
     ///
     /// This is what makes a deletion visible. A target the user removes from an
     /// open buffer is absent from the buffer tier and still present on disk;
     /// without this it would go on resolving to a declaration that is no longer
     /// written anywhere.
     fn covered(&self, nth: usize, file: &Path) -> bool {
-        self.tiers()[..nth]
+        self.parsed()[..nth]
             .iter()
             .any(|ahead| ahead.speaks_for.contains(file))
     }
 
-    /// Whether tier `nth` is the one that answers for `label`.
-    fn answers(&self, nth: usize, label: &str, file: &Path) -> bool {
-        !self.covered(nth, file)
-            && !self.tiers()[..nth]
-                .iter()
-                .any(|ahead| ahead.targets.contains_key(label))
-    }
-
+    /// The declaration of `label`, from the source if any parser has seen it
+    /// and from Bazel otherwise.
+    ///
+    /// The graph is consulted only for a label no parsed tier holds at all,
+    /// which is exactly what it is for: the targets a legacy macro computes.
+    /// That is also what keeps it from overriding a field — its rule class is
+    /// the private name Bazel instantiated, `_local_rule` where the source says
+    /// `local_helper`, and the reader recognises the one they wrote.
     #[must_use]
     pub fn target(&self, label: &str) -> Option<&Target> {
-        self.tiers()
+        if self
+            .parsed()
+            .iter()
+            .any(|tier| tier.targets.contains_key(label))
+        {
+            return self.parsed_target(label);
+        }
+        self.graph.targets.get(label)
+    }
+
+    fn parsed_target(&self, label: &str) -> Option<&Target> {
+        self.parsed()
             .into_iter()
             .enumerate()
             .find_map(|(nth, tier)| {
                 let target = tier.targets.get(label)?;
-                self.answers(nth, label, &target.file).then_some(target)
+                (!self.covered(nth, &target.file)).then_some(target)
             })
     }
 
     /// Every recorded mention of `label`, in source order per file.
+    ///
+    /// The source alone. The query that feeds the graph is pruned of attributes
+    /// and so carries no edges, which means the graph knows that a target
+    /// exists and nothing whatever about what points at it.
     #[must_use]
     pub fn references(&self, label: &str) -> Vec<&Reference> {
-        self.tiers()
+        self.parsed()
             .into_iter()
             .enumerate()
             .flat_map(|(nth, tier)| {
@@ -175,15 +197,29 @@ impl Index {
 
     /// Every target any tier knows, each named once.
     pub fn targets(&self) -> impl Iterator<Item = (&str, &Target)> {
-        self.tiers()
+        let parsed = self
+            .parsed()
             .into_iter()
             .enumerate()
             .flat_map(move |(nth, tier)| {
                 tier.targets.iter().filter_map(move |(label, target)| {
-                    self.answers(nth, label, &target.file)
-                        .then_some((label.as_str(), target))
+                    let ahead = self.parsed()[..nth]
+                        .iter()
+                        .any(|tier| tier.targets.contains_key(label));
+                    (!ahead && !self.covered(nth, &target.file)).then_some((label.as_str(), target))
                 })
-            })
+            });
+        let only_bazel_knows = self
+            .graph
+            .targets
+            .iter()
+            .filter_map(move |(label, target)| {
+                self.parsed()
+                    .iter()
+                    .all(|tier| !tier.targets.contains_key(label))
+                    .then_some((label.as_str(), target))
+            });
+        parsed.chain(only_bazel_knows)
     }
 
     /// How many BUILD files the walk over the disk read.
@@ -523,6 +559,87 @@ mod tests {
 
         // `$(BINDIR)` and friends take no label, and neither does bare `$@`.
         assert!(found("$(BINDIR)/out $@ $$(cat x)").is_empty());
+    }
+
+    fn at(file: &str, line: u32, rule: &str) -> Target {
+        Target {
+            name: "t".into(),
+            rule: rule.into(),
+            file: Arc::from(Path::new(file)),
+            offset: 0,
+            line,
+            character: 0,
+            length: 1,
+        }
+    }
+
+    fn tier(entries: &[(&str, Target)], speaks_for: &[&str]) -> Arc<Tier> {
+        Arc::new(Tier {
+            targets: entries
+                .iter()
+                .map(|(label, target)| ((*label).to_string(), target.clone()))
+                .collect(),
+            speaks_for: speaks_for
+                .iter()
+                .map(|path| Arc::from(Path::new(path)))
+                .collect(),
+            ..Tier::default()
+        })
+    }
+
+    /// The four precedence rules, on one arrangement.
+    ///
+    /// A buffer open on `lib/BUILD.bazel` that declares `kept` and no longer
+    /// declares `gone`; a disk that still has both plus `//app:other`; and a
+    /// graph that knows a macro-generated target and disagrees with the source
+    /// about a rule class.
+    #[test]
+    fn a_buffer_speaks_for_its_file_and_bazel_for_what_no_parser_sees() {
+        let open = "/ws/lib/BUILD.bazel";
+        let index = Index {
+            buffer: tier(&[("//lib:kept", at(open, 9, "filegroup"))], &[open]),
+            disk: tier(
+                &[
+                    ("//lib:kept", at(open, 1, "filegroup")),
+                    ("//lib:gone", at(open, 2, "filegroup")),
+                    ("//app:other", at("/ws/app/BUILD.bazel", 3, "filegroup")),
+                ],
+                &[],
+            ),
+            graph: tier(
+                &[
+                    ("//lib:from_macro", at(open, 7, "filegroup")),
+                    ("//lib:kept", at(open, 1, "_private_rule")),
+                ],
+                &[],
+            ),
+        };
+
+        // The buffer wins where both have it, so the position is the one the
+        // user can see.
+        assert_eq!(index.target("//lib:kept").map(|t| t.line), Some(9));
+        // Deleted in the buffer, and the buffer speaks for that file, so the
+        // disk entry does not resurrect it.
+        assert_eq!(index.target("//lib:gone"), None);
+        // A file no buffer covers is answered from disk as before.
+        assert_eq!(index.target("//app:other").map(|t| t.line), Some(3));
+        // Bazel supplies what no parser can see, in that same covered file:
+        // re-reading a buffer says nothing about what a macro computes.
+        assert_eq!(index.target("//lib:from_macro").map(|t| t.line), Some(7));
+        // And overrides nothing: `_private_rule` appears in no source anyone
+        // wrote, so the call-site spelling stands.
+        assert_eq!(
+            index.target("//lib:kept").map(|t| &*t.rule),
+            Some("filegroup")
+        );
+
+        let mut listed: Vec<_> = index.targets().map(|(label, _)| label).collect();
+        listed.sort_unstable();
+        assert_eq!(
+            listed,
+            vec!["//app:other", "//lib:from_macro", "//lib:kept"],
+            "each target once, and the deleted one not at all"
+        );
     }
 
     #[test]
