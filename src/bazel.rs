@@ -7,11 +7,19 @@
 //! runs on its own thread and publishes results; handlers read a snapshot.
 
 use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use shared_child::SharedChild;
+
+/// `SIGINT`, written out because this crate has no other need of `libc` and
+/// POSIX fixes the number at 2 on every platform Bazel runs on.
+#[cfg(unix)]
+const SIGINT: std::ffi::c_int = 2;
 
 /// The oldest Bazel this server drives.
 ///
@@ -200,6 +208,53 @@ impl Invocation {
     }
 }
 
+/// What a Bazel invocation reported, once its output has been consumed.
+#[derive(Debug)]
+pub struct Outcome {
+    pub stderr: String,
+    pub status: Option<i32>,
+}
+
+impl Outcome {
+    #[must_use]
+    pub fn ok(&self) -> bool {
+        self.status == Some(0)
+    }
+}
+
+/// Stops a Bazel that is still running.
+///
+/// Cloneable, and a no-op once the command has finished, so a superseding
+/// refresh may hold one without racing the invocation it means to replace.
+///
+/// **`SIGINT`, never `SIGKILL`.** `SIGKILL` leaves Bazel's server-side command
+/// running to completion with the command lock held under a dead pid, and every
+/// later invocation then fails with `Another command (pid=…) is running`.
+/// `SIGINT` is what the client turns into a `Cancel` RPC, and it releases the
+/// lock in 13-42 ms. `std::process::Child::kill` sends `SIGKILL`, which is why
+/// it is not used here.
+#[derive(Clone)]
+pub struct Interrupt(Arc<SharedChild>);
+
+impl Interrupt {
+    /// Ask the command to stop. Whether it does is its own business: Bazel's
+    /// query output-serialisation phase runs to completion regardless, which is
+    /// why a superseded refresh is discarded rather than relied on to die.
+    pub fn send(&self) {
+        #[cfg(unix)]
+        {
+            use shared_child::unix::SharedChildExt;
+            if let Err(err) = self.0.send_signal(SIGINT) {
+                tracing::debug!("interrupting bazel: {err}");
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            drop(self.0.kill());
+        }
+    }
+}
+
 /// Runs Bazel. Owned by a single dedicated thread; not `Sync` by intent.
 #[derive(Debug, Clone)]
 pub struct BazelClient {
@@ -262,38 +317,89 @@ impl BazelClient {
         })
     }
 
-    /// Invoke Bazel and wait.
+    /// Invoke Bazel and collect everything it printed.
     ///
     /// Blocking, and deliberately so: this runs on the Bazel thread, never in a
-    /// request handler.
-    ///
-    /// When this grows cancellation, it must **not** use [`std::process::Child::kill`].
-    /// That sends `SIGKILL`, which leaves the server-side command running to
-    /// completion while the command lock is held by a dead pid; every later
-    /// invocation then fails with `Another command (pid=…) is running`. `SIGINT`
-    /// is what the client turns into a `Cancel` RPC, and releases the lock in
-    /// 13-42 ms.
+    /// request handler. For anything whose output is measured in megabytes use
+    /// [`BazelClient::stream`]; this holds all of it at once and is for the
+    /// small answers, `--version` and `info` among them.
     ///
     /// # Errors
     ///
     /// If the process cannot be spawned or its output cannot be collected.
     pub fn run(&self, args: &[&str]) -> Result<Invocation> {
+        let mut stdout = Vec::new();
+        let outcome = self.stream(args, |_| {}, &mut |chunk| stdout.extend_from_slice(chunk))?;
+        Ok(Invocation {
+            stdout,
+            stderr: outcome.stderr,
+            status: outcome.status,
+        })
+    }
+
+    /// Invoke Bazel, handing stdout to `sink` in the chunks it arrives in.
+    ///
+    /// The only place this crate spawns a process, so every property below
+    /// holds of every Bazel it starts.
+    ///
+    /// Output is streamed rather than collected. A `query` over 240k targets is
+    /// 205 MiB, which costs 34 MB streamed against 442 MB slurped at the same
+    /// wall time — thirteen times the memory for nothing. stderr is drained on
+    /// its own thread, because a child that fills a pipe nobody is reading
+    /// blocks forever, and `stdin` is null so it can never wait on input that
+    /// is not coming.
+    ///
+    /// `started` receives the [`Interrupt`] before the first byte, which is how
+    /// a superseding refresh reaches a command already in flight.
+    ///
+    /// # Errors
+    ///
+    /// If the process cannot be spawned, or its output cannot be read.
+    pub fn stream(
+        &self,
+        args: &[&str],
+        started: impl FnOnce(Interrupt),
+        sink: &mut dyn FnMut(&[u8]),
+    ) -> Result<Outcome> {
         let mut command = Command::new(&self.config.path);
-        command.current_dir(&self.workspace);
+        command
+            .current_dir(&self.workspace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         if let Some(base) = &self.output_base {
             command.arg(format!("--output_base={}", base.display()));
         }
         command.args(&self.config.args).args(args);
 
         tracing::debug!(?args, "bazel");
-        let output = command
-            .output()
-            .with_context(|| format!("spawning `{}`", self.config.path))?;
+        let child = Arc::new(
+            SharedChild::spawn(&mut command)
+                .with_context(|| format!("spawning `{}`", self.config.path))?,
+        );
+        started(Interrupt(Arc::clone(&child)));
 
-        Ok(Invocation {
-            stdout: output.stdout,
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            status: output.status.code(),
+        let mut errors = child.take_stderr().context("the child's stderr")?;
+        let drain = std::thread::spawn(move || {
+            let mut collected = String::new();
+            drop(errors.read_to_string(&mut collected));
+            collected
+        });
+
+        let mut out = child.take_stdout().context("the child's stdout")?;
+        let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+        loop {
+            let read = out.read(&mut buffer).context("reading bazel's output")?;
+            if read == 0 {
+                break;
+            }
+            sink(&buffer[..read]);
+        }
+
+        let status = child.wait().context("waiting for bazel")?;
+        Ok(Outcome {
+            stderr: drain.join().unwrap_or_default(),
+            status: status.code(),
         })
     }
 }

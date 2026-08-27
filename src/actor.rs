@@ -1,0 +1,183 @@
+//! The one thread that runs Bazel.
+//!
+//! Invariant 1 in mechanical form. Every Bazel invocation the server makes on
+//! its own behalf happens here, and a request handler reaches it only by asking
+//! for a refresh it does not wait on.
+//!
+//! One thread rather than a pool, because Bazel serialises on the output base
+//! anyway: a second invocation would queue on a lock instead of a channel, and
+//! a lock is the harder of the two to reason about.
+
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::Instant;
+
+use crate::bazel::{BazelClient, Interrupt};
+
+/// The query that feeds the graph tier, and the flags that keep it affordable.
+///
+/// Pruning attributes is a tenfold cut — 53.7 MB to 5.4 MB, 0.89 s to 0.42 s at
+/// 60k targets — and what survives still carries the name, the rule class and
+/// the location, which is the whole of the light tier.
+/// `--proto:rule_inputs_and_outputs` defaults on and is the expensive half of
+/// what would otherwise remain.
+const QUERY: &[&str] = &[
+    "query",
+    "--output=streamed_proto",
+    "--proto:output_rule_attrs=",
+    "--noproto:rule_inputs_and_outputs",
+    "--order_output=no",
+    "--noimplicit_deps",
+    "--notool_deps",
+    "--keep_going",
+    "//...",
+];
+
+enum Message {
+    Refresh,
+    Stop,
+}
+
+/// The Bazel thread, and the only way to reach it.
+///
+/// Dropping this stops the thread, interrupting whatever it is running.
+pub struct Actor {
+    tx: Sender<Message>,
+    /// The invocation in flight, for a superseding refresh to interrupt.
+    ///
+    /// Held rather than derived because the thread is blocked inside the
+    /// invocation while it runs and cannot answer for itself.
+    running: Arc<Mutex<Option<Interrupt>>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Actor {
+    /// Start the thread. It idles until asked for a refresh.
+    #[must_use]
+    pub fn spawn(client: BazelClient) -> Self {
+        let (tx, rx) = channel();
+        let running = Arc::new(Mutex::new(None));
+        let thread = {
+            let running = Arc::clone(&running);
+            std::thread::Builder::new()
+                .name("bazel".to_owned())
+                .spawn(move || serve(&client, &rx, &running))
+                .expect("spawning the bazel thread")
+        };
+        Self {
+            tx,
+            running,
+            thread: Some(thread),
+        }
+    }
+
+    /// Ask for the graph tier to be brought up to date.
+    ///
+    /// Never blocks. A refresh already in flight is interrupted and its result
+    /// discarded, because the answer it is computing is about a tree that has
+    /// already moved on.
+    pub fn refresh(&self) {
+        drop(self.tx.send(Message::Refresh));
+        self.interrupt();
+    }
+
+    fn interrupt(&self) {
+        if let Ok(running) = self.running.lock()
+            && let Some(interrupt) = running.as_ref()
+        {
+            interrupt.send();
+        }
+    }
+}
+
+impl Drop for Actor {
+    fn drop(&mut self) {
+        drop(self.tx.send(Message::Stop));
+        self.interrupt();
+        if let Some(thread) = self.thread.take() {
+            drop(thread.join());
+        }
+    }
+}
+
+/// The thread body: one invocation at a time, newest request wins.
+fn serve(client: &BazelClient, rx: &Receiver<Message>, running: &Mutex<Option<Interrupt>>) {
+    while let Ok(message) = rx.recv() {
+        if matches!(message, Message::Stop) {
+            return;
+        }
+        // Everything queued behind this one asks for the same thing, so the
+        // queue collapses to a single bit: refresh once more, or stop.
+        let mut again = true;
+        while again {
+            if drained_stop(rx) {
+                return;
+            }
+            refresh_once(client, running);
+            again = drained_refresh(rx);
+        }
+    }
+}
+
+/// Run one query, and say what it cost.
+///
+/// There is no wall-clock timeout. A cold `query //...` is 16.76 s at 60k
+/// targets and minutes above that, so a deadline short enough to catch a hang
+/// is short enough to kill legitimate work and never converge. A superseded
+/// refresh is stopped by [`Actor::refresh`] instead, and Bazel's output
+/// serialisation runs to completion regardless — so the result is *discarded*
+/// rather than relied upon to stop.
+fn refresh_once(client: &BazelClient, running: &Mutex<Option<Interrupt>>) {
+    let started = Instant::now();
+    let mut bytes = 0_usize;
+    let outcome = client.stream(
+        QUERY,
+        |interrupt| {
+            if let Ok(mut slot) = running.lock() {
+                *slot = Some(interrupt);
+            }
+        },
+        // The seam the graph tier replaces: today the proto is measured, and
+        // decoding it into targets is what G4 puts here.
+        &mut |chunk| bytes += chunk.len(),
+    );
+    if let Ok(mut slot) = running.lock() {
+        *slot = None;
+    }
+
+    match outcome {
+        Ok(outcome) if outcome.ok() => {
+            tracing::info!(bytes, ms = started.elapsed().as_millis(), "graph refresh");
+        }
+        Ok(outcome) => tracing::warn!(
+            status = outcome.status,
+            "bazel query declined: {}",
+            outcome.stderr.lines().next_back().unwrap_or_default()
+        ),
+        Err(err) => tracing::warn!("bazel query could not run: {err:#}"),
+    }
+}
+
+/// Whether a stop is waiting, consuming everything up to it.
+fn drained_stop(rx: &Receiver<Message>) -> bool {
+    loop {
+        match rx.try_recv() {
+            Ok(Message::Stop) | Err(TryRecvError::Disconnected) => return true,
+            Ok(Message::Refresh) => {}
+            Err(TryRecvError::Empty) => return false,
+        }
+    }
+}
+
+/// Whether another refresh arrived while the last one ran.
+fn drained_refresh(rx: &Receiver<Message>) -> bool {
+    let mut wanted = false;
+    loop {
+        match rx.try_recv() {
+            Ok(Message::Refresh) => wanted = true,
+            Ok(Message::Stop) | Err(TryRecvError::Disconnected) => return false,
+            Err(TryRecvError::Empty) => return wanted,
+        }
+    }
+}

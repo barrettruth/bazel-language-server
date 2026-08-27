@@ -5,6 +5,7 @@
 //!
 //! stdout is the LSP transport. Everything human-readable goes to stderr.
 
+mod actor;
 mod bazel;
 mod document;
 mod format;
@@ -15,6 +16,7 @@ mod line_index;
 
 use std::path::{Path, PathBuf};
 
+use crate::actor::Actor;
 use crate::bazel::{BazelClient, BazelConfig};
 use crate::document::Document;
 use crate::index::IndexHandle;
@@ -143,25 +145,37 @@ fn cmd_doctor(path: &std::path::Path) {
     }
 }
 
-/// Say at startup what the Bazel tier will be able to answer.
+/// Start the Bazel thread, if this workspace has a Bazel worth driving.
 ///
-/// The log line is the whole point of the call. Nothing reads the result yet,
-/// and a user who discovers that their Bazel is too old at the moment a label
-/// declines to resolve learns it in the worst possible place — invariant 3.
+/// The probe is reported either way: a user who discovers that their Bazel is
+/// too old at the moment a label declines to resolve learns it in the worst
+/// possible place, which is invariant 3.
 ///
-/// A workspace is required because Bazel is asked from inside one. Without a
-/// root there is no Bazel tier to report on and the static tier is the whole
-/// server.
-fn report_bazel(config: &BazelConfig, root: Option<&Path>) {
-    let Some(root) = root else { return };
-    match BazelClient::new(config.clone(), root.to_path_buf()).probe() {
-        Ok(probe) => tracing::info!(
-            version = %probe.version,
-            rule_schemas = probe.capabilities.rule_classes,
-            repo_mapping = probe.capabilities.repo_mapping,
-            "bazel"
-        ),
-        Err(err) => tracing::warn!("the Bazel tier is unavailable: {err:#}"),
+/// `None` is the ordinary case rather than a failure. Without a workspace, or
+/// without a usable Bazel, the static tier is the whole server and invariant 2
+/// says that has to be enough.
+fn start_bazel(config: &BazelConfig, root: Option<&Path>) -> Option<Actor> {
+    let client = BazelClient::new(config.clone(), root?.to_path_buf());
+    match client.probe() {
+        Ok(probe) => {
+            tracing::info!(
+                version = %probe.version,
+                rule_schemas = probe.capabilities.rule_classes,
+                repo_mapping = probe.capabilities.repo_mapping,
+                "bazel"
+            );
+            let actor = Actor::spawn(client);
+            // Warm the Bazel server now rather than on the first request that
+            // wants it. The cost is the same either way and this way it
+            // overlaps with the user reading code instead of with their first
+            // question.
+            actor.refresh();
+            Some(actor)
+        }
+        Err(err) => {
+            tracing::warn!("the Bazel tier is unavailable: {err:#}");
+            None
+        }
     }
 }
 
@@ -254,7 +268,9 @@ fn run_server() -> Result<()> {
     // Defaults until the client's settings are read, so the one place that
     // starts Bazel goes through the configuration `doctor` reports on.
     let bazel = BazelConfig::default();
-    report_bazel(&bazel, root.as_deref());
+    // Held for the life of the loop: dropping it stops the Bazel thread, so a
+    // shutdown takes the subprocess with it rather than orphaning one.
+    let _actor = start_bazel(&bazel, root.as_deref());
     let index = IndexHandle::new();
     if let Some(root) = root.clone() {
         // Synchronous: ~1.4 s on a 74k-package repo, which is cheaper than the
