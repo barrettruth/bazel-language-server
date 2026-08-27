@@ -217,19 +217,16 @@ pub fn build_static(root: &Path) -> Index {
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
-        let Some(package) = package_dir(root, path) else {
-            continue;
-        };
-
-        index.files += 1;
-        collect(
-            &text,
-            dialect,
+        if collect_file(
+            root,
             &Arc::from(path),
-            &package,
+            dialect,
+            &text,
             &mut index.targets,
             &mut index.references,
-        );
+        ) {
+            index.files += 1;
+        }
     }
 
     tracing::info!(
@@ -239,6 +236,31 @@ pub fn build_static(root: &Path) -> Index {
         "built static index"
     );
     index
+}
+
+/// Everything one BUILD file contributes, appended to `targets` and
+/// `references`.
+///
+/// The single place a file becomes index entries, so the walk over the disk and
+/// a buffer the client holds open cannot disagree about the package a
+/// declaration lands in — the two derive it from the same call rather than from
+/// two copies of the same rule.
+///
+/// `false` where the path lies outside `root`, which is the one way a file can
+/// have no package to be indexed under.
+pub fn collect_file(
+    root: &Path,
+    path: &Arc<Path>,
+    dialect: Dialect,
+    text: &str,
+    targets: &mut FxHashMap<String, Target>,
+    references: &mut FxHashMap<String, Vec<Reference>>,
+) -> bool {
+    let Some(package) = package_dir(root, path) else {
+        return false;
+    };
+    collect(text, dialect, path, &package, targets, references);
+    true
 }
 
 /// Where a top-level rule call in `text` declares `name`.
