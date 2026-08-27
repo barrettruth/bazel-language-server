@@ -73,8 +73,9 @@ pub(super) struct StringAt {
 /// `None` when the cursor is anywhere else — on a quote, an identifier, or in
 /// the whitespace between them.
 pub(super) fn string_at(root: &SyntaxNode, offset: u32, kind: FileKind) -> Option<StringAt> {
-    // rowan's `token_at_offset` wants a `TextSize`, which starlark-cst does not
-    // re-export. A scan is O(tokens) against a parse that is O(bytes) and has
+    // `token_at_offset` answers with whatever token is at the offset, and with
+    // two of them on a boundary. The kind test is the real query, so the scan
+    // states it directly — O(tokens) against a parse that is O(bytes) and has
     // just happened anyway, so it is not the cost that matters here.
     let token = root
         .descendants_with_tokens()
