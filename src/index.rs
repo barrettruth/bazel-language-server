@@ -247,6 +247,35 @@ pub fn build_static(root: &Path) -> Index {
     index
 }
 
+/// Where a top-level rule call in `text` declares `name`.
+///
+/// The index answers from the tree as it stands on disk, which an open buffer
+/// has moved on from. This is the same walk [`collect`] does, narrowed to one
+/// name, so a request resolving into a buffer agrees with the file the user is
+/// looking at.
+#[must_use]
+pub fn declaration_in(text: &str, dialect: Dialect, name: &str) -> Option<Position> {
+    let root = File::cast(parse(text, dialect).syntax())?;
+    let lines = crate::line_index::LineIndex::new(text);
+
+    root.stmts().find_map(|stmt| {
+        let Stmt::Expr(expr) = stmt else { return None };
+        let Some(Expr::Call(call)) = expr.expr() else {
+            return None;
+        };
+        let (Some(_), Some(Expr::Literal(literal))) = (call.callee_name(), call.arg("name")) else {
+            return None;
+        };
+        if literal.string_value()? != name {
+            return None;
+        }
+        let anchor = literal
+            .string_value_range()
+            .map_or_else(|| call.range().start(), TextRange::start);
+        Some(lines.position(text, usize::from(anchor)))
+    })
+}
+
 /// Everything one BUILD file contributes: the targets it declares and the
 /// labels it names.
 ///

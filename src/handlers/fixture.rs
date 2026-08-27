@@ -7,7 +7,27 @@ use lsp_types::{LocationLink, MarkupKind, Position};
 use super::definition::definition;
 use super::highlight::document_highlight;
 use super::hover::hover;
-use crate::document::Document;
+use crate::document::{Buffers, Document};
+
+/// The buffers a request arrives against.
+///
+/// A handler that resolves into a file the client is editing reads it from
+/// here, so a test that cares which text answers says so rather than leaving it
+/// to what is on disk.
+pub(super) struct Open(pub(super) Vec<Document>);
+
+impl Open {
+    /// Nothing open, so every answer comes from the index.
+    pub(super) fn none() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl Buffers for Open {
+    fn at(&self, path: &Path) -> Option<&Document> {
+        self.0.iter().find(|document| document.path() == path)
+    }
+}
 
 pub(super) fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -58,7 +78,10 @@ impl Fixture {
 
     pub(super) fn links(&self, relative: &str, needle: &str) -> Vec<LocationLink> {
         let (document, position) = self.cursor(relative, needle);
-        definition(&document, &self.root, &self.index, position)
+        // The file the cursor is in is the one the client has open, which is
+        // what the server sees.
+        let open = Open(vec![self.open(relative)]);
+        definition(&document, &self.root, &self.index, &open, position)
     }
 
     /// Every highlight, as `kind line:character text`, so a test reads the

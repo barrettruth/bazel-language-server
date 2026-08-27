@@ -20,6 +20,16 @@ use starlark_cst::{Dialect, FileKind, Parse, classify, parse};
 
 use crate::line_index::LineIndex;
 
+/// The buffers the client has open, addressed by the path the index knows.
+///
+/// The index records the tree as it stands on disk. A request that resolves
+/// into a file the user is editing asks the buffer through this, so an answer
+/// points at text the user can actually see.
+pub trait Buffers {
+    /// The open buffer for `path`, if the client has one.
+    fn at(&self, path: &Path) -> Option<&Document>;
+}
+
 /// One open buffer: its text, where it lives, and what Bazel reads it as.
 pub struct Document {
     text: String,
@@ -74,6 +84,15 @@ impl Document {
     #[must_use]
     pub fn parse(&self) -> Parse {
         parse(&self.text, self.dialect)
+    }
+
+    /// Where this buffer declares `name`, as it stands now.
+    ///
+    /// `None` where the buffer declares no such target, which is the answer
+    /// when an edit has renamed or deleted one the index still lists.
+    #[must_use]
+    pub fn declaration_of(&self, name: &str) -> Option<Position> {
+        crate::index::declaration_in(&self.text, self.dialect, name)
     }
 
     /// The byte offset of a line and UTF-16 column.

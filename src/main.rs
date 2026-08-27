@@ -131,6 +131,15 @@ struct Documents {
     texts: FxHashMap<Uri, Document>,
 }
 
+impl crate::document::Buffers for Documents {
+    /// Scanned rather than indexed by path: a client holds tens of buffers
+    /// open, and a second map keyed on path is state to keep in step with this
+    /// one for a lookup that never shows up in a profile.
+    fn at(&self, path: &Path) -> Option<&Document> {
+        self.texts.values().find(|document| document.path() == path)
+    }
+}
+
 fn run_server() -> Result<()> {
     tracing::info!("bazel-language-server {}", env!("CARGO_PKG_VERSION"));
     let (connection, io_threads) = Connection::stdio();
@@ -399,7 +408,7 @@ fn definition(
     let uri = position.text_document.uri;
     let links = match (docs.texts.get(&uri), root) {
         (Some(document), Some(root)) => {
-            handlers::definition(document, root, &index.load(), position.position)
+            handlers::definition(document, root, &index.load(), docs, position.position)
         }
         _ => Vec::new(),
     };
@@ -603,7 +612,9 @@ fn document_links(
     let params: lsp_types::DocumentLinkParams = serde_json::from_value(request.params.clone())?;
     let uri = params.text_document.uri;
     let links = match (docs.texts.get(&uri), root) {
-        (Some(document), Some(root)) => handlers::document_links(document, root, &index.load()),
+        (Some(document), Some(root)) => {
+            handlers::document_links(document, root, &index.load(), docs)
+        }
         _ => Vec::new(),
     };
     tracing::debug!(?uri, count = links.len(), "documentLink");
