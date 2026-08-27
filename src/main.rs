@@ -101,14 +101,14 @@ fn cmd_index(path: &std::path::Path) {
         },
     );
     let started = std::time::Instant::now();
-    let index = crate::index::build_static(&root);
+    let index = crate::index::Index::of_disk(crate::index::build_static(&root));
     println!(
         "indexed {} BUILD files, {} targets in {:.2}s",
-        index.files,
+        index.files(),
         index.len(),
         started.elapsed().as_secs_f64()
     );
-    for (label, target) in index.targets.iter().take(10) {
+    for (label, target) in index.targets().take(10) {
         println!("  {:<40} {}", label, target.rule);
     }
     cmd_graph(&root, &index);
@@ -334,7 +334,7 @@ fn run_server() -> Result<()> {
     if let Some(root) = root.clone() {
         // Synchronous: ~1.4 s on a 74k-package repo, which is cheaper than the
         // machinery to report progress on it would be.
-        index.store(crate::index::build_static(&root));
+        index.store_disk(crate::index::build_static(&root));
     }
     // Held alongside the actor: dropping either stops its thread, so a shutdown
     // takes the watch and the subprocess with it.

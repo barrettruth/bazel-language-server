@@ -119,20 +119,18 @@ fn declared_card(index: &crate::index::Index, root: &Path, label: &Label) -> Opt
 
 /// How many references the index holds, said as what it is.
 ///
-/// Until the graph tier runs, the count is a property of the static index and
-/// not of the target: labels that legacy macros compute are invisible to it, so
-/// the true number is this one or larger, and a bare "5 references" would be
-/// read as the answer. Once the graph has loaded the count *is* the answer, and
-/// hedging it then is its own kind of lie.
+/// A floor, and permanently so. The count is a property of the static index
+/// rather than of the target: labels a legacy macro computes are invisible to a
+/// parser, and the graph tier cannot raise the number either, because the query
+/// feeding it is pruned of attributes and so carries no edges at all. The true
+/// figure is this one or larger, and a bare "5 references" would be read as the
+/// answer.
 fn tally(index: &crate::index::Index, label: &Label) -> String {
     let counted = match index.references(&label.key()).len() {
         0 => "No references".to_string(),
         1 => "1 reference".to_string(),
         n => format!("{n} references"),
     };
-    if index.graph_loaded {
-        return counted;
-    }
     format!("{counted} in the static index, which does not see macro-generated labels")
 }
 
@@ -197,16 +195,17 @@ mod tests {
         assert!(card.contains("@platforms//os:linux"), "got {card:?}");
     }
 
-    /// The count is hedged only while it is a floor. Once the graph tier has
-    /// run it is the answer, and hedging it then understates what is known.
+    /// The count is a floor whatever else has loaded, so the caveat is not
+    /// conditional on anything: no tier this server has carries the edges that
+    /// would make the number exact.
     #[test]
-    fn a_loaded_graph_reports_the_count_without_hedging() {
-        let index = crate::index::Index {
-            graph_loaded: true,
-            ..Default::default()
-        };
+    fn the_count_is_hedged_even_with_nothing_to_count() {
+        let index = crate::index::Index::default();
         let label = crate::label::parse_label("//lib:srcs", None).expect("a label");
-        assert_eq!(tally(&index, &label), "No references");
+        assert_eq!(
+            tally(&index, &label),
+            "No references in the static index, which does not see macro-generated labels"
+        );
     }
 
     /// On the declaration, the card carries the reference count — worded so
@@ -304,7 +303,7 @@ mod tests {
         // the kind comes from the path, so the test has to use real ones.
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         std::fs::write(root.join("pkg/BUILD.bazel"), module).unwrap();
-        let index = crate::index::build_static(&root);
+        let index = crate::index::Index::of_disk(crate::index::build_static(&root));
         let at = module.find("beacon").expect("the module's name");
         let card = |relative: &str| {
             let document = Document::new(root.join(relative), module.to_string(), Some(&root));

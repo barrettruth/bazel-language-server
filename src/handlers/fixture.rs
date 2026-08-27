@@ -55,7 +55,7 @@ pub(super) struct Fixture {
 impl Fixture {
     pub(super) fn workspace() -> Self {
         let root = fixture_root();
-        let index = crate::index::build_static(&root);
+        let index = crate::index::Index::of_disk(crate::index::build_static(&root));
         Self { root, index }
     }
 

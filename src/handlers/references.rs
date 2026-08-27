@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn references_agree_from_either_end() {
         let fixture = Fixture::workspace();
-        let index = crate::index::build_static(&fixture.root);
+        let index = crate::index::Index::of_disk(crate::index::build_static(&fixture.root));
         let document = fixture.open("lib/BUILD.bazel");
 
         let at = |needle: &str, skip: usize| {
@@ -111,7 +111,7 @@ mod tests {
     #[test]
     fn a_load_path_names_no_target() {
         let fixture = Fixture::workspace();
-        let index = crate::index::build_static(&fixture.root);
+        let index = crate::index::Index::of_disk(crate::index::build_static(&fixture.root));
         let document = fixture.open("lib/BUILD.bazel");
         let offset = document
             .text()

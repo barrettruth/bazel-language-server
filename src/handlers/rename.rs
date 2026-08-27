@@ -234,7 +234,7 @@ alias(
                 std::fs::create_dir_all(path.parent().expect("a package directory")).unwrap();
                 std::fs::write(path, text).unwrap();
             }
-            let index = crate::index::build_static(&root);
+            let index = crate::index::Index::of_disk(crate::index::build_static(&root));
             Self { root, index }
         }
 

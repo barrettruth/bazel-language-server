@@ -119,8 +119,7 @@ fn symbol_kind(rule: &str) -> SymbolKind {
 pub fn workspace_symbols(index: &crate::index::Index, query: &str) -> Vec<WorkspaceSymbol> {
     let needle = query.to_lowercase();
     index
-        .targets
-        .iter()
+        .targets()
         .filter(|(label, _)| needle.is_empty() || label.to_lowercase().contains(&needle))
         .take(512)
         .filter_map(|(label, target)| {
@@ -137,7 +136,7 @@ pub fn workspace_symbols(index: &crate::index::Index, query: &str) -> Vec<Worksp
                 .into(),
                 data: None,
                 base_symbol_information: BaseSymbolInformation {
-                    name: label.clone(),
+                    name: label.to_string(),
                     kind: symbol_kind(&target.rule),
                     tags: None,
                     container_name: Some(target.rule.to_string()),

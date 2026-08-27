@@ -8,7 +8,7 @@
 //! - **graph** — targets only Bazel knows about, because legacy macros compute
 //!   names at evaluation time. Not implemented yet.
 //!
-//! Readers never block. An [`IndexHandle`] hands out an [`Arc<Index>`] snapshot
+//! Readers never block. An [`IndexHandle`] hands out an [`Index`] snapshot
 //! that stays consistent for the life of a request while a writer swaps in a
 //! freshly built one.
 
@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use lsp_types::Position;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use starlark_cst::ast::{AstNode, CallExpr, Expr, File, LiteralExpr, Stmt};
 use starlark_cst::{Dialect, SyntaxElement, SyntaxKind, TextRange, classify, parse};
 
@@ -68,50 +68,146 @@ pub struct Reference {
     pub length: u32,
 }
 
-/// An immutable snapshot. Cheap to clone behind an `Arc`; never mutated in
-/// place.
+/// What one writer knows. Immutable once built; never mutated in place.
 #[derive(Debug, Default)]
-pub struct Index {
+pub struct Tier {
     /// How many BUILD files this was built from, including those that declare
     /// nothing. A count rather than a list: the paths live on the entries.
     pub files: u32,
     /// Keyed by `//package:name`, the form a label resolves to.
     pub targets: FxHashMap<String, Target>,
     /// Every mention of a label in a rule-call argument, under the same key as
-    /// [`Index::targets`]. A key here need not be a key there: a label may name
+    /// [`Tier::targets`]. A key here need not be a key there: a label may name
     /// a source file, an output file, or nothing at all.
     pub references: FxHashMap<String, Vec<Reference>>,
-    /// Whether the graph tier has run. False means the counts undercount, and
-    /// callers must say so rather than imply completeness.
-    pub graph_loaded: bool,
+    /// The files this tier is the whole truth about, so that a target it does
+    /// *not* declare in one of them is a target that does not exist.
+    ///
+    /// Empty for a tier that only adds to what the ones after it know, which is
+    /// every tier but the buffers: a file the disk tier parsed may still hold
+    /// targets only Bazel can name.
+    pub speaks_for: FxHashSet<Arc<Path>>,
 }
 
-impl Index {
-    #[must_use]
-    pub fn target(&self, label: &str) -> Option<&Target> {
-        self.targets.get(label)
-    }
-
-    /// Every recorded mention of `label`, in source order per file.
-    #[must_use]
-    pub fn references(&self, label: &str) -> &[Reference] {
-        self.references.get(label).map_or(&[], Vec::as_slice)
-    }
-
+impl Tier {
     #[must_use]
     pub fn len(&self) -> usize {
         self.targets.len()
     }
 }
 
-/// Publishes index snapshots. Clone freely; all clones share one slot.
-#[derive(Debug, Clone)]
-pub struct IndexHandle(Arc<ArcSwap<Index>>);
+/// A consistent view of every tier, for the life of one request.
+///
+/// Cheap: three `Arc`s. Composed rather than merged, because merging needs one
+/// writer holding what the others last published, and that is the shape that
+/// goes out of step. Precedence is the order [`Index::tiers`] returns them in —
+/// the buffer the user is typing into, then the disk under it, then what only
+/// Bazel can name.
+#[derive(Debug, Clone, Default)]
+pub struct Index {
+    buffer: Arc<Tier>,
+    disk: Arc<Tier>,
+    graph: Arc<Tier>,
+}
 
-impl Default for IndexHandle {
-    fn default() -> Self {
-        Self(Arc::new(ArcSwap::from_pointee(Index::default())))
+impl Index {
+    /// A view of the disk alone, for a caller that has no buffers and no Bazel:
+    /// the `index` subcommand, and every test fixture.
+    #[must_use]
+    pub fn of_disk(disk: Tier) -> Self {
+        Self {
+            disk: Arc::new(disk),
+            ..Self::default()
+        }
     }
+
+    fn tiers(&self) -> [&Tier; 3] {
+        [&self.buffer, &self.disk, &self.graph]
+    }
+
+    /// Whether a tier ahead of `nth` has already said everything true about
+    /// `file`.
+    ///
+    /// This is what makes a deletion visible. A target the user removes from an
+    /// open buffer is absent from the buffer tier and still present on disk;
+    /// without this it would go on resolving to a declaration that is no longer
+    /// written anywhere.
+    fn covered(&self, nth: usize, file: &Path) -> bool {
+        self.tiers()[..nth]
+            .iter()
+            .any(|ahead| ahead.speaks_for.contains(file))
+    }
+
+    /// Whether tier `nth` is the one that answers for `label`.
+    fn answers(&self, nth: usize, label: &str, file: &Path) -> bool {
+        !self.covered(nth, file)
+            && !self.tiers()[..nth]
+                .iter()
+                .any(|ahead| ahead.targets.contains_key(label))
+    }
+
+    #[must_use]
+    pub fn target(&self, label: &str) -> Option<&Target> {
+        self.tiers()
+            .into_iter()
+            .enumerate()
+            .find_map(|(nth, tier)| {
+                let target = tier.targets.get(label)?;
+                self.answers(nth, label, &target.file).then_some(target)
+            })
+    }
+
+    /// Every recorded mention of `label`, in source order per file.
+    #[must_use]
+    pub fn references(&self, label: &str) -> Vec<&Reference> {
+        self.tiers()
+            .into_iter()
+            .enumerate()
+            .flat_map(|(nth, tier)| {
+                tier.references
+                    .get(label)
+                    .map_or(&[][..], Vec::as_slice)
+                    .iter()
+                    .filter(move |reference| !self.covered(nth, &reference.file))
+            })
+            .collect()
+    }
+
+    /// Every target any tier knows, each named once.
+    pub fn targets(&self) -> impl Iterator<Item = (&str, &Target)> {
+        self.tiers()
+            .into_iter()
+            .enumerate()
+            .flat_map(move |(nth, tier)| {
+                tier.targets.iter().filter_map(move |(label, target)| {
+                    self.answers(nth, label, &target.file)
+                        .then_some((label.as_str(), target))
+                })
+            })
+    }
+
+    /// How many BUILD files the walk over the disk read.
+    #[must_use]
+    pub fn files(&self) -> u32 {
+        self.disk.files
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.targets().count()
+    }
+}
+
+/// Publishes tiers. Clone freely; all clones share one slot per tier.
+///
+/// One slot per writer and no writer touching another's is what removes the
+/// question of who wins a race: there is no race. The main loop writes the
+/// buffers, the watch thread the disk, the Bazel actor the graph.
+#[derive(Debug, Clone, Default)]
+pub struct IndexHandle {
+    buffer: Arc<ArcSwap<Tier>>,
+    disk: Arc<ArcSwap<Tier>>,
+    graph: Arc<ArcSwap<Tier>>,
 }
 
 impl IndexHandle {
@@ -122,12 +218,16 @@ impl IndexHandle {
 
     /// A consistent view for the life of a request. Unaffected by later swaps.
     #[must_use]
-    pub fn load(&self) -> Arc<Index> {
-        self.0.load_full()
+    pub fn load(&self) -> Index {
+        Index {
+            buffer: self.buffer.load_full(),
+            disk: self.disk.load_full(),
+            graph: self.graph.load_full(),
+        }
     }
 
-    pub fn store(&self, index: Index) {
-        self.0.store(Arc::new(index));
+    pub fn store_disk(&self, tier: Tier) {
+        self.disk.store(Arc::new(tier));
     }
 }
 
@@ -194,8 +294,8 @@ fn is_ignored(root: &Path, entry: &walkdir::DirEntry, ignored: &[String]) -> boo
 /// them. That is what the graph tier is for; both tables undercount until it
 /// lands.
 #[must_use]
-pub fn build_static(root: &Path) -> Index {
-    let mut index = Index::default();
+pub fn build_static(root: &Path) -> Tier {
+    let mut index = Tier::default();
     let ignored = read_bazelignore(root);
 
     let walk = walkdir::WalkDir::new(root)
@@ -430,7 +530,7 @@ mod tests {
         let handle = IndexHandle::new();
         let before = handle.load();
 
-        let mut next = Index::default();
+        let mut next = Tier::default();
         next.targets.insert(
             "//lib:srcs".into(),
             Target {
@@ -443,7 +543,7 @@ mod tests {
                 length: 4,
             },
         );
-        handle.store(next);
+        handle.store_disk(next);
 
         // The reader that already had a snapshot is unaffected.
         assert_eq!(before.len(), 0);
@@ -482,16 +582,15 @@ mod tests {
         )
         .unwrap();
 
-        let index = build_static(&root);
+        let index = Index::of_disk(build_static(&root));
         assert_eq!(index.len(), 1, "each target must appear exactly once");
         assert!(index.target("//lib:srcs").is_some());
         assert!(
             index
-                .targets
-                .keys()
-                .all(|label| !label.contains("bazel-out")),
+                .targets()
+                .all(|(label, _)| !label.contains("bazel-out")),
             "generated output must not be indexed: {:?}",
-            index.targets.keys().collect::<Vec<_>>()
+            index.targets().map(|(label, _)| label).collect::<Vec<_>>()
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -515,8 +614,11 @@ mod tests {
             .unwrap();
         }
 
-        let index = build_static(&root);
-        let mut labels: Vec<_> = index.targets.keys().cloned().collect();
+        let index = Index::of_disk(build_static(&root));
+        let mut labels: Vec<_> = index
+            .targets()
+            .map(|(label, _)| label.to_string())
+            .collect();
         labels.sort();
         assert_eq!(
             labels,
@@ -551,8 +653,11 @@ mod tests {
             .unwrap();
         }
 
-        let index = build_static(&root);
-        let labels: Vec<_> = index.targets.keys().cloned().collect();
+        let index = Index::of_disk(build_static(&root));
+        let labels: Vec<_> = index
+            .targets()
+            .map(|(label, _)| label.to_string())
+            .collect();
         assert_eq!(labels, vec!["//lib:t".to_string()], "got {labels:?}");
 
         std::fs::remove_dir_all(&root).ok();

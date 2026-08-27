@@ -261,7 +261,7 @@ fn rebuild(
         let started = std::time::Instant::now();
         let built = crate::index::build_static(root);
         let targets = built.len();
-        index.store(built);
+        index.store_disk(built);
         tracing::info!(
             nth,
             targets,
