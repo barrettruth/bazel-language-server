@@ -15,8 +15,8 @@
 //! formatting a BUILD file is to agree with `buildifier` byte for byte, which a
 //! reimplementation would do only until the next release of it.
 //!
-//! Bazel calls stay where they are: on the Bazel thread, behind `bls-bazel`,
-//! unreachable from a handler.
+//! Bazel calls stay where they are: in `crate::bazel`, which the module graph
+//! keeps unreachable from a handler.
 //!
 //! buildifier may be absent, exactly as Bazel may be. Missing, hung, failing or
 //! answering with something that is not text all come back the same way — no
