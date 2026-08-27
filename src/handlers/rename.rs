@@ -2,13 +2,13 @@
 //! and every label that names it.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use lsp_types::{Position, Range, TextEdit, Uri, WorkspaceEdit};
 
 use super::cursor::{enclosing_package, file_uri, name_sites, string_at, target_label};
-use crate::document::Document;
+use crate::document::{Buffers, Document};
 
 /// The punctuation Bazel allows in a target name, alongside `a-zA-Z0-9`.
 const NAME_PUNCTUATION: &str = "!%-@^_\"#$&'()*-+,;<=>?[]{|}~/.";
@@ -58,6 +58,7 @@ pub fn rename(
     document: &Document,
     root: &Path,
     index: &crate::index::Index,
+    buffers: &dyn Buffers,
     position: Position,
     new_name: &str,
 ) -> Result<Option<WorkspaceEdit>> {
@@ -67,8 +68,18 @@ pub fn rename(
         return Ok(None);
     };
 
+    let sites = name_sites(index, &key, true);
+    let old_name = key.rsplit(':').next().unwrap_or(key.as_str());
+    if let Some(moved) = first_moved_site(buffers, &sites, old_name) {
+        anyhow::bail!(
+            "`{}` has been edited since it was indexed, so a rename would write to the wrong \
+             place. Save it and try again.",
+            moved.display()
+        );
+    }
+
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for (path, range) in name_sites(index, &key, true) {
+    for (path, range) in sites {
         let Some(uri) = file_uri(&path) else { continue };
         changes.entry(uri).or_default().push(TextEdit {
             range,
@@ -101,6 +112,32 @@ pub fn prepare_rename(
     Some(Range {
         start: lines.position(document.text(), name.start as usize),
         end: lines.position(document.text(), name.end as usize),
+    })
+}
+
+/// The first file whose recorded site no longer holds the name, if any.
+///
+/// The index records where a name sat when the file was last read; a buffer the
+/// user has edited since has moved it, and an edit applied at the stale offset
+/// overwrites whatever is there now. Every other request answers a stale
+/// position with a wrong *answer*, which is recoverable — this one writes to
+/// the file, so the whole rename is refused rather than any part of it applied.
+///
+/// Only an open buffer can disagree. A file nobody has touched is what the
+/// index says it is, and is not read here: that would put the whole workspace's
+/// IO in a request.
+fn first_moved_site<'a>(
+    buffers: &dyn Buffers,
+    sites: &'a [(PathBuf, Range)],
+    name: &str,
+) -> Option<&'a PathBuf> {
+    sites.iter().find_map(|(path, range)| {
+        let document = buffers.at(path)?;
+        let text = document.text();
+        let lines = document.line_index();
+        let start = lines.offset(text, range.start);
+        let end = lines.offset(text, range.end);
+        (text.get(start..end) != Some(name)).then_some(path)
     })
 }
 
@@ -137,8 +174,30 @@ fn renameable(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::fixture::Open;
     use crate::line_index::LineIndex;
     use std::path::PathBuf;
+
+    /// A rename writes to disk, so a site the index no longer describes is
+    /// refused outright rather than applied at the offset it used to have.
+    #[test]
+    fn a_buffer_that_has_moved_a_site_refuses_the_rename() {
+        let fixture = Renaming::workspace("bls-rename-moved");
+        let file = fixture.root.join("lib/BUILD.bazel");
+        let shifted = format!("# a line the index has never seen\n{LIB}");
+        let (document, position) = fixture.cursor("lib/BUILD.bazel", "\"srcs\"");
+
+        let refused = rename(
+            &document,
+            &fixture.root,
+            &fixture.index,
+            &Open(vec![Document::new(file, shifted, Some(&fixture.root))]),
+            position,
+            "sources",
+        );
+        let message = refused.expect_err("a moved site is refused").to_string();
+        assert!(message.contains("edited since it was indexed"), "{message}");
+    }
 
     const LIB: &str = r#"filegroup(
     name = "srcs",
@@ -199,7 +258,19 @@ alias(
             new_name: &str,
         ) -> Result<Option<WorkspaceEdit>> {
             let (document, position) = self.cursor(relative, needle);
-            rename(&document, &self.root, &self.index, position, new_name)
+            // The file under the cursor is the one the client has open, and it
+            // matches disk, so every site still holds the name.
+            let file = self.root.join(relative);
+            let text = std::fs::read_to_string(&file).expect("fixture file");
+            let open = Open(vec![Document::new(file, text, Some(&self.root))]);
+            rename(
+                &document,
+                &self.root,
+                &self.index,
+                &open,
+                position,
+                new_name,
+            )
         }
 
         /// The text `prepareRename` would put in the editor's prompt.

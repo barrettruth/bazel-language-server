@@ -706,6 +706,7 @@ fn rename(
         document,
         root,
         &index.load(),
+        docs,
         position.position,
         &params.new_name,
     )?;

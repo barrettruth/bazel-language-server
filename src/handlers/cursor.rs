@@ -272,7 +272,7 @@ fn name_range(line: u32, character: u32, length: u32) -> Range {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handlers::fixture::fixture_root;
+    use crate::handlers::fixture::{Open, fixture_root};
     use crate::handlers::{document_highlight, prepare_rename, references, rename};
     use starlark_cst::{Dialect, parse};
 
@@ -384,7 +384,7 @@ mod tests {
         assert!(document_highlight(&module, &root, &index, position).is_empty());
         assert!(prepare_rename(&module, &root, &index, position).is_none());
         assert!(
-            rename(&module, &root, &index, position, "renamed")
+            rename(&module, &root, &index, &Open::none(), position, "renamed")
                 .expect("a legal name")
                 .is_none()
         );
