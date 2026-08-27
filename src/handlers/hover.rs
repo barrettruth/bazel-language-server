@@ -55,6 +55,13 @@ pub fn hover(
             let declared = declared_card(index, root, &label)?;
             Some(format!("{declared}\n\n{}", tally(index, &label)))
         }
+        // An external label resolves to something real that this tier cannot
+        // reach, which is not the same as naming nothing. Saying so is the
+        // difference between a limitation and an apparently missing feature.
+        StringRole::Label if crate::label::is_external(&found.value) => Some(card(
+            &found.value,
+            "external repository, which needs the repository mapping only Bazel can produce",
+        )),
         StringRole::Label => {
             let label = parse_label(&found.value, package.as_deref())?;
             declared_card(index, root, &label)
@@ -112,15 +119,20 @@ fn declared_card(index: &crate::index::Index, root: &Path, label: &Label) -> Opt
 
 /// How many references the index holds, said as what it is.
 ///
-/// The count is a property of the static index and not of the target: labels
-/// that legacy macros compute are invisible to it, so the true number is this
-/// one or larger. A bare "5 references" would be read as the answer.
+/// Until the graph tier runs, the count is a property of the static index and
+/// not of the target: labels that legacy macros compute are invisible to it, so
+/// the true number is this one or larger, and a bare "5 references" would be
+/// read as the answer. Once the graph has loaded the count *is* the answer, and
+/// hedging it then is its own kind of lie.
 fn tally(index: &crate::index::Index, label: &Label) -> String {
     let counted = match index.references(&label.key()).len() {
         0 => "No references".to_string(),
         1 => "1 reference".to_string(),
         n => format!("{n} references"),
     };
+    if index.graph_loaded {
+        return counted;
+    }
     format!("{counted} in the static index, which does not see macro-generated labels")
 }
 
@@ -172,6 +184,31 @@ mod tests {
         );
     }
 
+    /// An external label is a limitation, not an absence, and the card has to
+    /// distinguish the two: an empty answer here is what a user reads as the
+    /// feature never having been written.
+    #[test]
+    fn an_external_label_says_what_it_needs() {
+        let fixture = Fixture::workspace();
+        let card = fixture
+            .card("lib/BUILD.bazel", "@platforms//os:linux")
+            .expect("a card naming the limitation");
+        assert!(card.contains("external repository"), "got {card:?}");
+        assert!(card.contains("@platforms//os:linux"), "got {card:?}");
+    }
+
+    /// The count is hedged only while it is a floor. Once the graph tier has
+    /// run it is the answer, and hedging it then understates what is known.
+    #[test]
+    fn a_loaded_graph_reports_the_count_without_hedging() {
+        let index = crate::index::Index {
+            graph_loaded: true,
+            ..Default::default()
+        };
+        let label = crate::label::parse_label("//lib:srcs", None).expect("a label");
+        assert_eq!(tally(&index, &label), "No references");
+    }
+
     /// On the declaration, the card carries the reference count — worded so
     /// the number is read as what the index holds and not as the truth about
     /// the target, which only the graph tier can give.
@@ -220,14 +257,17 @@ mod tests {
     /// Everything the index cannot answer for declines. A card reading
     /// "unknown" is a claim about the target, when the only true claim is
     /// about the index.
+    ///
+    /// An external label is the exception and is covered by
+    /// `an_external_label_says_what_it_needs`: there the true claim about the
+    /// tier is worth making, because the target does exist and only the
+    /// repository mapping is missing.
     #[test]
     fn hover_declines_wherever_it_would_have_to_guess() {
         let fixture = Fixture::workspace();
         let nothing = [
             // The torture workspace's deliberately dangling label.
             ("lib/sub/BUILD.bazel", "//lib:does_not_exist"),
-            // An external repository: the canonical name is Bazel's to know.
-            ("lib/BUILD.bazel", "@platforms//os:linux"),
             // A pseudo-label that never names a target.
             ("lib/BUILD.bazel", "//visibility:public"),
             // A symbol inside a `load()`. The file it comes from is known and
