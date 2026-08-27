@@ -121,7 +121,24 @@ fn cmd_doctor(path: &std::path::Path) {
     let root = workspace.map_or_else(|| path.to_path_buf(), |w| w.root);
     let client = BazelClient::new(BazelConfig::default(), root);
     match client.probe() {
-        Ok(version) => println!("bazel      {version}"),
+        Ok(probe) => {
+            println!(
+                "bazel      {} ({} or newer)",
+                probe.version,
+                crate::bazel::FLOOR
+            );
+            let offered = |yes: bool| if yes { "yes" } else { "no" };
+            let oracles = probe.capabilities;
+            // Both, because a wrapper that rewrites the line is the reason a
+            // version ever reads wrong, and this is where you look.
+            println!("  reported           {}", probe.reported);
+            println!("  rule schemas       {}", offered(oracles.rule_classes));
+            println!("  repository mapping {}", offered(oracles.repo_mapping));
+            println!(
+                "  query to a file    {}",
+                offered(oracles.query_output_file)
+            );
+        }
         Err(err) => println!("bazel      unavailable: {err:#}"),
     }
 }
