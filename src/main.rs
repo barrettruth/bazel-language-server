@@ -140,11 +140,13 @@ impl crate::document::Buffers for Documents {
     }
 }
 
-fn run_server() -> Result<()> {
-    tracing::info!("bazel-language-server {}", env!("CARGO_PKG_VERSION"));
-    let (connection, io_threads) = Connection::stdio();
-
-    let capabilities = ServerCapabilities {
+/// Every request this server answers, as the client is told about it.
+///
+/// Held apart from the loop because it is the server's contract: what the
+/// client will send is decided here and nowhere else, and a capability read
+/// beside the dispatch table it corresponds to is easier to keep honest.
+fn capabilities() -> ServerCapabilities {
+    ServerCapabilities {
         text_document_sync: Some(TextDocumentSync::Kind(TextDocumentSyncKind::Full)),
         document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
         workspace_symbol_provider: Some(lsp_types::WorkspaceSymbolProvider::Bool(true)),
@@ -184,7 +186,13 @@ fn run_server() -> Result<()> {
             ..Default::default()
         })),
         ..Default::default()
-    };
+    }
+}
+
+fn run_server() -> Result<()> {
+    tracing::info!("bazel-language-server {}", env!("CARGO_PKG_VERSION"));
+    let (connection, io_threads) = Connection::stdio();
+    let capabilities = capabilities();
     // `Connection::initialize` wraps its argument in `{"capabilities": …}`, so
     // passing a whole InitializeResult nests it twice; the client then sees no
     // `textDocumentSync`, never sends `didOpen`, and every document request
@@ -204,9 +212,8 @@ fn run_server() -> Result<()> {
 
     let root = workspace_root(&init);
     let link_support = supports_definition_links(&init);
-    // The defaults until the client's settings are read: `bazel` on PATH, no
-    // extra flags. Held here so the one place that starts Bazel goes through
-    // the same configuration `doctor` reports on.
+    // Defaults until the client's settings are read, so the one place that
+    // starts Bazel goes through the configuration `doctor` reports on.
     let bazel = BazelConfig::default();
     let index = IndexHandle::new();
     if let Some(root) = root.clone() {
