@@ -15,25 +15,6 @@ use std::time::Instant;
 
 use crate::bazel::{BazelClient, Interrupt};
 
-/// The query that feeds the graph tier, and the flags that keep it affordable.
-///
-/// Pruning attributes is a tenfold cut — 53.7 MB to 5.4 MB, 0.89 s to 0.42 s at
-/// 60k targets — and what survives still carries the name, the rule class and
-/// the location, which is the whole of the light tier.
-/// `--proto:rule_inputs_and_outputs` defaults on and is the expensive half of
-/// what would otherwise remain.
-const QUERY: &[&str] = &[
-    "query",
-    "--output=streamed_proto",
-    "--proto:output_rule_attrs=",
-    "--noproto:rule_inputs_and_outputs",
-    "--order_output=no",
-    "--noimplicit_deps",
-    "--notool_deps",
-    "--keep_going",
-    "//...",
-];
-
 enum Message {
     Refresh,
     Stop,
@@ -130,30 +111,25 @@ fn serve(client: &BazelClient, rx: &Receiver<Message>, running: &Mutex<Option<In
 /// rather than relied upon to stop.
 fn refresh_once(client: &BazelClient, running: &Mutex<Option<Interrupt>>) {
     let started = Instant::now();
-    let mut bytes = 0_usize;
-    let outcome = client.stream(
-        QUERY,
-        |interrupt| {
-            if let Ok(mut slot) = running.lock() {
-                *slot = Some(interrupt);
-            }
-        },
-        // The seam the graph tier replaces: today the proto is measured, and
-        // decoding it into targets is what G4 puts here.
-        &mut |chunk| bytes += chunk.len(),
-    );
+    let query = crate::graph::query(client, |interrupt| {
+        if let Ok(mut slot) = running.lock() {
+            *slot = Some(interrupt);
+        }
+    });
     if let Ok(mut slot) = running.lock() {
         *slot = None;
     }
 
-    match outcome {
-        Ok(outcome) if outcome.ok() => {
-            tracing::info!(bytes, ms = started.elapsed().as_millis(), "graph refresh");
-        }
-        Ok(outcome) => tracing::warn!(
-            status = outcome.status,
+    match query {
+        Ok(query) if query.outcome.ok() => tracing::info!(
+            targets = query.entries.len(),
+            ms = started.elapsed().as_millis(),
+            "graph refresh"
+        ),
+        Ok(query) => tracing::warn!(
+            status = query.outcome.status,
             "bazel query declined: {}",
-            outcome.stderr.lines().next_back().unwrap_or_default()
+            query.outcome.stderr.lines().next_back().unwrap_or_default()
         ),
         Err(err) => tracing::warn!("bazel query could not run: {err:#}"),
     }

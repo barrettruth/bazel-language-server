@@ -9,6 +9,7 @@ mod actor;
 mod bazel;
 mod document;
 mod format;
+mod graph;
 mod handlers;
 mod index;
 mod label;
@@ -110,8 +111,62 @@ fn cmd_index(path: &std::path::Path) {
     for (label, target) in index.targets.iter().take(10) {
         println!("  {:<40} {}", label, target.rule);
     }
-    if !index.graph_loaded {
-        println!("\nstatic tier only: targets from legacy macros are not counted");
+    cmd_graph(&root, &index);
+}
+
+/// What Bazel names in this workspace that the static tier cannot see.
+///
+/// A report rather than a requirement: invariant 2 says the command works with
+/// no Bazel, so an unusable one prints why and the index still stands.
+fn cmd_graph(root: &Path, index: &crate::index::Index) {
+    let client = BazelClient::new(BazelConfig::default(), root.to_path_buf());
+    if let Err(err) = client.probe() {
+        println!("\nstatic tier only: {err:#}");
+        println!("targets from legacy macros are not counted");
+        return;
+    }
+    let started = std::time::Instant::now();
+    let query = match crate::graph::query(&client, |_| {}) {
+        Ok(query) if query.outcome.ok() => query,
+        Ok(query) => {
+            println!(
+                "\nbazel query declined: {}",
+                query.outcome.stderr.lines().next_back().unwrap_or_default()
+            );
+            return;
+        }
+        Err(err) => {
+            println!("\nbazel query could not run: {err:#}");
+            return;
+        }
+    };
+    println!(
+        "\nbazel knows {} targets, in {:.2}s",
+        query.entries.len(),
+        started.elapsed().as_secs_f64()
+    );
+    let missed: Vec<_> = query
+        .entries
+        .iter()
+        .filter(|entry| index.target(&entry.label).is_none())
+        .collect();
+    println!("{} of them the static tier cannot see:", missed.len());
+    // Bazel answers with real paths, so shortening one against the root the
+    // user typed only works if that root is a real path too.
+    let base = root.canonicalize();
+    let base = base.as_deref().unwrap_or(root);
+    for entry in missed.iter().take(10) {
+        println!(
+            "  {:<40} {} at {}:{}",
+            entry.label,
+            entry.rule,
+            entry
+                .file
+                .strip_prefix(base)
+                .unwrap_or(&entry.file)
+                .display(),
+            entry.line
+        );
     }
 }
 
