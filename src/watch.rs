@@ -31,28 +31,63 @@ use crate::index::IndexHandle;
 /// that the second feels immediate.
 const SETTLE: Duration = Duration::from_millis(250);
 
-/// The files whose contents change what the index holds.
-///
-/// `BUILD` and `.bazelignore` change the static tier; `.bzl`, `MODULE.bazel`
-/// and `.bazelrc` change only what Bazel would say. Both rebuild everything
-/// today, and telling them apart is what buys a cheaper refresh later.
-fn indexed(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
+/// Which tiers a changed file can possibly affect.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct Invalidates {
+    /// The target table, which is built from BUILD files and nothing else.
+    targets: bool,
+    /// What Bazel would say, which every file Bazel loads can change.
+    graph: bool,
+}
+
+impl Invalidates {
+    const NOTHING: Self = Self {
+        targets: false,
+        graph: false,
     };
-    matches!(
-        name,
-        "BUILD"
-            | "BUILD.bazel"
-            | "MODULE.bazel"
-            | "MODULE.bazel.lock"
-            | "WORKSPACE"
-            | "WORKSPACE.bazel"
-            | "WORKSPACE.bzlmod"
-            | "REPO.bazel"
-            | ".bazelrc"
-            | ".bazelignore"
-    ) || path.extension().is_some_and(|kind| kind == "bzl")
+    const GRAPH: Self = Self {
+        targets: false,
+        graph: true,
+    };
+    const BOTH: Self = Self {
+        targets: true,
+        graph: true,
+    };
+
+    fn with(self, other: Self) -> Self {
+        Self {
+            targets: self.targets || other.targets,
+            graph: self.graph || other.graph,
+        }
+    }
+
+    fn anything(self) -> bool {
+        self.targets || self.graph
+    }
+}
+
+/// What a change to `path` can reach.
+///
+/// `build_static` skips every file whose kind is not `Build`
+/// (`crate::index`), so a `.bzl` edit cannot move a single entry in the target
+/// table no matter what the macro inside it does — the table records what a
+/// BUILD file literally declares, and only Bazel evaluates the rest. Rebuilding
+/// it anyway costs ~1.4 s on a large repo to arrive at the identical answer.
+///
+/// `.bazelignore` is the exception among the non-BUILD files: it decides which
+/// directories are packages at all, so it changes what the walk may even look
+/// at.
+fn invalidated(path: &Path) -> Invalidates {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Invalidates::NOTHING;
+    };
+    match name {
+        "BUILD" | "BUILD.bazel" | ".bazelignore" => Invalidates::BOTH,
+        "MODULE.bazel" | "MODULE.bazel.lock" | "WORKSPACE" | "WORKSPACE.bazel"
+        | "WORKSPACE.bzlmod" | "REPO.bazel" | ".bazelrc" => Invalidates::GRAPH,
+        _ if path.extension().is_some_and(|kind| kind == "bzl") => Invalidates::GRAPH,
+        _ => Invalidates::NOTHING,
+    }
 }
 
 /// Whether a path lies somewhere the index never looks.
@@ -109,20 +144,23 @@ fn settle(
     actor: Option<&Actor>,
     rx: &std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
 ) {
+    let mut nth = 0_u64;
     while let Ok(first) = rx.recv() {
-        if !wanted(root, &first) {
+        let mut reaches = wanted(root, &first);
+        if !reaches.anything() {
             continue;
         }
         // Everything still arriving is part of the same edit, checkout or
-        // build. Wait for quiet rather than rebuilding once per file.
+        // build, and the tiers it reaches are the union of what it touched.
         loop {
             match rx.recv_timeout(SETTLE) {
-                Ok(_) => {}
+                Ok(event) => reaches = reaches.with(wanted(root, &event)),
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
-        rebuild(root, index, actor);
+        nth += 1;
+        rebuild(root, index, actor, reaches, nth);
     }
 }
 
@@ -132,31 +170,54 @@ fn settle(
 /// `MustScanSubDirs` and its two dropped flags, inotify's `IN_Q_OVERFLOW`,
 /// the Windows overflow. What was lost is unknowable, so the answer is to
 /// rebuild everything, and not asking is a silent staleness bug.
-fn wanted(root: &Path, event: &notify::Result<notify::Event>) -> bool {
+fn wanted(root: &Path, event: &notify::Result<notify::Event>) -> Invalidates {
     match event {
         Ok(event) if event.need_rescan() => {
             tracing::debug!("the watcher dropped events; rebuilding everything");
-            true
+            Invalidates::BOTH
         }
         Ok(event) => event
             .paths
             .iter()
-            .any(|path| indexed(path) && !excluded(root, path)),
+            .filter(|path| !excluded(root, path))
+            .fold(Invalidates::NOTHING, |reaches, path| {
+                reaches.with(invalidated(path))
+            }),
         Err(err) => {
             tracing::warn!("watching the workspace: {err}");
-            false
+            Invalidates::NOTHING
         }
     }
 }
 
-/// Rebuild the static tier and ask for the graph tier.
-fn rebuild(root: &Path, index: &IndexHandle, actor: Option<&Actor>) {
-    let started = std::time::Instant::now();
-    let built = crate::index::build_static(root);
-    let targets = built.len();
-    index.store(built);
-    tracing::info!(targets, ms = started.elapsed().as_millis(), "reindexed");
-    if let Some(actor) = actor {
+/// Refresh whichever tiers the change could have reached.
+///
+/// `nth` counts settled bursts for the life of the session, so a log says how
+/// often editing actually costs a rebuild rather than how long one takes.
+fn rebuild(
+    root: &Path,
+    index: &IndexHandle,
+    actor: Option<&Actor>,
+    reaches: Invalidates,
+    nth: u64,
+) {
+    if reaches.targets {
+        let started = std::time::Instant::now();
+        let built = crate::index::build_static(root);
+        let targets = built.len();
+        index.store(built);
+        tracing::info!(
+            nth,
+            targets,
+            ms = started.elapsed().as_millis(),
+            "reindexed"
+        );
+    } else {
+        tracing::info!(nth, "the target table is untouched by this change");
+    }
+    if reaches.graph
+        && let Some(actor) = actor
+    {
         actor.refresh();
     }
 }
@@ -165,14 +226,57 @@ fn rebuild(root: &Path, index: &IndexHandle, actor: Option<&Actor>) {
 mod tests {
     use super::*;
 
+    /// The target table is built from BUILD files alone, so only they and
+    /// `.bazelignore` can move an entry in it.
     #[test]
-    fn only_the_files_the_index_reads_are_watched() {
-        assert!(indexed(Path::new("/ws/lib/BUILD.bazel")));
-        assert!(indexed(Path::new("/ws/lib/defs.bzl")));
-        assert!(indexed(Path::new("/ws/MODULE.bazel")));
-        assert!(indexed(Path::new("/ws/.bazelrc")));
-        assert!(!indexed(Path::new("/ws/lib/main.cc")));
-        assert!(!indexed(Path::new("/ws/README.md")));
+    fn only_a_build_file_reaches_the_target_table() {
+        for path in ["/ws/lib/BUILD", "/ws/lib/BUILD.bazel", "/ws/.bazelignore"] {
+            assert_eq!(
+                invalidated(Path::new(path)),
+                Invalidates::BOTH,
+                "{path} reaches both tiers"
+            );
+        }
+    }
+
+    /// Bazel loads these and the target table never reads them, so rebuilding
+    /// it would spend ~1.4 s arriving at the identical answer.
+    #[test]
+    fn what_only_bazel_reads_refreshes_only_the_graph() {
+        for path in [
+            "/ws/lib/defs.bzl",
+            "/ws/MODULE.bazel",
+            "/ws/MODULE.bazel.lock",
+            "/ws/WORKSPACE",
+            "/ws/REPO.bazel",
+            "/ws/.bazelrc",
+        ] {
+            assert_eq!(
+                invalidated(Path::new(path)),
+                Invalidates::GRAPH,
+                "{path} is the graph tier's business alone"
+            );
+        }
+    }
+
+    #[test]
+    fn everything_else_costs_nothing() {
+        for path in ["/ws/lib/main.cc", "/ws/README.md", "/ws/lib/a.txt"] {
+            assert_eq!(invalidated(Path::new(path)), Invalidates::NOTHING, "{path}");
+        }
+    }
+
+    /// A burst is one rebuild, reaching the union of what it touched.
+    #[test]
+    fn a_burst_reaches_the_union_of_its_files() {
+        let bzl = invalidated(Path::new("/ws/lib/defs.bzl"));
+        let text = invalidated(Path::new("/ws/lib/a.txt"));
+        assert_eq!(bzl.with(text), Invalidates::GRAPH);
+        assert_eq!(
+            bzl.with(invalidated(Path::new("/ws/lib/BUILD.bazel"))),
+            Invalidates::BOTH
+        );
+        assert!(!text.anything());
     }
 
     /// The convenience symlinks exist only at the root, so a package that
