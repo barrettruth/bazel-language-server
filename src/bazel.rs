@@ -43,7 +43,6 @@ pub struct BazelConfig {
     /// per invariant 1, nothing does.
     pub private_output_base: bool,
     pub args: Vec<String>,
-    pub timeout_seconds: u64,
 }
 
 impl Default for BazelConfig {
@@ -53,12 +52,9 @@ impl Default for BazelConfig {
             path: "bazel".to_string(),
             private_output_base: false,
             args: Vec::new(),
-            timeout_seconds: 120,
         }
     }
 }
-
-impl BazelConfig {}
 
 /// A located Bazel workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
