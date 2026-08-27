@@ -13,9 +13,9 @@
 //! and during a build that is the difference between a handful of events and a
 //! flood.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-use std::sync::mpsc::{RecvTimeoutError, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -112,41 +112,85 @@ fn excluded(root: &Path, path: &Path) -> bool {
         .any(|name| name == ".git" || name == ".jj")
 }
 
-/// The live watch. Dropping it stops watching.
-pub struct Watch {
-    _watcher: notify::RecommendedWatcher,
+/// The command that rebuilds everything on demand.
+pub const REINDEX_COMMAND: &str = "bazel-language-server.reindex";
+
+/// What wakes the rebuild thread.
+enum Wake {
+    /// Something changed on disk.
+    Fs(notify::Result<notify::Event>),
+    /// Somebody asked, through [`REINDEX_COMMAND`].
+    Manual,
 }
 
-/// Watch `root`, rebuilding the index whenever something it reads changes.
-///
-/// # Errors
-///
-/// If the watch cannot be established on `root`.
-pub fn spawn(root: PathBuf, index: IndexHandle, actor: Option<Arc<Actor>>) -> Result<Watch> {
-    let (tx, rx) = channel();
-    let mut watcher = notify::recommended_watcher(tx).context("creating the workspace watcher")?;
-    watcher
-        .watch(&root, RecursiveMode::Recursive)
-        .with_context(|| format!("watching {}", root.display()))?;
+/// The rebuild thread, and the watch that feeds it. Dropping it stops both.
+pub struct Watch {
+    tx: Sender<Wake>,
+    /// `None` where the watch could not be established. The thread still runs,
+    /// which is the whole point — see [`spawn`].
+    _watcher: Option<notify::RecommendedWatcher>,
+}
 
+impl Watch {
+    /// Rebuild both tiers, whatever the watcher has or has not noticed.
+    ///
+    /// Returns without waiting: the rebuild is 0.72 s at 20k packages and
+    /// invariant 1 does not care whose request it is.
+    pub fn reindex(&self) {
+        tracing::info!("reindexing on request");
+        drop(self.tx.send(Wake::Manual));
+    }
+}
+
+/// Rebuild `root`'s index on demand, and whenever something it reads changes.
+///
+/// **The thread starts even when the watch does not.** A failed watch is
+/// exactly the situation the manual reindex exists for, so making the thread
+/// conditional on the watcher would remove the escape hatch precisely when it
+/// is needed. A server with no watch is one that reindexes only when asked,
+/// which is degraded and usable rather than degraded and stuck.
+#[must_use]
+pub fn spawn(root: &Path, index: IndexHandle, actor: Option<Arc<Actor>>) -> Watch {
+    let (tx, rx) = channel();
+    let watching = root.to_path_buf();
     std::thread::Builder::new()
         .name("watch".to_owned())
-        .spawn(move || settle(&root, &index, actor.as_deref(), &rx))
-        .context("spawning the watch thread")?;
+        .spawn(move || settle(&watching, &index, actor.as_deref(), &rx))
+        .expect("spawning the watch thread");
 
-    Ok(Watch { _watcher: watcher })
+    let watcher = match establish(root, tx.clone()) {
+        Ok(watcher) => Some(watcher),
+        Err(err) => {
+            tracing::warn!(
+                "the workspace is not being watched, so the index updates only on \
+                 `{REINDEX_COMMAND}`: {err:#}"
+            );
+            None
+        }
+    };
+    Watch {
+        tx,
+        _watcher: watcher,
+    }
+}
+
+/// One recursive watch on `root`, reporting into `tx`.
+fn establish(root: &Path, tx: Sender<Wake>) -> Result<notify::RecommendedWatcher> {
+    let mut watcher = notify::recommended_watcher(move |event| {
+        drop(tx.send(Wake::Fs(event)));
+    })
+    .context("creating the workspace watcher")?;
+    watcher
+        .watch(root, RecursiveMode::Recursive)
+        .with_context(|| format!("watching {}", root.display()))?;
+    Ok(watcher)
 }
 
 /// Collapse a burst of events into one rebuild.
-fn settle(
-    root: &Path,
-    index: &IndexHandle,
-    actor: Option<&Actor>,
-    rx: &std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
-) {
+fn settle(root: &Path, index: &IndexHandle, actor: Option<&Actor>, rx: &Receiver<Wake>) {
     let mut nth = 0_u64;
     while let Ok(first) = rx.recv() {
-        let mut reaches = wanted(root, &first);
+        let mut reaches = reached(root, &first);
         if !reaches.anything() {
             continue;
         }
@@ -154,13 +198,25 @@ fn settle(
         // build, and the tiers it reaches are the union of what it touched.
         loop {
             match rx.recv_timeout(SETTLE) {
-                Ok(event) => reaches = reaches.with(wanted(root, &event)),
+                Ok(wake) => reaches = reaches.with(reached(root, &wake)),
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
         nth += 1;
         rebuild(root, index, actor, reaches, nth);
+    }
+}
+
+/// Which tiers a wake reaches.
+///
+/// A manual reindex reaches everything by definition: it is asked for when the
+/// watcher is not trusted, so believing the watcher about what changed would
+/// defeat it.
+fn reached(root: &Path, wake: &Wake) -> Invalidates {
+    match wake {
+        Wake::Manual => Invalidates::BOTH,
+        Wake::Fs(event) => wanted(root, event),
     }
 }
 

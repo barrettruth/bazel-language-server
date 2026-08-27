@@ -214,7 +214,10 @@ fn capabilities() -> ServerCapabilities {
         inlay_hint_provider: Some(lsp_types::InlayHintProvider::Bool(true)),
         code_lens_provider: Some(lsp_types::CodeLensOptions::default()),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
-            commands: vec![handlers::RUN_COMMAND.to_string()],
+            commands: vec![
+                handlers::RUN_COMMAND.to_string(),
+                watch::REINDEX_COMMAND.to_string(),
+            ],
             ..Default::default()
         }),
         implementation_provider: Some(lsp_types::ImplementationProvider::Bool(true)),
@@ -280,11 +283,9 @@ fn run_server() -> Result<()> {
     }
     // Held alongside the actor: dropping either stops its thread, so a shutdown
     // takes the watch and the subprocess with it.
-    let _watch = root.clone().and_then(|root| {
-        watch::spawn(root, index.clone(), actor.clone())
-            .inspect_err(|err| tracing::warn!("the workspace is not being watched: {err:#}"))
-            .ok()
-    });
+    let watch = root
+        .as_deref()
+        .map(|root| watch::spawn(root, index.clone(), actor.clone()));
     tracing::info!(targets = index.load().len(), "ready");
 
     let mut docs = Documents {
@@ -308,6 +309,7 @@ fn run_server() -> Result<()> {
                     root.as_deref(),
                     link_support,
                     &bazel,
+                    watch.as_ref(),
                 ) {
                     Ok(response) => response,
                     Err(err) => {
@@ -343,6 +345,7 @@ fn respond(
     root: Option<&Path>,
     link_support: bool,
     bazel: &BazelConfig,
+    watch: Option<&watch::Watch>,
 ) -> Result<Response> {
     let id = request.id.clone();
     let method: LspRequestMethod<'_> = request.method.as_str().into();
@@ -375,7 +378,7 @@ fn respond(
     } else if method == CodeLensRequest::METHOD {
         Response::new_ok(id, code_lenses(request, docs, root)?)
     } else if method == ExecuteCommandRequest::METHOD {
-        Response::new_ok(id, execute_command(request, root, bazel)?)
+        Response::new_ok(id, execute_command(request, root, bazel, watch)?)
     } else if method == InlayHintRequest::METHOD {
         Response::new_ok(id, inlay_hints(request, docs, index, root)?)
     } else if method == WorkspaceSymbolRequest::METHOD {
@@ -590,22 +593,33 @@ fn code_lenses(
     Ok(lenses)
 }
 
-/// Run the Bazel invocation a lens offered.
+/// The two commands a client may ask for directly.
 ///
-/// This is the one place the server starts Bazel, and it is not a request
-/// handler answering about a buffer: the user clicked "test //x", so the
-/// invocation *is* the answer. It is detached rather than awaited, because a
-/// build takes minutes and the request loop serves every other document.
+/// [`watch::REINDEX_COMMAND`] rebuilds both tiers. It returns immediately: the
+/// rebuild goes to the watch thread, so invariant 1 holds for a command the
+/// same as for a request.
 ///
-/// Nothing is reported back beyond that it started. LSP has no channel for a
-/// subprocess's output, and inventing one here would be a worse terminal than
-/// the one the user already has.
+/// [`handlers::RUN_COMMAND`] runs the Bazel invocation a lens offered. This is
+/// the one place the server starts Bazel, and it is not a handler answering
+/// about a buffer: the user clicked "test //x", so the invocation *is* the
+/// answer. It is detached rather than awaited, because a build takes minutes
+/// and the request loop serves every other document. Nothing comes back beyond
+/// that it started — LSP has no channel for a subprocess's output, and
+/// inventing one here would be a worse terminal than the one the user has.
 fn execute_command(
     request: &lsp_server::Request,
     root: Option<&Path>,
     bazel: &BazelConfig,
+    watch: Option<&watch::Watch>,
 ) -> Result<Option<serde_json::Value>> {
     let params: lsp_types::ExecuteCommandParams = serde_json::from_value(request.params.clone())?;
+    if params.command == watch::REINDEX_COMMAND {
+        let Some(watch) = watch else {
+            anyhow::bail!("there is no workspace to reindex");
+        };
+        watch.reindex();
+        return Ok(None);
+    }
     if params.command != handlers::RUN_COMMAND {
         anyhow::bail!("unknown command: {}", params.command);
     }
