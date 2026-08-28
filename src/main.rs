@@ -140,30 +140,32 @@ fn cmd_graph(root: &Path, index: &crate::index::Index) {
     };
     println!(
         "\nbazel knows {} targets, in {:.2}s",
-        query.entries.len(),
+        query.tier.len(),
         started.elapsed().as_secs_f64()
     );
-    let missed: Vec<_> = query
-        .entries
+    let mut missed: Vec<_> = query
+        .tier
+        .targets
         .iter()
-        .filter(|entry| index.target(&entry.label).is_none())
+        .filter(|(label, _)| index.target(label).is_none())
         .collect();
+    missed.sort_unstable_by_key(|(label, _)| *label);
     println!("{} of them the static tier cannot see:", missed.len());
     // Bazel answers with real paths, so shortening one against the root the
     // user typed only works if that root is a real path too.
     let base = root.canonicalize();
     let base = base.as_deref().unwrap_or(root);
-    for entry in missed.iter().take(10) {
+    for (label, target) in missed.iter().take(10) {
         println!(
             "  {:<40} {} at {}:{}",
-            entry.label,
-            entry.rule,
-            entry
+            label,
+            target.rule,
+            target
                 .file
                 .strip_prefix(base)
-                .unwrap_or(&entry.file)
+                .unwrap_or(&target.file)
                 .display(),
-            entry.line
+            target.line + 1
         );
     }
 }

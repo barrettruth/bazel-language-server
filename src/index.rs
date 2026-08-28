@@ -32,8 +32,6 @@ pub struct Target {
     /// The rule or macro that declared it, as written at the call site.
     pub rule: Box<str>,
     pub file: Arc<Path>,
-    /// Byte offset of the declaring call within its file.
-    pub offset: u32,
     /// Zero-based line of the target's name, and its column in UTF-16 code
     /// units — the encoding LSP positions use.
     ///
@@ -43,6 +41,10 @@ pub struct Target {
     pub character: u32,
     /// The name's width in UTF-16 code units, so the name has a range and not
     /// just a start. A name never spans a line.
+    ///
+    /// Zero where no name is written in the file at all, which is every target
+    /// a macro computed: Bazel places those at the macro call, and there is no
+    /// span there to cover.
     pub length: u32,
 }
 
@@ -452,7 +454,6 @@ fn collect(
                     name: value.into_boxed_str(),
                     rule: rule.into_boxed_str(),
                     file: Arc::clone(file),
-                    offset: u32::from(call.range().start()),
                     line,
                     character,
                     length,
@@ -547,7 +548,6 @@ mod tests {
             name: "t".into(),
             rule: rule.into(),
             file: Arc::from(Path::new(file)),
-            offset: 0,
             line,
             character: 0,
             length: 1,
@@ -635,7 +635,6 @@ mod tests {
                 name: "srcs".into(),
                 rule: "filegroup".into(),
                 file: Arc::from(Path::new("/ws/lib/BUILD.bazel")),
-                offset: 0,
                 line: 0,
                 character: 0,
                 length: 4,

@@ -122,7 +122,7 @@ fn refresh_once(client: &BazelClient, running: &Mutex<Option<Interrupt>>) {
 
     match query {
         Ok(query) if query.outcome.ok() => tracing::info!(
-            targets = query.entries.len(),
+            targets = query.tier.len(),
             ms = started.elapsed().as_millis(),
             "graph refresh"
         ),
