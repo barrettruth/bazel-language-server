@@ -19,7 +19,7 @@ use arc_swap::ArcSwap;
 use lsp_types::Position;
 use rustc_hash::{FxHashMap, FxHashSet};
 use starlark_cst::ast::{AstNode, CallExpr, Expr, File, LiteralExpr, Stmt};
-use starlark_cst::{Dialect, SyntaxElement, SyntaxKind, TextRange, classify, parse};
+use starlark_cst::{Dialect, Parse, SyntaxElement, SyntaxKind, TextRange, classify, parse};
 
 use crate::label::{Label, make_variable_labels, parse_label};
 use crate::line_index::utf16_len;
@@ -265,6 +265,10 @@ impl IndexHandle {
     pub fn store_disk(&self, tier: Tier) {
         self.disk.store(Arc::new(tier));
     }
+
+    pub fn store_buffer(&self, tier: Tier) {
+        self.buffer.store(Arc::new(tier));
+    }
 }
 
 /// The package a BUILD file defines, as a workspace-relative directory:
@@ -356,7 +360,7 @@ pub fn build_static(root: &Path) -> Tier {
         if collect_file(
             root,
             &Arc::from(path),
-            dialect,
+            &parse(&text, dialect),
             &text,
             &mut index.targets,
             &mut index.references,
@@ -382,12 +386,17 @@ pub fn build_static(root: &Path) -> Tier {
 /// declaration lands in — the two derive it from the same call rather than from
 /// two copies of the same rule.
 ///
+/// The tree is supplied rather than parsed here so that a caller who needs to
+/// know whether it parsed cleanly — the buffer tier does, to decide whether it
+/// may claim a file — reads the errors off the same pass this reads the
+/// declarations off.
+///
 /// `false` where the path lies outside `root`, which is the one way a file can
 /// have no package to be indexed under.
 pub fn collect_file(
     root: &Path,
     path: &Arc<Path>,
-    dialect: Dialect,
+    parsed: &Parse,
     text: &str,
     targets: &mut FxHashMap<String, Target>,
     references: &mut FxHashMap<String, Vec<Reference>>,
@@ -395,7 +404,7 @@ pub fn collect_file(
     let Some(package) = package_dir(root, path) else {
         return false;
     };
-    collect(text, dialect, path, &package, targets, references);
+    collect(parsed, text, path, &package, targets, references);
     true
 }
 
@@ -434,14 +443,14 @@ pub fn declaration_in(text: &str, dialect: Dialect, name: &str) -> Option<Positi
 /// Both come out of the same parse and the same walk of top-level calls. A
 /// second traversal would double the only cost this tier has.
 fn collect(
+    parsed: &Parse,
     text: &str,
-    dialect: Dialect,
     file: &Arc<Path>,
     package: &str,
     targets: &mut FxHashMap<String, Target>,
     references: &mut FxHashMap<String, Vec<Reference>>,
 ) {
-    let Some(root) = File::cast(parse(text, dialect).syntax()) else {
+    let Some(root) = File::cast(parsed.syntax()) else {
         return;
     };
     let lines = crate::line_index::LineIndex::new(text);
@@ -804,8 +813,8 @@ mod tests {
         let mut targets = FxHashMap::default();
         let mut references = FxHashMap::default();
         collect(
+            &parse(text, Dialect::Bazel),
             text,
-            Dialect::Bazel,
             &Arc::from(Path::new("/ws/lib/BUILD.bazel")),
             package,
             &mut targets,
