@@ -21,7 +21,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use notify::{RecursiveMode, Watcher};
 
-use crate::actor::Actor;
+use crate::actor::Bazel;
 use crate::index::IndexHandle;
 
 /// How long a burst may keep arriving before the rebuild starts.
@@ -150,12 +150,12 @@ impl Watch {
 /// is needed. A server with no watch is one that reindexes only when asked,
 /// which is degraded and usable rather than degraded and stuck.
 #[must_use]
-pub fn spawn(root: &Path, index: IndexHandle, actor: Option<Arc<Actor>>) -> Watch {
+pub fn spawn(root: &Path, index: IndexHandle, bazel: Arc<Bazel>) -> Watch {
     let (tx, rx) = channel();
     let watching = root.to_path_buf();
     std::thread::Builder::new()
         .name("watch".to_owned())
-        .spawn(move || settle(&watching, &index, actor.as_deref(), &rx))
+        .spawn(move || settle(&watching, &index, &bazel, &rx))
         .expect("spawning the watch thread");
 
     let watcher = match establish(root, tx.clone()) {
@@ -187,7 +187,7 @@ fn establish(root: &Path, tx: Sender<Wake>) -> Result<notify::RecommendedWatcher
 }
 
 /// Collapse a burst of events into one rebuild.
-fn settle(root: &Path, index: &IndexHandle, actor: Option<&Actor>, rx: &Receiver<Wake>) {
+fn settle(root: &Path, index: &IndexHandle, bazel: &Bazel, rx: &Receiver<Wake>) {
     let mut nth = 0_u64;
     while let Ok(first) = rx.recv() {
         let mut reaches = reached(root, &first);
@@ -204,7 +204,7 @@ fn settle(root: &Path, index: &IndexHandle, actor: Option<&Actor>, rx: &Receiver
             }
         }
         nth += 1;
-        rebuild(root, index, actor, reaches, nth);
+        rebuild(root, index, bazel, reaches, nth);
     }
 }
 
@@ -250,13 +250,7 @@ fn wanted(root: &Path, event: &notify::Result<notify::Event>) -> Invalidates {
 ///
 /// `nth` counts settled bursts for the life of the session, so a log says how
 /// often editing actually costs a rebuild rather than how long one takes.
-fn rebuild(
-    root: &Path,
-    index: &IndexHandle,
-    actor: Option<&Actor>,
-    reaches: Invalidates,
-    nth: u64,
-) {
+fn rebuild(root: &Path, index: &IndexHandle, bazel: &Bazel, reaches: Invalidates, nth: u64) {
     if reaches.targets {
         let started = std::time::Instant::now();
         let built = crate::index::build_static(root);
@@ -271,10 +265,8 @@ fn rebuild(
     } else {
         tracing::info!(nth, "the target table is untouched by this change");
     }
-    if reaches.graph
-        && let Some(actor) = actor
-    {
-        actor.refresh();
+    if reaches.graph {
+        bazel.refresh();
     }
 }
 

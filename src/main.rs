@@ -19,7 +19,7 @@ mod watch;
 
 use std::path::{Path, PathBuf};
 
-use crate::actor::Actor;
+use crate::actor::Bazel;
 use crate::bazel::{BazelClient, BazelConfig};
 use crate::document::Documents;
 use crate::index::IndexHandle;
@@ -28,6 +28,7 @@ use clap::{Parser, Subcommand};
 use lsp_server::{Connection, Message, Response};
 use lsp_types::{
     CodeLensRequest, Definition, DefinitionRequest, DefinitionResponse,
+    DidChangeConfigurationNotification, DidChangeConfigurationParams,
     DidChangeTextDocumentNotification, DidChangeTextDocumentParams,
     DidCloseTextDocumentNotification, DidCloseTextDocumentParams, DidOpenTextDocumentNotification,
     DidOpenTextDocumentParams, DocumentFormattingRequest, DocumentHighlightRequest,
@@ -216,39 +217,22 @@ fn cmd_doctor(path: &std::path::Path) {
     }
 }
 
-/// Start the Bazel thread, if this workspace has a Bazel worth driving.
+/// The Bazel settings a client sent, under whichever of the two keys it uses.
 ///
-/// The probe is reported either way: a user who discovers that their Bazel is
-/// too old at the moment a label declines to resolve learns it in the worst
-/// possible place, which is invariant 3.
+/// `initializationOptions` arrives once with `initialize`; VS Code puts its
+/// settings there. Neovim's `vim.lsp.config{ settings = … }` instead sends
+/// `workspace/didChangeConfiguration` straight after `initialized`, so a server
+/// that read only the first would silently ignore the way most of its users
+/// configure it. Both are read, and the later one wins.
 ///
-/// `None` is the ordinary case rather than a failure. Without a workspace, or
-/// without a usable Bazel, the static tier is the whole server and invariant 2
-/// says that has to be enough.
-fn start_bazel(
-    config: &BazelConfig,
-    root: Option<&Path>,
-    index: IndexHandle,
-) -> Option<std::sync::Arc<Actor>> {
-    let client = BazelClient::new(config.clone(), root?.to_path_buf());
-    match client.probe() {
-        Ok(probe) => {
-            tracing::info!(
-                version = %probe.version,
-                rule_schemas = probe.capabilities.rule_classes,
-                repo_mapping = probe.capabilities.repo_mapping,
-                "bazel"
-            );
-            let actor = Actor::spawn(client, index);
-            // Warm the Bazel server now rather than on the first request that
-            // wants it. The cost is the same either way and this way it
-            // overlaps with the user reading code instead of with their first
-            // question.
-            actor.refresh();
-            Some(std::sync::Arc::new(actor))
-        }
+/// Anything the object does not carry keeps its default, so a client sending
+/// `{"bazel": {"path": "bazelisk"}}` changes the binary and nothing else.
+fn bazel_settings(sent: Option<&serde_json::Value>) -> Option<BazelConfig> {
+    let section = sent?.get("bazel")?;
+    match serde_json::from_value(section.clone()) {
+        Ok(config) => Some(config),
         Err(err) => {
-            tracing::warn!("the Bazel tier is unavailable: {err:#}");
+            tracing::warn!("the `bazel` settings could not be read, so the defaults stand: {err}");
             None
         }
     }
@@ -331,11 +315,15 @@ fn run_server() -> Result<()> {
     let link_support = supports_definition_links(&init);
     // Defaults until the client's settings are read, so the one place that
     // starts Bazel goes through the configuration `doctor` reports on.
-    let bazel = BazelConfig::default();
+    let index = IndexHandle::new();
     // Held for the life of the loop: dropping it stops the Bazel thread, so a
     // shutdown takes the subprocess with it rather than orphaning one.
-    let index = IndexHandle::new();
-    let actor = start_bazel(&bazel, root.as_deref(), index.clone());
+    let bazel = std::sync::Arc::new(Bazel::default());
+    bazel.reconfigure(
+        bazel_settings(init.initialization_options.as_ref()).unwrap_or_default(),
+        root.as_deref(),
+        &index,
+    );
     if let Some(root) = root.clone() {
         // Synchronous: ~1.4 s on a 74k-package repo, which is cheaper than the
         // machinery to report progress on it would be.
@@ -345,7 +333,7 @@ fn run_server() -> Result<()> {
     // takes the watch and the subprocess with it.
     let watch = root
         .as_deref()
-        .map(|root| watch::spawn(root, index.clone(), actor.clone()));
+        .map(|root| watch::spawn(root, index.clone(), bazel.clone()));
     tracing::info!(targets = index.load().len(), "ready");
 
     let mut docs = Documents::new(root.clone(), index.clone());
@@ -381,6 +369,20 @@ fn run_server() -> Result<()> {
                 };
                 connection.sender.send(Message::Response(response))?;
             }
+            // Configuration is answered here rather than in `apply`, which is
+            // about the open documents and nothing else.
+            Message::Notification(note)
+                if LspNotificationMethod::from(note.method.as_str())
+                    == DidChangeConfigurationNotification::METHOD =>
+            {
+                let sent: Option<DidChangeConfigurationParams> =
+                    serde_json::from_value(note.params.clone()).ok();
+                bazel.reconfigure(
+                    bazel_settings(sent.as_ref().map(|sent| &sent.settings)).unwrap_or_default(),
+                    root.as_deref(),
+                    &index,
+                );
+            }
             Message::Notification(note) => match apply(&note, &mut docs) {
                 Ok(Some(uri)) => publish(&connection, &docs, &uri)?,
                 Ok(None) => {}
@@ -403,7 +405,7 @@ fn respond(
     index: &IndexHandle,
     root: Option<&Path>,
     link_support: bool,
-    bazel: &BazelConfig,
+    bazel: &Bazel,
     watch: Option<&watch::Watch>,
 ) -> Result<Response> {
     let id = request.id.clone();
@@ -666,7 +668,7 @@ fn code_lenses(
 fn execute_command(
     request: &lsp_server::Request,
     root: Option<&Path>,
-    bazel: &BazelConfig,
+    bazel: &Bazel,
     watch: Option<&watch::Watch>,
 ) -> Result<Option<serde_json::Value>> {
     let params: lsp_types::ExecuteCommandParams = serde_json::from_value(request.params.clone())?;
@@ -692,14 +694,15 @@ fn execute_command(
     let Some(root) = root else {
         anyhow::bail!("no workspace to run in");
     };
-    if !bazel.enable {
+    let config = bazel.config();
+    if !config.enable {
         anyhow::bail!("the Bazel subsystem is disabled (bazel.enable = false)");
     }
 
-    let binary = &bazel.path;
+    let binary = &config.path;
     tracing::info!(%binary, %verb, %label, "bazel");
     std::process::Command::new(binary)
-        .args(&bazel.args)
+        .args(&config.args)
         .arg(verb)
         .arg(label)
         .current_dir(root)

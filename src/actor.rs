@@ -8,13 +8,80 @@
 //! anyway: a second invocation would queue on a lock instead of a channel, and
 //! a lock is the harder of the two to reason about.
 
+use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use crate::bazel::{BazelClient, Interrupt};
+use arc_swap::ArcSwap;
+
+use crate::bazel::{BazelClient, BazelConfig, Interrupt};
 use crate::index::IndexHandle;
+
+/// The Bazel subsystem as it currently stands.
+///
+/// The configuration and the thread built from it live in one slot, because
+/// two slots is how they come to disagree: a `bazel.path` that has changed and
+/// an actor still running the old binary is a subsystem that reports one thing
+/// and does another.
+#[derive(Default)]
+pub struct Bazel(ArcSwap<Running>);
+
+#[derive(Default)]
+struct Running {
+    config: BazelConfig,
+    /// `None` where this configuration has no Bazel worth driving, which is the
+    /// ordinary case rather than a failure — invariant 2.
+    actor: Option<Actor>,
+}
+
+impl Bazel {
+    /// Adopt `config`, replacing whatever was in force.
+    ///
+    /// The old actor is dropped, which stops its thread and takes any
+    /// invocation with it. A configuration that names no usable Bazel leaves
+    /// the static tier as the whole server, and says why.
+    pub fn reconfigure(&self, config: BazelConfig, root: Option<&Path>, index: &IndexHandle) {
+        let actor = root.and_then(|root| {
+            let client = BazelClient::new(config.clone(), root.to_path_buf());
+            match client.probe() {
+                Ok(probe) => {
+                    tracing::info!(
+                        version = %probe.version,
+                        rule_schemas = probe.capabilities.rule_classes,
+                        repo_mapping = probe.capabilities.repo_mapping,
+                        "bazel"
+                    );
+                    Some(Actor::spawn(client, index.clone()))
+                }
+                Err(err) => {
+                    tracing::warn!("the Bazel tier is unavailable: {err:#}");
+                    None
+                }
+            }
+        });
+        self.0.store(Arc::new(Running { config, actor }));
+        // Warm the server now rather than on the first request that wants it.
+        // The cost is the same either way and this way it overlaps with the
+        // user reading code instead of with their first question.
+        self.refresh();
+    }
+
+    /// Ask for the graph and the repository mapping to be brought up to date.
+    pub fn refresh(&self) {
+        if let Some(actor) = self.0.load().actor.as_ref() {
+            actor.refresh();
+        }
+    }
+
+    /// The configuration in force. Cloned: it is four small fields, and a
+    /// borrow would outlive the snapshot it came from.
+    #[must_use]
+    pub fn config(&self) -> BazelConfig {
+        self.0.load().config.clone()
+    }
+}
 
 enum Message {
     Refresh,

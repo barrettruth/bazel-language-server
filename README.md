@@ -45,6 +45,31 @@ And `@repo//…` resolves, through the repository mapping Bazel alone can
 produce — a repository that has not been fetched says so, and says which
 `bazel fetch` brings it down.
 
+## Configuration
+
+Everything is optional and the defaults are what most workspaces want. Send it
+as `initializationOptions`, or as `settings` — the second arrives as
+`workspace/didChangeConfiguration` and is applied whenever it changes, so
+switching `bazel.path` restarts the Bazel subsystem without restarting the
+server.
+
+```jsonc
+{
+  "bazel": {
+    // Turn the whole Bazel subsystem off. The static tier still answers.
+    "enable": true,
+    // Binary to invoke. `bazelisk` works too.
+    "path": "bazel",
+    // Give the server its own --output_base so its queries never queue behind
+    // your build. Costs a second Bazel server: measured +1.2 GB at 20k
+    // packages, which is why it is off.
+    "privateOutputBase": false,
+    // Extra flags, passed to every invocation.
+    "args": []
+  }
+}
+```
+
 ### CLI
 
 The server also provides standalone subcommands that work without an editor.

@@ -22,7 +22,7 @@ nix run github:barrettruth/bazel-language-server
 Or add to your flake inputs:
 
 ```nix
-inputs.vimdoc-ls.url = "github:barrettruth/bazel-language-server";
+inputs.bazel-language-server.url = "github:barrettruth/bazel-language-server";
 ```
 
 ## From source
@@ -45,10 +45,28 @@ vim.lsp.config('bazel_ls', {
   filetypes = { 'bzl' },
   root_markers = { 'MODULE.bazel', 'WORKSPACE', 'WORKSPACE.bazel', '.git' },
   workspace_required = false,
+  settings = {
+    bazel = {
+      -- Turn the whole Bazel subsystem off. The static tier still answers.
+      enable = true,
+      -- Binary to invoke. `bazelisk` works too.
+      path = 'bazel',
+      -- Give the server its own --output_base so its queries never queue
+      -- behind your build. Costs a second Bazel server: measured +1.2 GB at
+      -- 20k packages, which is why it is off.
+      privateOutputBase = false,
+      -- Extra flags, passed to every invocation.
+      args = {},
+    },
+  },
 })
 
 vim.lsp.enable('bazel_ls')
 ```
+
+`settings` reaches the server as `workspace/didChangeConfiguration` and is
+applied whenever it changes, so changing `bazel.path` restarts the Bazel
+subsystem in place. `init_options` works too, and is read once at startup.
 
 ## Bazel
 
