@@ -10,11 +10,13 @@ toc: true
       recovering parser
 - [x] **Document symbols** — every target declared in a BUILD file
 - [x] **Workspace symbols** — every target in the workspace
-- [x] **Go-to-definition** — labels and `load()` paths
+- [x] **Go-to-definition** — labels and `load()` paths, in this repository and
+      in the external ones it depends on
 - [x] **References** — every label referring to a target, cross-file
 - [x] **Document highlight** — occurrences of the target under the cursor
 - [x] **Rename** — rename a target and rewrite every referring label
-- [x] **Hover** — the resolved target behind the label under the cursor
+- [x] **Hover** — the resolved target behind the label under the cursor, and
+      why one that resolves to nothing does not
 - [x] **Formatting** — delegated to `buildifier` where it is installed
 - [ ] **Completion** — labels from the index, rule names and their attributes
 - [ ] **Unresolved-label diagnostics** — labels that name no target
@@ -33,7 +35,7 @@ toc: true
 - [x] **Selection ranges** — expand the selection along the syntax tree
 - [ ] **Workspace diagnostics** — the pull model, so unresolved labels can be
       reported repository-wide rather than per open file
-- [ ] **Watched-file refresh** — reindex when BUILD files change on disk
+- [x] **Watched-file refresh** — reindex when BUILD files change on disk
 - [ ] **File-rename edits** — rewrite labels when a file or package moves
 - [x] **Execute command** — run a `bazel` invocation the code lens offers
 - [ ] **Incremental sync** — `didChange` ranges rather than whole documents
@@ -78,9 +80,15 @@ resolved too: `buildifier` treats those as ordinary strings, but Bazel reads a
 label out of them, so a rename that skipped one would leave a command pointing
 at a target that no longer exists.
 
-External repositories and target patterns resolve to nothing on purpose. The
-first needs the repository mapping only Bazel can produce, and the second names
-a set rather than a target, so either answer would be a guess.
+A label into another repository resolves through the mapping Bazel produces for
+this workspace, because an apparent name like `@bazel_skylib` means whatever
+that workspace says it means and nothing in general. A repository that has not
+been fetched has no files to navigate to, and hover says so along with the
+`bazel fetch` that changes it — distinct from a name the workspace never
+declared, which is a typo, and from a mapping that has not been read yet.
+
+Target patterns resolve to nothing on purpose: `//pkg:all` names a set rather
+than a target, so any single answer would be a guess.
 
 ## Running targets
 

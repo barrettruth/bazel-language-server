@@ -36,9 +36,14 @@ vim.lsp.enable('bazel_ls')
 
 It handles `BUILD`, `BUILD.bazel`, `*.bzl`, `MODULE.bazel`, `WORKSPACE` and
 `*.scl`. Bazel itself is optional: the target index is parsed from BUILD files,
-so the server answers without a Bazel process and without a build. Targets
-declared by legacy macros are named at evaluation time and are reported as
-missing from the index rather than silently omitted.
+so the server answers without a Bazel process and without a build.
+
+Where Bazel is present it adds two things a parser cannot reach. Targets a
+legacy macro names at evaluation time become navigable, reported at the macro
+call that produces them, which is the only place in the source they come from.
+And `@repo//…` resolves, through the repository mapping Bazel alone can
+produce — a repository that has not been fetched says so, and says which
+`bazel fetch` brings it down.
 
 ### CLI
 
@@ -62,11 +67,13 @@ bazel-language-server doctor path/to/workspace
       recovering parser
 - [x] **Document symbols** — every target declared in a BUILD file
 - [x] **Workspace symbols** — every target in the workspace
-- [x] **Go-to-definition** — labels and `load()` paths
+- [x] **Go-to-definition** — labels and `load()` paths, in this repository and
+      in the external ones it depends on
 - [x] **References** — every label referring to a target, cross-file
 - [x] **Document highlight** — occurrences of the target under the cursor
 - [x] **Rename** — rename a target and rewrite every referring label
-- [x] **Hover** — the resolved target behind the label under the cursor
+- [x] **Hover** — the resolved target behind the label under the cursor, and
+      why one that resolves to nothing does not
 - [x] **Formatting** — delegated to `buildifier` where it is installed
 - [ ] **Completion** — labels from the index, rule names and their attributes
 - [ ] **Unresolved-label diagnostics** — labels that name no target
@@ -85,7 +92,7 @@ bazel-language-server doctor path/to/workspace
 - [x] **Selection ranges** — expand the selection along the syntax tree
 - [ ] **Workspace diagnostics** — the pull model, so unresolved labels can be
       reported repository-wide rather than per open file
-- [ ] **Watched-file refresh** — reindex when BUILD files change on disk
+- [x] **Watched-file refresh** — reindex when BUILD files change on disk
 - [ ] **File-rename edits** — rewrite labels when a file or package moves
 - [x] **Execute command** — run a `bazel` invocation the code lens offers
 - [ ] **Incremental sync** — `didChange` ranges rather than whole documents
