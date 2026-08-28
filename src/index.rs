@@ -224,6 +224,22 @@ impl Index {
         parsed.chain(only_bazel_knows)
     }
 
+    /// Whether `label` is one only Bazel can name.
+    ///
+    /// Derived rather than recorded on the target, because it already is: a
+    /// label no parser holds is one no parser saw, which is exactly what a
+    /// macro computing a name means. A handler that cannot act on such a target
+    /// — rename above all, since there is no `name = "…"` to rewrite — asks
+    /// here and says so.
+    #[must_use]
+    pub fn only_bazel_knows(&self, label: &str) -> bool {
+        self.graph.targets.contains_key(label)
+            && self
+                .parsed()
+                .iter()
+                .all(|tier| !tier.targets.contains_key(label))
+    }
+
     /// How many BUILD files the walk over the disk read.
     #[must_use]
     pub fn files(&self) -> u32 {
@@ -613,6 +629,13 @@ mod tests {
             index.target("//lib:kept").map(|t| &*t.rule),
             Some("filegroup")
         );
+
+        // Which is also how a handler tells the two apart: the macro's target
+        // has no `name = "…"` anywhere to rewrite, and `kept` does.
+        assert!(index.only_bazel_knows("//lib:from_macro"));
+        assert!(!index.only_bazel_knows("//lib:kept"));
+        assert!(!index.only_bazel_knows("//app:other"));
+        assert!(!index.only_bazel_knows("//lib:nothing_at_all"));
 
         let mut listed: Vec<_> = index.targets().map(|(label, _)| label).collect();
         listed.sort_unstable();

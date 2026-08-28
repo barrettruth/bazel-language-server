@@ -67,6 +67,12 @@ pub fn rename(
     let Some((_, key)) = renameable(document, root, index, position) else {
         return Ok(None);
     };
+    if index.only_bazel_knows(&key) {
+        anyhow::bail!(
+            "`{key}` is named by a macro when Bazel evaluates it, so its name is written nowhere \
+             to be rewritten. Rename the macro's argument instead."
+        );
+    }
 
     let sites = name_sites(index, &key, true);
     let old_name = key.rsplit(':').next().unwrap_or(key.as_str());
@@ -107,7 +113,10 @@ pub fn prepare_rename(
     index: &crate::index::Index,
     position: Position,
 ) -> Option<Range> {
-    let (name, _) = renameable(document, root, index, position)?;
+    let (name, key) = renameable(document, root, index, position)?;
+    if index.only_bazel_knows(&key) {
+        return None;
+    }
     let lines = document.line_index();
     Some(Range {
         start: lines.position(document.text(), name.start as usize),
