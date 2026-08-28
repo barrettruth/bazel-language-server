@@ -99,63 +99,37 @@ fn cmd_index(path: &std::path::Path) {
         },
     );
     let started = std::time::Instant::now();
-    let index = crate::index::Index::of_disk(crate::index::build_static(&root));
+    let handle = IndexHandle::new();
+    handle.store_disk(crate::index::build_static(&root));
+    let parsed = handle.load();
     println!(
         "indexed {} BUILD files, {} targets in {:.2}s",
-        index.files(),
-        index.len(),
+        parsed.files(),
+        parsed.len(),
         started.elapsed().as_secs_f64()
     );
-    for (label, target) in index.targets().take(10) {
+    for (label, target) in parsed.targets().take(10) {
         println!("  {:<40} {}", label, target.rule);
     }
-    cmd_graph(&root, &index);
-}
-
-/// What Bazel names in this workspace that the static tier cannot see.
-///
-/// A report rather than a requirement: invariant 2 says the command works with
-/// no Bazel, so an unusable one prints why and the index still stands.
-fn cmd_graph(root: &Path, index: &crate::index::Index) {
-    let client = BazelClient::new(BazelConfig::default(), root.to_path_buf());
-    if let Err(err) = client.probe() {
-        println!("\nstatic tier only: {err:#}");
-        println!("targets from legacy macros are not counted");
+    if !cmd_graph(&root, &handle) {
         return;
     }
-    let started = std::time::Instant::now();
-    let query = match crate::graph::query(&client, |_| {}) {
-        Ok(query) if query.outcome.ok() => query,
-        Ok(query) => {
-            println!(
-                "\nbazel query declined: {}",
-                query.outcome.stderr.lines().next_back().unwrap_or_default()
-            );
-            return;
-        }
-        Err(err) => {
-            println!("\nbazel query could not run: {err:#}");
-            return;
-        }
-    };
-    println!(
-        "\nbazel knows {} targets, in {:.2}s",
-        query.tier.len(),
-        started.elapsed().as_secs_f64()
-    );
-    let mut missed: Vec<_> = query
-        .tier
-        .targets
-        .iter()
-        .filter(|(label, _)| index.target(label).is_none())
-        .collect();
-    missed.sort_unstable_by_key(|(label, _)| *label);
-    println!("{} of them the static tier cannot see:", missed.len());
+    let index = handle.load();
     // Bazel answers with real paths, so shortening one against the root the
     // user typed only works if that root is a real path too.
     let base = root.canonicalize();
-    let base = base.as_deref().unwrap_or(root);
-    for (label, target) in missed.iter().take(10) {
+    let base = base.as_deref().unwrap_or(&root);
+    let mut only_bazel: Vec<_> = index
+        .targets()
+        .filter(|(label, _)| index.only_bazel_knows(label))
+        .collect();
+    only_bazel.sort_unstable_by_key(|(label, _)| *label);
+    println!(
+        "\n{} of {} targets are named by a macro, so no parser can see them:",
+        only_bazel.len(),
+        index.len()
+    );
+    for (label, target) in only_bazel.iter().take(10) {
         println!(
             "  {:<40} {} at {}:{}",
             label,
@@ -167,6 +141,36 @@ fn cmd_graph(root: &Path, index: &crate::index::Index) {
                 .display(),
             target.line + 1
         );
+    }
+}
+
+/// Publish what Bazel knows into `handle`, and say whether it answered.
+///
+/// A report rather than a requirement: invariant 2 says the command works with
+/// no Bazel, so an unusable one prints why and the static tier still stands.
+fn cmd_graph(root: &Path, handle: &IndexHandle) -> bool {
+    let client = BazelClient::new(BazelConfig::default(), root.to_path_buf());
+    if let Err(err) = client.probe() {
+        println!("\nstatic tier only: {err:#}");
+        println!("targets from legacy macros are not counted");
+        return false;
+    }
+    match crate::graph::query(&client, |_| {}) {
+        Ok(query) if query.outcome.ok() => {
+            handle.store_graph(query.tier);
+            true
+        }
+        Ok(query) => {
+            println!(
+                "\nbazel query declined: {}",
+                query.outcome.stderr.lines().next_back().unwrap_or_default()
+            );
+            false
+        }
+        Err(err) => {
+            println!("\nbazel query could not run: {err:#}");
+            false
+        }
     }
 }
 
@@ -210,7 +214,11 @@ fn cmd_doctor(path: &std::path::Path) {
 /// `None` is the ordinary case rather than a failure. Without a workspace, or
 /// without a usable Bazel, the static tier is the whole server and invariant 2
 /// says that has to be enough.
-fn start_bazel(config: &BazelConfig, root: Option<&Path>) -> Option<std::sync::Arc<Actor>> {
+fn start_bazel(
+    config: &BazelConfig,
+    root: Option<&Path>,
+    index: IndexHandle,
+) -> Option<std::sync::Arc<Actor>> {
     let client = BazelClient::new(config.clone(), root?.to_path_buf());
     match client.probe() {
         Ok(probe) => {
@@ -220,7 +228,7 @@ fn start_bazel(config: &BazelConfig, root: Option<&Path>) -> Option<std::sync::A
                 repo_mapping = probe.capabilities.repo_mapping,
                 "bazel"
             );
-            let actor = Actor::spawn(client);
+            let actor = Actor::spawn(client, index);
             // Warm the Bazel server now rather than on the first request that
             // wants it. The cost is the same either way and this way it
             // overlaps with the user reading code instead of with their first
@@ -315,8 +323,8 @@ fn run_server() -> Result<()> {
     let bazel = BazelConfig::default();
     // Held for the life of the loop: dropping it stops the Bazel thread, so a
     // shutdown takes the subprocess with it rather than orphaning one.
-    let actor = start_bazel(&bazel, root.as_deref());
     let index = IndexHandle::new();
+    let actor = start_bazel(&bazel, root.as_deref(), index.clone());
     if let Some(root) = root.clone() {
         // Synchronous: ~1.4 s on a 74k-package repo, which is cheaper than the
         // machinery to report progress on it would be.

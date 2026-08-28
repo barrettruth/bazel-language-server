@@ -113,8 +113,9 @@ pub struct Index {
 }
 
 impl Index {
-    /// A view of the disk alone, for a caller that has no buffers and no Bazel:
-    /// the `index` subcommand, and every test fixture.
+    /// A view of the disk alone, for a test that has no buffers and no Bazel.
+    /// Every caller that runs has an [`IndexHandle`] to load from instead.
+    #[cfg(test)]
     #[must_use]
     pub fn of_disk(disk: Tier) -> Self {
         Self {
@@ -286,6 +287,10 @@ impl IndexHandle {
 
     pub fn store_buffer(&self, tier: Tier) {
         self.buffer.store(Arc::new(tier));
+    }
+
+    pub fn store_graph(&self, tier: Tier) {
+        self.graph.store(Arc::new(tier));
     }
 }
 

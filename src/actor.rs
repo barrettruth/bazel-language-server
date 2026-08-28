@@ -14,6 +14,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use crate::bazel::{BazelClient, Interrupt};
+use crate::index::IndexHandle;
 
 enum Message {
     Refresh,
@@ -36,14 +37,14 @@ pub struct Actor {
 impl Actor {
     /// Start the thread. It idles until asked for a refresh.
     #[must_use]
-    pub fn spawn(client: BazelClient) -> Self {
+    pub fn spawn(client: BazelClient, index: IndexHandle) -> Self {
         let (tx, rx) = channel();
         let running = Arc::new(Mutex::new(None));
         let thread = {
             let running = Arc::clone(&running);
             std::thread::Builder::new()
                 .name("bazel".to_owned())
-                .spawn(move || serve(&client, &rx, &running))
+                .spawn(move || serve(&client, &rx, &running, &index))
                 .expect("spawning the bazel thread")
         };
         Self {
@@ -83,7 +84,12 @@ impl Drop for Actor {
 }
 
 /// The thread body: one invocation at a time, newest request wins.
-fn serve(client: &BazelClient, rx: &Receiver<Message>, running: &Mutex<Option<Interrupt>>) {
+fn serve(
+    client: &BazelClient,
+    rx: &Receiver<Message>,
+    running: &Mutex<Option<Interrupt>>,
+    index: &IndexHandle,
+) {
     while let Ok(message) = rx.recv() {
         if matches!(message, Message::Stop) {
             return;
@@ -95,7 +101,7 @@ fn serve(client: &BazelClient, rx: &Receiver<Message>, running: &Mutex<Option<In
             if drained_stop(rx) {
                 return;
             }
-            refresh_once(client, running);
+            refresh_once(client, running, index);
             again = drained_refresh(rx);
         }
     }
@@ -109,7 +115,7 @@ fn serve(client: &BazelClient, rx: &Receiver<Message>, running: &Mutex<Option<In
 /// refresh is stopped by [`Actor::refresh`] instead, and Bazel's output
 /// serialisation runs to completion regardless — so the result is *discarded*
 /// rather than relied upon to stop.
-fn refresh_once(client: &BazelClient, running: &Mutex<Option<Interrupt>>) {
+fn refresh_once(client: &BazelClient, running: &Mutex<Option<Interrupt>>, index: &IndexHandle) {
     let started = Instant::now();
     let query = crate::graph::query(client, |interrupt| {
         if let Ok(mut slot) = running.lock() {
@@ -121,11 +127,14 @@ fn refresh_once(client: &BazelClient, running: &Mutex<Option<Interrupt>>) {
     }
 
     match query {
-        Ok(query) if query.outcome.ok() => tracing::info!(
-            targets = query.tier.len(),
-            ms = started.elapsed().as_millis(),
-            "graph refresh"
-        ),
+        Ok(query) if query.outcome.ok() => {
+            tracing::info!(
+                targets = query.tier.len(),
+                ms = started.elapsed().as_millis(),
+                "graph refresh"
+            );
+            index.store_graph(query.tier);
+        }
         Ok(query) => tracing::warn!(
             status = query.outcome.status,
             "bazel query declined: {}",
