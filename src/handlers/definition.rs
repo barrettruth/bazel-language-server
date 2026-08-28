@@ -57,6 +57,24 @@ pub(super) fn file_site(root: &Path, label: &Label) -> Option<Site> {
     })
 }
 
+/// The tree a label's package sits in: this workspace, or the repository the
+/// label names.
+///
+/// `None` where the repository cannot be placed, which is the only thing
+/// standing between a label and a wrong answer — resolving `@repo//lib:srcs`
+/// against this workspace finds our `lib/srcs` and offers it, and a file from
+/// the wrong repository is exactly the jump invariant 4 rules out.
+pub(super) fn tree(root: &Path, index: &crate::index::Index, label: &Label) -> Option<PathBuf> {
+    match label.repo.as_deref() {
+        None => Some(root.to_path_buf()),
+        Some(repo) => match index.repos().locate(repo) {
+            Resolved::Main => Some(root.to_path_buf()),
+            Resolved::At(at) => Some(at),
+            Resolved::Unfetched(_) | Resolved::Unknown | Resolved::Unavailable => None,
+        },
+    }
+}
+
 /// The BUILD file of a label's package, wherever that package lives.
 pub(super) fn package_site(tree: &Path, label: &Label) -> Option<Site> {
     ["BUILD.bazel", "BUILD"]
@@ -100,17 +118,7 @@ pub fn definition(
     };
 
     let package = enclosing_package(root, document.path());
-    // A label naming another repository is resolved in that repository's tree
-    // rather than this one's. Everything below is then the same walk, which is
-    // why nothing here knows what an external repository is.
-    let tree = |label: &Label| match label.repo.as_deref() {
-        None => Some(root.to_path_buf()),
-        Some(repo) => match index.repos().locate(repo) {
-            Resolved::Main => Some(root.to_path_buf()),
-            Resolved::At(at) => Some(at),
-            Resolved::Unfetched(_) | Resolved::Unknown | Resolved::Unavailable => None,
-        },
-    };
+    let tree = |label: &Label| tree(root, index, label);
     let site =
         match &found.role {
             // A load path names a file, never a target, so the index is not

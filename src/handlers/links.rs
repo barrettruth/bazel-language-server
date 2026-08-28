@@ -11,7 +11,7 @@ use lsp_types::{DocumentLink, Range};
 use starlark_cst::{SyntaxElement, SyntaxKind};
 
 use super::cursor::{enclosing_package, file_uri, string_at};
-use super::definition::{file_site, target_site};
+use super::definition::{file_site, target_site, tree};
 use crate::document::Document;
 use crate::label::parse_label;
 
@@ -45,7 +45,13 @@ pub fn document_links(
         let Some(label) = parse_label(&found.value, package.as_deref()) else {
             continue;
         };
-        let Some(site) = target_site(index, &label).or_else(|| file_site(root, &label)) else {
+        // The label's own tree, never this one when it names another
+        // repository: `@repo//lib:srcs` resolved here would offer our
+        // `lib/srcs`, which is a file from the wrong repository.
+        let Some(tree) = tree(root, index, &label) else {
+            continue;
+        };
+        let Some(site) = target_site(index, &label).or_else(|| file_site(&tree, &label)) else {
             continue;
         };
         let Some(target) = file_uri(site.path()) else {
