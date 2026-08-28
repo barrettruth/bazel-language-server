@@ -23,6 +23,7 @@ use starlark_cst::{Parse, SyntaxElement, SyntaxKind, TextRange, classify, parse}
 
 use crate::label::{Label, make_variable_labels, parse_label};
 use crate::line_index::utf16_len;
+use crate::repos::Repos;
 
 /// Where a target was declared.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +111,7 @@ pub struct Index {
     buffer: Arc<Tier>,
     disk: Arc<Tier>,
     graph: Arc<Tier>,
+    repos: Arc<Repos>,
 }
 
 impl Index {
@@ -241,6 +243,12 @@ impl Index {
                 .all(|tier| !tier.targets.contains_key(label))
     }
 
+    /// What this workspace's apparent repository names mean.
+    #[must_use]
+    pub fn repos(&self) -> &Repos {
+        &self.repos
+    }
+
     /// How many BUILD files the walk over the disk read.
     #[must_use]
     pub fn files(&self) -> u32 {
@@ -263,6 +271,7 @@ pub struct IndexHandle {
     buffer: Arc<ArcSwap<Tier>>,
     disk: Arc<ArcSwap<Tier>>,
     graph: Arc<ArcSwap<Tier>>,
+    repos: Arc<ArcSwap<Repos>>,
 }
 
 impl IndexHandle {
@@ -278,6 +287,7 @@ impl IndexHandle {
             buffer: self.buffer.load_full(),
             disk: self.disk.load_full(),
             graph: self.graph.load_full(),
+            repos: self.repos.load_full(),
         }
     }
 
@@ -291,6 +301,10 @@ impl IndexHandle {
 
     pub fn store_graph(&self, tier: Tier) {
         self.graph.store(Arc::new(tier));
+    }
+
+    pub fn store_repos(&self, repos: Repos) {
+        self.repos.store(Arc::new(repos));
     }
 }
 
@@ -459,6 +473,7 @@ fn collect(
             && let Some(value) = name.string_value()
         {
             let label = Label {
+                repo: None,
                 package: package.to_string(),
                 name: value.clone(),
             };
@@ -615,6 +630,7 @@ mod tests {
                 ],
                 &[],
             ),
+            repos: Arc::default(),
         };
 
         // The buffer wins where both have it, so the position is the one the
@@ -881,16 +897,18 @@ mod tests {
         assert!(refs("filegroup(name = \"a\", srcs = [])\n", "lib").is_empty());
     }
 
-    /// Everything `parse_label` refuses: an external repo whose canonical name
-    /// only Bazel knows, a pattern that names a set, and prose that merely sits
-    /// in a string.
+    /// A pattern names a set and prose is not a label, so neither is recorded.
+    /// A label into another repository is a label, and is.
     #[test]
-    fn non_labels_are_not_recorded() {
+    fn patterns_are_not_recorded_and_other_repositories_are() {
         let found = refs(
             "genrule(\n    name = \"g\",\n    srcs = [\"@platforms//os:linux\", \"//lib:all\", \"//lib/...\"],\n    outs = [],\n)\n",
             "lib",
         );
-        assert!(found.is_empty(), "got {found:?}");
+        assert_eq!(
+            found,
+            vec![("@platforms//os:linux".to_string(), vec![(2, 28, 5)])]
+        );
     }
 
     /// A `cmd` is prose, so a whole-string parse rightly refuses it — but the

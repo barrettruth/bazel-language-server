@@ -7,6 +7,7 @@ use lsp_types::{LocationLink, Position, Range};
 use super::cursor::{StringRole, enclosing_package, file_uri, string_at};
 use crate::document::Document;
 use crate::label::{Label, parse_label};
+use crate::repos::Resolved;
 
 /// Where a definition lives, and the position to reveal in it.
 pub(super) struct Site {
@@ -56,6 +57,21 @@ pub(super) fn file_site(root: &Path, label: &Label) -> Option<Site> {
     })
 }
 
+/// The BUILD file of a label's package, wherever that package lives.
+pub(super) fn package_site(tree: &Path, label: &Label) -> Option<Site> {
+    ["BUILD.bazel", "BUILD"]
+        .into_iter()
+        .map(|name| tree.join(&label.package).join(name))
+        .find(|path| path.is_file())
+        .map(|path| Site {
+            path,
+            at: Position {
+                line: 0,
+                character: 0,
+            },
+        })
+}
+
 /// Goto-definition for the string under the cursor.
 ///
 /// A string is read as a `load()` path, a symbol in a `load()`, or a label,
@@ -84,22 +100,41 @@ pub fn definition(
     };
 
     let package = enclosing_package(root, document.path());
-    let site = match &found.role {
-        // A load path names a file, never a target, so the index is not
-        // consulted: a rule that happened to be called `defs.bzl` is not it.
-        StringRole::LoadModule => {
-            parse_label(&found.value, package.as_deref()).and_then(|label| file_site(root, &label))
-        }
-        StringRole::LoadSymbol(module) => {
-            parse_label(module, package.as_deref()).and_then(|label| file_site(root, &label))
-        }
-        // The cursor is on the declaration already, so there is nowhere to go.
-        // Jumping to the line it is sitting on reads as the server having
-        // failed. The variant earns its keep in `references`.
-        StringRole::TargetName => None,
-        StringRole::Label => parse_label(&found.value, package.as_deref()).and_then(|label| {
-            target_site(index, &label)
-                .or_else(|| file_site(root, &label))
+    // A label naming another repository is resolved in that repository's tree
+    // rather than this one's. Everything below is then the same walk, which is
+    // why nothing here knows what an external repository is.
+    let tree = |label: &Label| match label.repo.as_deref() {
+        None => Some(root.to_path_buf()),
+        Some(repo) => match index.repos().locate(repo) {
+            Resolved::Main => Some(root.to_path_buf()),
+            Resolved::At(at) => Some(at),
+            Resolved::Unfetched(_) | Resolved::Unknown | Resolved::Unavailable => None,
+        },
+    };
+    let site =
+        match &found.role {
+            // A load path names a file, never a target, so the index is not
+            // consulted: a rule that happened to be called `defs.bzl` is not it.
+            StringRole::LoadModule => parse_label(&found.value, package.as_deref())
+                .and_then(|label| file_site(&tree(&label)?, &label)),
+            StringRole::LoadSymbol(module) => parse_label(module, package.as_deref())
+                .and_then(|label| file_site(&tree(&label)?, &label)),
+            // The cursor is on the declaration already, so there is nowhere to go.
+            // Jumping to the line it is sitting on reads as the server having
+            // failed. The variant earns its keep in `references`.
+            StringRole::TargetName => None,
+            StringRole::Label => {
+                parse_label(&found.value, package.as_deref()).and_then(|label| {
+                    let tree = tree(&label)?;
+                    target_site(index, &label)
+                .or_else(|| file_site(&tree, &label))
+                // Another repository's targets are not indexed, so a label
+                // naming one lands on the BUILD file that declares it: reading
+                // that file for the exact line would put IO in the request
+                // path, and the package is true where the line is merely
+                // better. In this repository a miss is a real miss, and
+                // offering the package would be a wrong jump.
+                .or_else(|| label.repo.as_ref().and_then(|_| package_site(&tree, &label)))
                 .or_else(|| {
                     tracing::debug!(
                         label = label.key(),
@@ -108,8 +143,9 @@ pub fn definition(
                     );
                     None
                 })
-        }),
-    };
+                })
+            }
+        };
 
     let Some(site) = site else {
         return Vec::new();

@@ -10,7 +10,11 @@ use std::path::{Path, PathBuf};
 /// A label resolved against the package that names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Label {
-    /// Workspace-relative package directory. Empty for the root package.
+    /// The repository named between `@` and `//`, as written. `None` is the
+    /// main repository, which `@//` and `@@//` also name.
+    pub repo: Option<String>,
+    /// Package directory, relative to whichever repository holds it. Empty for
+    /// the root package.
     pub package: String,
     /// The target name. For a source file this is a package-relative path,
     /// which is why it may contain slashes.
@@ -22,15 +26,19 @@ impl Label {
     #[must_use]
     pub fn new(package: &str, name: &str) -> Self {
         Self {
+            repo: None,
             package: package.to_string(),
             name: name.to_string(),
         }
     }
 
-    /// The index key: `//pkg:name`, and `//:name` at the root.
+    /// The index key: `//pkg:name`, and `@repo//pkg:name` where one is named.
     #[must_use]
     pub fn key(&self) -> String {
-        format!("//{}:{}", self.package, self.name)
+        match &self.repo {
+            Some(repo) => format!("@{repo}//{}:{}", self.package, self.name),
+            None => format!("//{}:{}", self.package, self.name),
+        }
     }
 
     /// Where a source file of this name would sit, relative to the workspace.
@@ -52,17 +60,20 @@ impl Label {
     }
 }
 
-/// Whether `raw` names a repository other than the main one.
+/// The repository a label names, and the rest of the label after it.
 ///
-/// The one refusal a reader can act on. Everything else [`parse_label`]
-/// declines is not a label at all, but this is a label whose answer exists and
-/// needs the graph tier to reach — so a request can say that rather than
-/// answering nothing, which reads as a feature that was never written.
-#[must_use]
-pub fn is_external(raw: &str) -> bool {
-    raw.strip_prefix("@@")
-        .or_else(|| raw.strip_prefix('@'))
-        .is_some_and(|rest| !rest.starts_with("//"))
+/// `@//pkg` and `@@//pkg` name the main repository explicitly and so carry no
+/// repository of their own. An apparent name and a canonical one are not told
+/// apart here: which it is depends on the workspace's mapping, which this
+/// module has no business knowing.
+fn split_repo(raw: &str) -> Option<(Option<String>, &str)> {
+    let Some(rest) = raw.strip_prefix("@@").or_else(|| raw.strip_prefix('@')) else {
+        return Some((None, raw));
+    };
+    // `@foo` alone is not a label: a repository is a place, not a target.
+    let at = rest.find("//")?;
+    let repo = &rest[..at];
+    Some(((!repo.is_empty()).then(|| repo.to_string()), &rest[at..]))
 }
 
 /// Normalise a label written in `package` to its absolute form.
@@ -72,26 +83,14 @@ pub fn is_external(raw: &str) -> bool {
 /// and `@@//pkg:target` name the main repository explicitly and are the same
 /// thing.
 ///
-/// Refused, because a guess here is worse than nothing: any other `@repo//` or
-/// `@@canonical//` label, which needs the repo mapping only Bazel can produce,
-/// and every target *pattern* — `...`, `//pkg:all`, `//pkg:*` — which names a
-/// set rather than a target.
+/// `@repo//pkg:target` keeps its repository, which only the workspace's own
+/// mapping can turn into a place on disk.
+///
+/// Refused, because a guess here is worse than nothing: every target *pattern*
+/// — `...`, `//pkg:all`, `//pkg:*` — which names a set rather than a target.
 #[must_use]
 pub fn parse_label(raw: &str, package: Option<&str>) -> Option<Label> {
-    if is_external(raw) {
-        tracing::debug!(
-            label = raw,
-            "external repository: the apparent name maps to a canonical one only Bazel knows, \
-             and the repo may not be fetched at all"
-        );
-        return None;
-    }
-    // Past `is_external`, a leading `@` or `@@` is the main repository named
-    // explicitly, and what follows it is an ordinary absolute label.
-    let raw = raw
-        .strip_prefix("@@")
-        .or_else(|| raw.strip_prefix('@'))
-        .unwrap_or(raw);
+    let (repo, raw) = split_repo(raw)?;
 
     if raw.contains("...") {
         tracing::debug!(label = raw, "target pattern, not a label");
@@ -129,6 +128,7 @@ pub fn parse_label(raw: &str, package: Option<&str>) -> Option<Label> {
     }
 
     Some(Label {
+        repo,
         package: package.to_string(),
         name: name.to_string(),
     })
@@ -240,19 +240,31 @@ mod tests {
         assert_eq!(key("@@//lib:srcs", None).as_deref(), Some("//lib:srcs"));
     }
 
-    /// An apparent repo name maps to a canonical one that only `bazel mod
-    /// dump_repo_mapping` knows, and the repo may not be fetched at all.
-    /// Guessing `@rules_go` is `rules_go+` was already wrong once, when the
+    /// A label keeps the repository it names. Turning that apparent name into
+    /// a canonical one is the workspace's business, not the parser's, and
+    /// guessing `@rules_go` is `rules_go+` was already wrong once when the
     /// format changed in Bazel 8.
     #[test]
-    fn external_repositories_are_refused() {
-        assert_eq!(key("@platforms//os:linux", Some("lib")), None);
+    fn external_repositories_keep_the_name_they_wrote() {
         assert_eq!(
-            key("@bazel_skylib//rules:write_file.bzl", Some("lib")),
-            None
+            key("@platforms//os:linux", Some("lib")).as_deref(),
+            Some("@platforms//os:linux")
         );
-        assert_eq!(key("@@rules_go+//go:def.bzl", Some("lib")), None);
-        assert_eq!(key("@sh//:__subpackages__", Some("lib")), None);
+        assert_eq!(
+            key("@bazel_skylib//rules:write_file.bzl", Some("lib")).as_deref(),
+            Some("@bazel_skylib//rules:write_file.bzl")
+        );
+        // `@@` is a canonical name, already past the mapping.
+        assert_eq!(
+            key("@@rules_go+//go:def.bzl", Some("lib")).as_deref(),
+            Some("@rules_go+//go:def.bzl")
+        );
+        assert_eq!(
+            key("@sh//:__subpackages__", Some("lib")).as_deref(),
+            Some("@sh//:__subpackages__")
+        );
+        // A repository is a place, not a target.
+        assert_eq!(key("@platforms", Some("lib")), None);
     }
 
     /// A pattern names a set. Picking one of its members would be a guess, and

@@ -8,6 +8,7 @@ use super::cursor::{StringRole, enclosing_package, string_at};
 use super::definition::file_site;
 use crate::document::Document;
 use crate::label::{Label, parse_label};
+use crate::repos::Resolved;
 
 /// What the string under the cursor names.
 ///
@@ -43,11 +44,15 @@ pub fn hover(
         // it is not in `definition`.
         StringRole::LoadModule => {
             let label = parse_label(&found.value, package.as_deref())?;
-            let site = file_site(root, &label)?;
-            Some(card(
-                &label.key(),
-                &format!("Starlark file `{}`", relative(root, site.path())),
-            ))
+            if let Some(elsewhere) = external_card(index, &label) {
+                Some(elsewhere)
+            } else {
+                let site = file_site(root, &label)?;
+                Some(card(
+                    &label.key(),
+                    &format!("Starlark file `{}`", relative(root, site.path())),
+                ))
+            }
         }
         StringRole::LoadSymbol(_) => None,
         StringRole::TargetName => {
@@ -55,32 +60,29 @@ pub fn hover(
             let declared = declared_card(index, root, &label)?;
             Some(format!("{declared}\n\n{}", tally(index, &label)))
         }
-        // An external label resolves to something real that this tier cannot
-        // reach, which is not the same as naming nothing. Saying so is the
-        // difference between a limitation and an apparently missing feature.
-        StringRole::Label if crate::label::is_external(&found.value) => Some(card(
-            &found.value,
-            "external repository, which needs the repository mapping only Bazel can produce",
-        )),
         StringRole::Label => {
             let label = parse_label(&found.value, package.as_deref())?;
-            declared_card(index, root, &label)
-                .or_else(|| {
-                    let site = file_site(root, &label)?;
-                    Some(card(
-                        &label.key(),
-                        &format!("source file `{}`", relative(root, site.path())),
-                    ))
-                })
-                .or_else(|| {
-                    tracing::debug!(
-                        label = label.key(),
-                        "no such target in the static index and no source file at its path, so \
+            if let Some(elsewhere) = external_card(index, &label) {
+                Some(elsewhere)
+            } else {
+                declared_card(index, root, &label)
+                    .or_else(|| {
+                        let site = file_site(root, &label)?;
+                        Some(card(
+                            &label.key(),
+                            &format!("source file `{}`", relative(root, site.path())),
+                        ))
+                    })
+                    .or_else(|| {
+                        tracing::debug!(
+                            label = label.key(),
+                            "no such target in the static index and no source file at its path, so \
                          there is nothing true to say about it; legacy macros and external \
                          repositories need the graph tier"
-                    );
-                    None
-                })
+                        );
+                        None
+                    })
+            }
         }
     }?;
 
@@ -97,6 +99,33 @@ pub fn hover(
             end: lines.position(text, found.range.end as usize),
         }),
     })
+}
+
+/// The card for a label naming another repository, where it does not simply
+/// resolve.
+///
+/// Which of the four states it is decides what the reader does next — fetch,
+/// fix a typo, wait for Bazel, or nothing — so the card says which. An empty
+/// answer here reads as a feature that was never written.
+fn external_card(index: &crate::index::Index, label: &Label) -> Option<String> {
+    let repo = label.repo.as_deref()?;
+    let detail = match index.repos().locate(repo) {
+        Resolved::Main => return None,
+        Resolved::At(at) => format!(
+            "`{}` in `{}`",
+            label.path().display(),
+            at.join(label.path()).display()
+        ),
+        Resolved::Unfetched(canonical) => format!(
+            "`@{repo}` is `{canonical}` here and has not been fetched; \
+             `bazel fetch @{repo}` brings it down"
+        ),
+        Resolved::Unknown => format!("`@{repo}` is not a repository this workspace declares"),
+        Resolved::Unavailable => "the repository mapping has not been read, so an apparent name \
+             cannot be turned into a place on disk"
+            .to_string(),
+    };
+    Some(card(&label.key(), &detail))
 }
 
 /// A card: the resolved label, fenced, and one line saying what it is.
@@ -182,16 +211,22 @@ mod tests {
         );
     }
 
-    /// An external label is a limitation, not an absence, and the card has to
-    /// distinguish the two: an empty answer here is what a user reads as the
-    /// feature never having been written.
+    /// An external label that cannot be placed is a limitation, not an
+    /// absence, and the card has to distinguish the two: an empty answer here
+    /// is what a user reads as the feature never having been written.
+    ///
+    /// The fixture has read no mapping, which is its own answer and not the
+    /// same as the repository being unknown.
     #[test]
-    fn an_external_label_says_what_it_needs() {
+    fn an_external_label_says_why_it_cannot_be_placed() {
         let fixture = Fixture::workspace();
         let card = fixture
             .card("lib/BUILD.bazel", "@platforms//os:linux")
             .expect("a card naming the limitation");
-        assert!(card.contains("external repository"), "got {card:?}");
+        assert!(
+            card.contains("repository mapping has not been read"),
+            "got {card:?}"
+        );
         assert!(card.contains("@platforms//os:linux"), "got {card:?}");
     }
 

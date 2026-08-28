@@ -14,6 +14,7 @@ mod handlers;
 mod index;
 mod label;
 mod line_index;
+mod repos;
 mod watch;
 
 use std::path::{Path, PathBuf};
@@ -200,6 +201,16 @@ fn cmd_doctor(path: &std::path::Path) {
                 "  query to a file    {}",
                 offered(oracles.query_output_file)
             );
+            match crate::repos::Repos::read(&client) {
+                Ok(repos) => {
+                    println!("repos      {} apparent names", repos.len());
+                    println!(
+                        "  external tree      {}",
+                        repos.output_base().join("external").display()
+                    );
+                }
+                Err(err) => println!("repos      unavailable: {err:#}"),
+            }
         }
         Err(err) => println!("bazel      unavailable: {err:#}"),
     }

@@ -276,6 +276,12 @@ impl BazelClient {
         }
     }
 
+    /// The binary being invoked, for a message that has to name it.
+    #[must_use]
+    pub fn binary(&self) -> &str {
+        &self.config.path
+    }
+
     /// The installed Bazel, if this server can drive it.
     ///
     /// Reported rather than assumed: invariant 3 says a Bazel that cannot

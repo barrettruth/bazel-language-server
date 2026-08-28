@@ -116,6 +116,17 @@ fn serve(
 /// serialisation runs to completion regardless — so the result is *discarded*
 /// rather than relied upon to stop.
 fn refresh_once(client: &BazelClient, running: &Mutex<Option<Interrupt>>, index: &IndexHandle) {
+    // The mapping first, and cheap: one bounded command, where the query below
+    // can run for minutes on a cold repository, and every external label in the
+    // workspace is unresolvable until it lands.
+    match crate::repos::Repos::read(client) {
+        Ok(repos) => {
+            tracing::info!(repositories = repos.len(), "repository mapping");
+            index.store_repos(repos);
+        }
+        Err(err) => tracing::warn!("the repository mapping is unavailable: {err:#}"),
+    }
+
     let started = Instant::now();
     let query = crate::graph::query(client, |interrupt| {
         if let Ok(mut slot) = running.lock() {
