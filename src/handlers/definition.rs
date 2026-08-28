@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use lsp_types::{LocationLink, Position, Range};
 
 use super::cursor::{StringRole, enclosing_package, file_uri, string_at};
-use crate::document::{Buffers, Document};
+use crate::document::Document;
 use crate::label::{Label, parse_label};
 
 /// Where a definition lives, and the position to reveal in it.
@@ -26,24 +26,18 @@ impl Site {
 /// An open buffer outranks the index, which records where the target sat on
 /// disk. Where the buffer no longer declares it, the answer is nothing:
 /// pointing at where it used to be sends the user somewhere the target is not.
-pub(super) fn target_site(
-    index: &crate::index::Index,
-    buffers: &dyn Buffers,
-    label: &Label,
-) -> Option<Site> {
+pub(super) fn target_site(index: &crate::index::Index, label: &Label) -> Option<Site> {
     let target = index.target(&label.key())?;
-    let path = target.file.to_path_buf();
     // The index carries where the name starts and not where the call ends, so
     // the range is empty. Clients reveal the line either way, and re-reading
     // the file to widen it would put IO in the request path.
-    let at = match buffers.at(&path) {
-        Some(document) => document.declaration_of(&target.name)?,
-        None => Position {
+    Some(Site {
+        path: target.file.to_path_buf(),
+        at: Position {
             line: target.line,
             character: target.character,
         },
-    };
-    Some(Site { path, at })
+    })
 }
 
 /// The source file a label names, for the `srcs = ["main.sh"]` case.
@@ -78,7 +72,6 @@ pub fn definition(
     document: &Document,
     root: &Path,
     index: &crate::index::Index,
-    buffers: &dyn Buffers,
     position: Position,
 ) -> Vec<LocationLink> {
     let text = document.text();
@@ -105,7 +98,7 @@ pub fn definition(
         // failed. The variant earns its keep in `references`.
         StringRole::TargetName => None,
         StringRole::Label => parse_label(&found.value, package.as_deref()).and_then(|label| {
-            target_site(index, buffers, &label)
+            target_site(index, &label)
                 .or_else(|| file_site(root, &label))
                 .or_else(|| {
                     tracing::debug!(
@@ -143,7 +136,7 @@ pub fn definition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handlers::fixture::{Fixture, Open, fixture_root};
+    use crate::handlers::fixture::{Fixture, fixture_root};
 
     /// The buffer holding a target's declaration outranks the index, which
     /// records where that declaration sat when the file was last read.
@@ -157,14 +150,9 @@ mod tests {
         );
         let label = parse_label("//lib:srcs", None).expect("a label");
 
-        let indexed =
-            target_site(&fixture.index, &Open::none(), &label).expect("an indexed target");
-        let edited = target_site(
-            &fixture.index,
-            &Open(vec![Document::new(file, shifted, Some(&fixture.root))]),
-            &label,
-        )
-        .expect("the buffer still declares it");
+        let indexed = target_site(&fixture.index, &label).expect("an indexed target");
+        let editing = fixture.editing("lib/BUILD.bazel", &shifted);
+        let edited = target_site(&editing, &label).expect("the buffer still declares it");
 
         assert_eq!(edited.at.line, indexed.at.line + 1);
     }
@@ -180,12 +168,8 @@ mod tests {
             .replace("\"srcs\"", "\"sources\"");
         let label = parse_label("//lib:srcs", None).expect("a label");
 
-        let site = target_site(
-            &fixture.index,
-            &Open(vec![Document::new(file, renamed, Some(&fixture.root))]),
-            &label,
-        );
-        assert!(site.is_none());
+        let editing = fixture.editing("lib/BUILD.bazel", &renamed);
+        assert!(target_site(&editing, &label).is_none());
     }
 
     /// Goto-definition on a declaration must not jump to the line the cursor is
@@ -204,7 +188,6 @@ mod tests {
             &document,
             &fixture.root,
             &crate::index::Index::default(),
-            &Open::none(),
             document.position(offset),
         );
         assert!(jumps.is_empty(), "got {jumps:?}");
@@ -226,7 +209,6 @@ mod tests {
                 &document,
                 &fixture.root,
                 &fixture.index,
-                &Open::none(),
                 document.position(offset),
             )
         };
@@ -362,28 +344,13 @@ mod tests {
 
         for needle in ["filegroup", "name", "srcs = [", ")"] {
             let at = text.find(needle).unwrap();
-            let found = definition(
-                &document,
-                &root,
-                &index,
-                &Open::none(),
-                document.position(at),
-            );
+            let found = definition(&document, &root, &index, document.position(at));
             assert!(found.is_empty(), "cursor on {needle:?} found {found:?}");
         }
 
         // The quotes are not part of the label either.
         let quote = text.find("\"//lib:a\"").unwrap();
-        assert!(
-            definition(
-                &document,
-                &root,
-                &index,
-                &Open::none(),
-                document.position(quote)
-            )
-            .is_empty()
-        );
+        assert!(definition(&document, &root, &index, document.position(quote)).is_empty());
     }
 
     /// The origin range is what the editor underlines. It has to be the label

@@ -12,7 +12,7 @@ use starlark_cst::{SyntaxElement, SyntaxKind};
 
 use super::cursor::{enclosing_package, file_uri, string_at};
 use super::definition::{file_site, target_site};
-use crate::document::{Buffers, Document};
+use crate::document::Document;
 use crate::label::parse_label;
 
 /// A link for every label and `load()` path that resolves.
@@ -26,7 +26,6 @@ pub fn document_links(
     document: &Document,
     root: &Path,
     index: &crate::index::Index,
-    buffers: &dyn Buffers,
 ) -> Vec<DocumentLink> {
     let text = document.text();
     let package = enclosing_package(root, document.path());
@@ -46,8 +45,7 @@ pub fn document_links(
         let Some(label) = parse_label(&found.value, package.as_deref()) else {
             continue;
         };
-        let Some(site) = target_site(index, buffers, &label).or_else(|| file_site(root, &label))
-        else {
+        let Some(site) = target_site(index, &label).or_else(|| file_site(root, &label)) else {
             continue;
         };
         let Some(target) = file_uri(site.path()) else {
@@ -73,7 +71,7 @@ pub fn document_links(
 mod tests {
     use crate::line_index::LineIndex;
 
-    use super::super::fixture::{Fixture, Open};
+    use super::super::fixture::Fixture;
     use super::*;
 
     fn links_in(relative: &str) -> Vec<(String, String)> {
@@ -82,22 +80,17 @@ mod tests {
         let text = std::fs::read_to_string(&file).expect("fixture");
         let lines = LineIndex::new(&text);
 
-        document_links(
-            &fixture.open(relative),
-            &fixture.root,
-            &fixture.index,
-            &Open(vec![fixture.open(relative)]),
-        )
-        .into_iter()
-        .map(|link| {
-            let start = lines.offset(&text, link.range.start);
-            let end = lines.offset(&text, link.range.end);
-            (
-                text[start..end].to_string(),
-                link.tooltip.unwrap_or_default(),
-            )
-        })
-        .collect()
+        document_links(&fixture.open(relative), &fixture.root, &fixture.index)
+            .into_iter()
+            .map(|link| {
+                let start = lines.offset(&text, link.range.start);
+                let end = lines.offset(&text, link.range.end);
+                (
+                    text[start..end].to_string(),
+                    link.tooltip.unwrap_or_default(),
+                )
+            })
+            .collect()
     }
 
     #[test]

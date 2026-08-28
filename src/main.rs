@@ -519,7 +519,7 @@ fn definition(
     let uri = position.text_document.uri;
     let links = match (docs.get(&uri), root) {
         (Some(document), Some(root)) => {
-            handlers::definition(document, root, &index.load(), docs, position.position)
+            handlers::definition(document, root, &index.load(), position.position)
         }
         _ => Vec::new(),
     };
@@ -732,9 +732,7 @@ fn document_links(
     let params: lsp_types::DocumentLinkParams = serde_json::from_value(request.params.clone())?;
     let uri = params.text_document.uri;
     let links = match (docs.get(&uri), root) {
-        (Some(document), Some(root)) => {
-            handlers::document_links(document, root, &index.load(), docs)
-        }
+        (Some(document), Some(root)) => handlers::document_links(document, root, &index.load()),
         _ => Vec::new(),
     };
     tracing::debug!(?uri, count = links.len(), "documentLink");

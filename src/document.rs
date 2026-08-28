@@ -189,15 +189,6 @@ impl Document {
         }
     }
 
-    /// Where this buffer declares `name`, as it stands now.
-    ///
-    /// `None` where the buffer declares no such target, which is the answer
-    /// when an edit has renamed or deleted one the index still lists.
-    #[must_use]
-    pub fn declaration_of(&self, name: &str) -> Option<Position> {
-        crate::index::declaration_in(&self.text, self.dialect, name)
-    }
-
     /// The byte offset of a line and UTF-16 column.
     #[must_use]
     /// The position of a byte offset in this document.

@@ -66,6 +66,19 @@ impl Fixture {
         Document::new(file, text, Some(&self.root))
     }
 
+    /// The same workspace with `relative` held open at `text`, published the
+    /// way the server publishes it — through `Documents`, so a test exercises
+    /// the path that actually runs rather than one shaped like it.
+    pub(super) fn editing(&self, relative: &str, text: &str) -> crate::index::Index {
+        let handle = crate::index::IndexHandle::new();
+        handle.store_disk(crate::index::build_static(&self.root));
+        let file = self.root.join(relative);
+        let uri = super::cursor::file_uri(&file).expect("a uri for a fixture path");
+        let mut docs = crate::document::Documents::new(Some(self.root.clone()), handle.clone());
+        docs.set(uri, file, text.to_string());
+        handle.load()
+    }
+
     /// The document, and the cursor in the middle of `needle`.
     pub(super) fn cursor(&self, relative: &str, needle: &str) -> (Document, Position) {
         let document = self.open(relative);
@@ -78,10 +91,7 @@ impl Fixture {
 
     pub(super) fn links(&self, relative: &str, needle: &str) -> Vec<LocationLink> {
         let (document, position) = self.cursor(relative, needle);
-        // The file the cursor is in is the one the client has open, which is
-        // what the server sees.
-        let open = Open(vec![self.open(relative)]);
-        definition(&document, &self.root, &self.index, &open, position)
+        definition(&document, &self.root, &self.index, position)
     }
 
     /// Every highlight, as `kind line:character text`, so a test reads the
