@@ -498,24 +498,25 @@ fn run_server() -> Result<()> {
     tracing::info!("ready");
 
     let mut docs = Documents::new(root.clone(), index.clone());
-    let (completed_tx, completed_rx) = crossbeam_channel::unbounded();
     let worker_count = std::thread::available_parallelism()
         .map_or(2, std::num::NonZero::get)
         .clamp(2, 8);
+    let (completed_tx, completed_rx) = crossbeam_channel::bounded(worker_count * 8);
     let workers = worker::Pool::new(worker_count, &completed_tx);
     let diagnostics = worker::Latest::new(&completed_tx);
-    let request_context = RequestContext {
-        connection: &connection,
-        workers: &workers,
-        index: &index,
-        root: root.as_deref(),
-        bazel: &bazel,
-        watch: watch.as_ref(),
-        link_support,
-    };
+    {
+        let request_context = RequestContext {
+            connection: &connection,
+            workers: &workers,
+            index: &index,
+            root: root.as_deref(),
+            bazel: &bazel,
+            watch: watch.as_ref(),
+            link_support,
+        };
 
-    'session: loop {
-        crossbeam_channel::select! {
+        'session: loop {
+            crossbeam_channel::select! {
             recv(connection.receiver) -> message => {
                 let Ok(message) = message else { break };
                 match message {
@@ -559,9 +560,13 @@ fn run_server() -> Result<()> {
                 }
                 ready_rx = crossbeam_channel::never();
             }
+            }
         }
     }
 
+    drop(completed_rx);
+    drop(diagnostics);
+    drop(workers);
     drop(connection);
     io_threads.join()?;
     tracing::info!("shut down");
