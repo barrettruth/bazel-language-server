@@ -55,3 +55,15 @@
 
 - Keep comments for invariants a reader cannot derive from the code. Remove
   transition notes and restatements.
+
+## Site
+
+- Order documentation around a Bazel user's questions: supported versions and
+  files, installation, configuration, then capabilities. Keep shipped behavior
+  separate from the roadmap.
+- Keep user outcomes and ordering on the site. Put dependency and architecture
+  detail in `ROADMAP.md`.
+- Preserve the static, minimalist presentation. Add client JavaScript only for
+  an interaction that ordinary links and HTML cannot provide.
+- Use `~/dev/vimdoc-language-server/site` as a hierarchy and visual reference,
+  not as a reason to copy its documentation depth.
