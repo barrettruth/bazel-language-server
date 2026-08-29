@@ -169,7 +169,11 @@ fn serve(
                 return;
             }
             refresh_once(client, running, index);
-            again = drained_refresh(rx);
+            match drained(rx) {
+                Pending::Refresh => again = true,
+                Pending::Idle => again = false,
+                Pending::Stop => return,
+            }
         }
     }
 }
@@ -233,14 +237,44 @@ fn drained_stop(rx: &Receiver<Message>) -> bool {
     }
 }
 
-/// Whether another refresh arrived while the last one ran.
-fn drained_refresh(rx: &Receiver<Message>) -> bool {
+#[derive(Debug, PartialEq, Eq)]
+enum Pending {
+    Idle,
+    Refresh,
+    Stop,
+}
+
+/// What arrived while the last refresh ran.
+fn drained(rx: &Receiver<Message>) -> Pending {
     let mut wanted = false;
     loop {
         match rx.try_recv() {
             Ok(Message::Refresh) => wanted = true,
-            Ok(Message::Stop) | Err(TryRecvError::Disconnected) => return false,
-            Err(TryRecvError::Empty) => return wanted,
+            Ok(Message::Stop) | Err(TryRecvError::Disconnected) => return Pending::Stop,
+            Err(TryRecvError::Empty) if wanted => return Pending::Refresh,
+            Err(TryRecvError::Empty) => return Pending::Idle,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_survives_queue_draining() {
+        let (tx, rx) = channel();
+        tx.send(Message::Refresh).unwrap();
+        tx.send(Message::Stop).unwrap();
+        assert_eq!(drained(&rx), Pending::Stop);
+    }
+
+    #[test]
+    fn refreshes_collapse() {
+        let (tx, rx) = channel();
+        tx.send(Message::Refresh).unwrap();
+        tx.send(Message::Refresh).unwrap();
+        assert_eq!(drained(&rx), Pending::Refresh);
+        assert_eq!(drained(&rx), Pending::Idle);
     }
 }
