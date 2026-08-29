@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 use support::Client;
+use support::lsp_client::Timed;
 
 #[test]
 #[ignore = "requires BLS_WORKSPACE"]
@@ -14,7 +15,9 @@ fn probe_workspace() {
     let relative = std::env::var("BLS_PROBE_FILE")
         .unwrap_or_else(|_| "environment/logging/BUILD.bazel".to_string());
     let text = std::fs::read_to_string(root.join(&relative)).expect("probe BUILD file");
-    let static_label = "//cuttlefish/exported/cuttlefish/nodes:ASinModifierBounds_generation";
+    let static_label = std::env::var("BLS_PROBE_LABEL").unwrap_or_else(|_| {
+        "//cuttlefish/exported/cuttlefish/nodes:ASinModifierBounds_generation".to_owned()
+    });
     let mut client = Client::spawn(&root);
     let initialized = client.initialize(&bazel_options());
 
@@ -23,9 +26,10 @@ fn probe_workspace() {
     client.wait_notification("textDocument/publishDiagnostics");
     let responsive_ms = responsive.elapsed().as_secs_f64() * 1_000.0;
 
-    let ready = client.wait_workspace_symbol(static_label, static_label);
+    let ready = client.wait_workspace_symbol(&static_label, &static_label);
     let symbols = ready.value["result"].as_array().unwrap().len();
     let ready_ms = ready.elapsed.as_secs_f64() * 1_000.0;
+    let graph = graph_ready(&mut client);
 
     let mut workspace_latencies = Vec::new();
     for _ in 0..30 {
@@ -66,18 +70,10 @@ fn probe_workspace() {
         "textDocument/documentSymbol",
         &json!({"textDocument": {"uri": large_uri}}),
     );
-    let cursor = large_text
-        .rfind("//")
-        .expect("a label in the large BUILD file")
-        + 2;
-    let (line, character) = position_at(&large_text, cursor);
-    let large_hover = client.request(
-        "textDocument/hover",
-        &json!({
-            "textDocument": {"uri": large_uri},
-            "position": {"line": line, "character": character}
-        }),
-    );
+    let large_label = std::env::var("BLS_LARGE_LABEL")
+        .unwrap_or_else(|_| "//cuttlefish/src/nodelib/nodes/WorkerPool:spec".to_owned());
+    let (large_hover, large_definition) =
+        navigation(&mut client, &large_uri, &large_text, &large_label);
     let rss_bytes = rss(client.pid());
     let stderr = client.shutdown();
 
@@ -89,6 +85,7 @@ fn probe_workspace() {
             "initialize_ms": initialized.elapsed.as_secs_f64() * 1_000.0,
             "responsive_ms": responsive_ms,
             "static_ready_ms": ready_ms,
+            "graph": graph,
             "document_symbol_ms": {
                 "p50": percentile(&latencies, 50),
                 "p95": percentile(&latencies, 95),
@@ -102,15 +99,59 @@ fn probe_workspace() {
             "document_symbols": document_symbols,
             "workspace_symbols": symbols,
             "large_file": large_relative,
+            "large_label": large_label,
             "large_file_bytes": large_text.len(),
             "large_open_ms": large_open_ms,
             "large_document_symbol_ms": large_symbols.elapsed.as_secs_f64() * 1_000.0,
             "large_document_symbols": large_symbols.value["result"].as_array().map(Vec::len),
             "large_hover_ms": large_hover.elapsed.as_secs_f64() * 1_000.0,
+            "large_definition_ms": large_definition.elapsed.as_secs_f64() * 1_000.0,
             "rss_bytes": rss_bytes,
             "server_errors": stderr.lines().filter(|line| line.contains("ERROR")).count()
         })
     );
+}
+
+fn graph_ready(client: &mut Client) -> Option<Value> {
+    std::env::var("BLS_GRAPH_LABEL").ok().map(|label| {
+        assert!(
+            std::env::var_os("BLS_BAZEL_PATH").is_some(),
+            "BLS_GRAPH_LABEL requires BLS_BAZEL_PATH"
+        );
+        let ready = client.wait_workspace_symbol(&label, &label);
+        json!({
+            "label": label,
+            "ready_ms": ready.elapsed.as_secs_f64() * 1_000.0,
+            "symbols": ready.value["result"].as_array().map(Vec::len)
+        })
+    })
+}
+
+fn navigation(client: &mut Client, uri: &str, text: &str, label: &str) -> (Timed, Timed) {
+    let cursor = text
+        .rfind(label)
+        .expect("BLS_LARGE_LABEL in the large BUILD file")
+        + 2;
+    let (line, character) = position_at(text, cursor);
+    let params = json!({
+        "textDocument": {"uri": uri},
+        "position": {"line": line, "character": character}
+    });
+    let hover = client.request("textDocument/hover", &params);
+    assert!(
+        hover.value["result"].is_object(),
+        "large-file hover did not resolve: {}",
+        hover.value
+    );
+    let definition = client.request("textDocument/definition", &params);
+    assert!(
+        definition.value["result"]
+            .as_array()
+            .is_some_and(|locations| !locations.is_empty()),
+        "large-file definition did not resolve: {}",
+        definition.value
+    );
+    (hover, definition)
 }
 
 fn bazel_options() -> Value {

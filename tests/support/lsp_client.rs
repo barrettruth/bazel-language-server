@@ -8,7 +8,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-const TIMEOUT: Duration = Duration::from_secs(15);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn timeout() -> Duration {
+    std::env::var("BLS_PROBE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|seconds| seconds.parse().ok())
+        .map_or(DEFAULT_TIMEOUT, Duration::from_secs)
+}
 
 pub struct Timed {
     pub value: Value,
@@ -123,7 +130,7 @@ impl Client {
                 };
             }
             assert!(
-                started.elapsed() < TIMEOUT,
+                started.elapsed() < timeout(),
                 "workspace index did not become ready"
             );
             std::thread::sleep(Duration::from_millis(10));
@@ -179,7 +186,19 @@ impl Client {
         let response = self.request("shutdown", &Value::Null);
         assert!(response.value.get("error").is_none(), "{response:?}");
         self.notify("exit", &Value::Null);
-        let status = self.child.wait().expect("wait for language server");
+        let timeout = timeout();
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = self.child.try_wait().expect("wait for language server") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                drop(self.child.kill());
+                drop(self.child.wait());
+                panic!("language server did not exit after {timeout:?}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert!(status.success(), "language server exited with {status}");
         self.stderr.take().expect("stderr reader").join().unwrap()
     }
@@ -197,7 +216,7 @@ impl Client {
     }
 
     fn wait_for(&mut self, wanted: impl Fn(&Value) -> bool) -> Value {
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + timeout();
         loop {
             if let Some(index) = self.backlog.iter().position(&wanted) {
                 return self.backlog.remove(index).expect("queued message");

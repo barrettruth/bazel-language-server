@@ -99,6 +99,11 @@ navigation, a large generated BUILD file and single-file index replacement.
 nix develop -c just validate-workspace /path/to/workspace
 ```
 
+The defaults target Roadrunner. `BLS_PROBE_FILE`, `BLS_PROBE_LABEL`,
+`BLS_LARGE_FILE` and `BLS_LARGE_LABEL` select fixtures in another workspace.
+Set `BLS_BAZEL_PATH` with a graph-only `BLS_GRAPH_LABEL` to exercise evaluated
+Bazel results, and raise `BLS_PROBE_TIMEOUT_SECS` for a cold Bazel server.
+
 ## Features
 
 - [x] **Diagnostics** — syntax errors, reported per keystroke against a
