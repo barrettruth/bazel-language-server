@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -113,6 +114,50 @@ enum Wake {
     Stop,
 }
 
+#[derive(Default)]
+struct EventQueue {
+    state: AtomicU8,
+}
+
+impl EventQueue {
+    const IDLE: u8 = 0;
+    const QUEUED: u8 = 1;
+    const OVERFLOWED: u8 = 2;
+
+    fn send(&self, tx: &Sender<Wake>, event: notify::Result<notify::Event>) {
+        loop {
+            let state = self.state.load(Ordering::Acquire);
+            let next = if state == Self::IDLE {
+                Self::QUEUED
+            } else {
+                Self::OVERFLOWED
+            };
+            if self
+                .state
+                .compare_exchange(state, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                if state != Self::IDLE {
+                    return;
+                }
+                break;
+            }
+        }
+        if tx.send(Wake::Fs(event)).is_err() {
+            self.state.store(Self::IDLE, Ordering::Release);
+        }
+    }
+
+    fn take(&self, root: &Path, event: &notify::Result<notify::Event>) -> Invalidates {
+        if self.state.swap(Self::IDLE, Ordering::AcqRel) == Self::OVERFLOWED {
+            tracing::debug!("filesystem events were coalesced; rebuilding everything");
+            Invalidates::BOTH
+        } else {
+            wanted(root, event)
+        }
+    }
+}
+
 /// The rebuild thread. Dropping it stops the watch and joins the thread.
 pub struct Watch {
     tx: Sender<Wake>,
@@ -155,10 +200,12 @@ pub fn spawn(
     let (tx, rx) = channel();
     let watching = root.to_path_buf();
     let events = tx.clone();
+    let event_queue = Arc::new(EventQueue::default());
+    let callback_queue = Arc::clone(&event_queue);
     let thread = std::thread::Builder::new()
         .name("watch".to_owned())
         .spawn(move || {
-            let _watcher = match establish(&watching, events) {
+            let _watcher = match establish(&watching, events, callback_queue) {
                 Ok(watcher) => Some(watcher),
                 Err(err) => {
                     tracing::warn!(
@@ -168,7 +215,7 @@ pub fn spawn(
                     None
                 }
             };
-            settle(&watching, &index, &bazel, &rx, &ready);
+            settle(&watching, &index, &bazel, &rx, &ready, &event_queue);
         })
         .expect("spawning the watch thread");
     Watch {
@@ -178,9 +225,13 @@ pub fn spawn(
 }
 
 /// One recursive watch on `root`, reporting into `tx`.
-fn establish(root: &Path, tx: Sender<Wake>) -> Result<notify::RecommendedWatcher> {
+fn establish(
+    root: &Path,
+    tx: Sender<Wake>,
+    queue: Arc<EventQueue>,
+) -> Result<notify::RecommendedWatcher> {
     let mut watcher = notify::recommended_watcher(move |event| {
-        drop(tx.send(Wake::Fs(event)));
+        queue.send(&tx, event);
     })
     .context("creating the workspace watcher")?;
     watcher
@@ -196,6 +247,7 @@ fn settle(
     bazel: &Bazel,
     rx: &Receiver<Wake>,
     ready: &crossbeam_channel::Sender<Ready>,
+    events: &EventQueue,
 ) {
     let started = std::time::Instant::now();
     rebuild(root, index, bazel, Invalidates::TARGETS, 0);
@@ -210,14 +262,14 @@ fn settle(
         if matches!(first, Wake::Stop) {
             return;
         }
-        let mut reaches = reached(root, &first);
+        let mut reaches = reached(root, &first, events);
         if !reaches.anything() {
             continue;
         }
         loop {
             match rx.recv_timeout(SETTLE) {
                 Ok(Wake::Stop) | Err(RecvTimeoutError::Disconnected) => return,
-                Ok(wake) => reaches = reaches.with(reached(root, &wake)),
+                Ok(wake) => reaches = reaches.with(reached(root, &wake, events)),
                 Err(RecvTimeoutError::Timeout) => break,
             }
         }
@@ -227,10 +279,10 @@ fn settle(
 }
 
 /// Which tiers a wake reaches.
-fn reached(root: &Path, wake: &Wake) -> Invalidates {
+fn reached(root: &Path, wake: &Wake, events: &EventQueue) -> Invalidates {
     match wake {
         Wake::Manual => Invalidates::BOTH,
-        Wake::Fs(event) => wanted(root, event),
+        Wake::Fs(event) => events.take(root, event),
         Wake::Stop => Invalidates::NOTHING,
     }
 }
@@ -301,6 +353,7 @@ fn rebuild(root: &Path, index: &IndexHandle, bazel: &Bazel, reaches: Invalidates
         tracing::info!(nth, "the target table is untouched by this change");
     }
     if reaches.graph {
+        index.store_graph(crate::index::Tier::default());
         bazel.refresh();
     }
 }
@@ -361,6 +414,17 @@ mod tests {
             vec![PathBuf::from("/ws/lib/BUILD.bazel")]
         );
         assert!(!text.anything());
+    }
+
+    #[test]
+    fn a_full_event_slot_becomes_one_rescan() {
+        let (tx, rx) = channel();
+        let events = EventQueue::default();
+        events.send(&tx, Ok(notify::Event::new(notify::EventKind::Any)));
+        events.send(&tx, Ok(notify::Event::new(notify::EventKind::Any)));
+        let wake = rx.recv().unwrap();
+        assert_eq!(reached(Path::new("/ws"), &wake, &events), Invalidates::BOTH);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

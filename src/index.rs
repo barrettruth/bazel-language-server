@@ -275,26 +275,28 @@ fn is_excluded(entry: &walkdir::DirEntry) -> bool {
 /// Bazel does not load packages under these, so neither may we: indexing them
 /// invents targets that no label can resolve to. One path per line, relative to
 /// the root, `#` for comments, and no wildcards — Bazel matches literally.
-fn read_bazelignore(root: &Path) -> Vec<String> {
+fn read_bazelignore(root: &Path) -> Vec<std::path::PathBuf> {
     let Ok(text) = std::fs::read_to_string(root.join(".bazelignore")) else {
         return Vec::new();
     };
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| line.trim_end_matches('/').replace('\\', "/"))
+        .filter_map(|line| {
+            let line = line.trim_end_matches('/');
+            (!line.is_empty()).then(|| std::path::PathBuf::from(line.replace('\\', "/")))
+        })
         .collect()
 }
 
-fn is_ignored(root: &Path, entry: &walkdir::DirEntry, ignored: &[String]) -> bool {
+fn is_ignored(root: &Path, path: &Path, ignored: &[std::path::PathBuf]) -> bool {
     if ignored.is_empty() {
         return false;
     }
-    let Ok(rel) = entry.path().strip_prefix(root) else {
+    let Ok(relative) = path.strip_prefix(root) else {
         return false;
     };
-    let rel = rel.to_string_lossy().replace('\\', "/");
-    ignored.contains(&rel)
+    ignored.iter().any(|ignored| relative.starts_with(ignored))
 }
 
 /// Build the static tier by parsing every BUILD file under `root`.
@@ -311,7 +313,7 @@ pub fn build_static(root: &Path) -> Tier {
     let walk = walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| !is_excluded(e) && !is_ignored(root, e, &ignored));
+        .filter_entry(|entry| !is_excluded(entry) && !is_ignored(root, entry.path(), &ignored));
 
     for entry in walk.filter_map(Result::ok) {
         if !entry.file_type().is_file() {
@@ -333,6 +335,7 @@ pub fn build_static(root: &Path) -> Tier {
 #[must_use]
 pub fn update_static(root: &Path, current: &Tier, changed: &[std::path::PathBuf]) -> Tier {
     let changed: FxHashSet<&Path> = changed.iter().map(std::path::PathBuf::as_path).collect();
+    let ignored = read_bazelignore(root);
     let mut next = current.clone();
     next.files.retain(|file| !changed.contains(file.as_ref()));
     next.targets
@@ -342,7 +345,9 @@ pub fn update_static(root: &Path, current: &Tier, changed: &[std::path::PathBuf]
         !references.is_empty()
     });
     for path in changed {
-        collect_disk_file(root, path, &mut next);
+        if !is_ignored(root, path, &ignored) {
+            collect_disk_file(root, path, &mut next);
+        }
     }
     next
 }
@@ -821,6 +826,11 @@ mod tests {
             .map(|(label, _)| label.to_string())
             .collect();
         assert_eq!(labels, vec!["//lib:t".to_string()], "got {labels:?}");
+
+        let ignored = root.join("broken/BUILD.bazel");
+        let updated = update_static(&root, &Tier::default(), &[ignored]);
+        assert!(updated.targets.is_empty());
+        assert!(updated.files.is_empty());
 
         std::fs::remove_dir_all(&root).ok();
     }
