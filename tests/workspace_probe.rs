@@ -1,0 +1,101 @@
+mod support;
+
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use support::Client;
+
+#[test]
+#[ignore = "requires BLS_WORKSPACE"]
+fn probe_workspace() {
+    let root = PathBuf::from(std::env::var_os("BLS_WORKSPACE").expect("BLS_WORKSPACE"));
+    let relative = std::env::var("BLS_PROBE_FILE")
+        .unwrap_or_else(|_| "environment/logging/BUILD.bazel".to_string());
+    let text = std::fs::read_to_string(root.join(&relative)).expect("probe BUILD file");
+    let label = "//environment/logging:logging";
+    let mut client = Client::spawn(&root);
+    let initialized = client.initialize(&bazel_options());
+
+    let responsive = Instant::now();
+    client.open(&relative, 1, &text);
+    client.wait_notification("textDocument/publishDiagnostics");
+    let responsive_ms = responsive.elapsed().as_secs_f64() * 1_000.0;
+
+    let ready = Instant::now();
+    let symbols = loop {
+        let response = client.request("workspace/symbol", &json!({"query": label}));
+        let found = response.value["result"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["name"] == label));
+        if found {
+            break response.value["result"].as_array().unwrap().len();
+        }
+        assert!(
+            ready.elapsed() < Duration::from_secs(15),
+            "static index did not become ready"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let ready_ms = ready.elapsed().as_secs_f64() * 1_000.0;
+
+    let uri = client.uri(&relative);
+    let mut latencies = Vec::new();
+    let mut document_symbols = 0;
+    for _ in 0..30 {
+        let response = client.request(
+            "textDocument/documentSymbol",
+            &json!({"textDocument": {"uri": uri}}),
+        );
+        document_symbols = response.value["result"].as_array().unwrap().len();
+        latencies.push(response.elapsed.as_secs_f64() * 1_000.0);
+    }
+    latencies.sort_by(f64::total_cmp);
+    let rss_bytes = rss(client.pid());
+    let stderr = client.shutdown();
+
+    println!(
+        "{}",
+        json!({
+            "workspace": root,
+            "file": relative,
+            "initialize_ms": initialized.elapsed.as_secs_f64() * 1_000.0,
+            "responsive_ms": responsive_ms,
+            "static_ready_ms": ready_ms,
+            "document_symbol_ms": {
+                "p50": percentile(&latencies, 50),
+                "p95": percentile(&latencies, 95),
+                "max": latencies.last()
+            },
+            "document_symbols": document_symbols,
+            "workspace_symbols": symbols,
+            "rss_bytes": rss_bytes,
+            "server_errors": stderr.lines().filter(|line| line.contains("ERROR")).count()
+        })
+    );
+}
+
+fn bazel_options() -> Value {
+    std::env::var("BLS_BAZEL_PATH").map_or_else(
+        |_| json!({"bazel": {"enable": false}}),
+        |path| json!({"bazel": {"enable": true, "path": path}}),
+    )
+}
+
+fn percentile(values: &[f64], percentile: usize) -> f64 {
+    values[(values.len() - 1) * percentile / 100]
+}
+
+fn rss(pid: u32) -> Option<u64> {
+    let output = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let kib = String::from_utf8(output.stdout)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(kib * 1_024)
+}
