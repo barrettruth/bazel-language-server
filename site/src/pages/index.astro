@@ -2,31 +2,50 @@
 import DocLayout from "../layouts/DocLayout.astro";
 ---
 
-<DocLayout title="" description="the build graph, in your editor">
+<DocLayout title="" description="Bazel build files, navigable in your editor">
   <header>
     <h1>bazel-language-server</h1>
     <code>//...</code>
   </header>
 
   <p>
-    Language server for Bazel build files. Symbols, diagnostics, navigation and
-    rename across <code>BUILD</code>, <code>*.bzl</code>, <code
-      >MODULE.bazel</code
-    >, <code>WORKSPACE</code> and <code>*.scl</code>.
+    A language server for Bazel and Starlark. Navigate labels and <code
+      >load()</code
+    > paths, rename targets across packages, search the workspace, format and
+    lint files, and build or test targets from your editor.
+  </p>
+
+  <p>
+    It works from source alone. Bazel 8.0 or newer adds targets created by
+    macros and correct external-repository resolution. <code>buildifier</code>
+    enables formatting and lint diagnostics.
   </p>
 
   <h2>Documentation</h2>
 
   <ul>
     <li><a href="/installation.html">Installation</a></li>
-    <li><a href="/features.html">Features</a></li>
+    <li><a href="/configuration.html">Configuration</a></li>
+    <li><a href="/features.html">Features and support</a></li>
+    <li><a href="/roadmap.html">Roadmap</a></li>
   </ul>
+
+  <h2>Supported files</h2>
+
+  <p>
+    <code>BUILD</code>, <code>BUILD.bazel</code>, <code>*.bzl</code>,
+    <code>MODULE.bazel</code>, <code>REPO.bazel</code>, <code>VENDOR.bazel</code>,
+    <code>WORKSPACE*</code>, <code>*.scl</code>, and Bazel query files.
+  </p>
 
   <h2>Links</h2>
 
   <ul>
     <li>
       <a href="https://github.com/barrettruth/bazel-language-server">GitHub</a>
+    </li>
+    <li>
+      <a href="https://crates.io/crates/bazel-language-server">crates.io</a>
     </li>
     <li>
       <a href="https://github.com/barrettruth/starlark-cst">starlark-cst</a>

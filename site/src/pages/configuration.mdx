@@ -1,0 +1,70 @@
+---
+layout: ../layouts/DocLayout.astro
+title: Configuration
+description: Configure Bazel integration in bazel-language-server
+toc: true
+---
+
+# Configuration
+
+The defaults use `bazel` from `PATH`. If it is unavailable, the server keeps
+working from the source index.
+
+## Settings
+
+| Key                       | Default   | Effect                                         |
+| ------------------------- | --------- | ---------------------------------------------- |
+| `bazel.enable`            | `true`    | Enable the Bazel-backed index                  |
+| `bazel.path`              | `"bazel"` | Bazel or Bazelisk executable                   |
+| `bazel.privateOutputBase` | `false`   | Give language-server Bazel commands their own server |
+| `bazel.args`              | `[]`      | Extra Bazel startup arguments                  |
+
+Send the section as editor `settings`:
+
+```json
+{
+  "bazel": {
+    "enable": true,
+    "path": "bazel",
+    "privateOutputBase": false,
+    "args": []
+  }
+}
+```
+
+The same object is accepted as `initializationOptions`. Settings can change
+while the language server is running; initialization options are read once.
+
+### Private output base
+
+Enable `privateOutputBase` when language-server queries regularly wait behind
+interactive builds. It avoids Bazel's shared command lock by starting a second
+Bazel server, at the cost of that server's memory. Leave it off otherwise.
+
+## Bazel support
+
+With Bazel 8.0 or newer, the server adds evaluated targets that source parsing
+cannot see and resolves apparent external-repository names through the
+workspace's repository mapping.
+
+Without a supported Bazel, local source navigation, symbols, references,
+rename, syntax diagnostics, and editor structure remain available. External
+repositories and targets whose names are computed by macros do not.
+
+## Command line
+
+Inspect a workspace without an editor:
+
+```sh
+bazel-language-server doctor path/to/workspace
+bazel-language-server index path/to/workspace
+```
+
+`doctor` reports workspace discovery, the Bazel version, and repository
+mapping. `index` prints a summary of the source and evaluated target indexes.
+
+Set `BLS_LOG` when troubleshooting:
+
+```sh
+BLS_LOG=bazel_language_server=debug bazel-language-server
+```

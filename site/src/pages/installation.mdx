@@ -1,11 +1,18 @@
 ---
 layout: ../layouts/DocLayout.astro
 title: Installation
+description: Install bazel-language-server and connect an editor
 ---
 
 # Installation
 
+Install `bazel-language-server` somewhere on the editor's `PATH`. Bazel is
+optional; Bazel-backed features require version 8.0 or newer. Formatting and
+lint diagnostics require `buildifier`.
+
 ## Cargo
+
+Requires Rust 1.85 or newer.
 
 ```sh
 cargo install bazel-language-server
@@ -19,7 +26,7 @@ Run directly:
 nix run github:barrettruth/bazel-language-server
 ```
 
-Or add to your flake inputs:
+Or add the package to a flake:
 
 ```nix
 inputs.bazel-language-server.url = "github:barrettruth/bazel-language-server";
@@ -30,50 +37,33 @@ inputs.bazel-language-server.url = "github:barrettruth/bazel-language-server";
 ```sh
 git clone https://github.com/barrettruth/bazel-language-server.git
 cd bazel-language-server
-cargo install --path .
+cargo install --path . --locked
 ```
 
-## Editor setup
+## Neovim
 
-### Neovim
-
-Using the built-in LSP client directly:
+Using Neovim's built-in LSP client:
 
 ```lua
 vim.lsp.config('bazel_ls', {
   cmd = { 'bazel-language-server' },
   filetypes = { 'bzl' },
-  root_markers = { 'MODULE.bazel', 'WORKSPACE', 'WORKSPACE.bazel', '.git' },
-  workspace_required = false,
-  settings = {
-    bazel = {
-      -- Turn the whole Bazel subsystem off. The static tier still answers.
-      enable = true,
-      -- Binary to invoke. `bazelisk` works too.
-      path = 'bazel',
-      -- Give the server its own --output_base so its queries never queue
-      -- behind your build. Costs a second Bazel server: measured +1.2 GB at
-      -- 20k packages, which is why it is off.
-      privateOutputBase = false,
-      -- Extra flags, passed to every invocation.
-      args = {},
-    },
+  root_markers = {
+    'MODULE.bazel',
+    'REPO.bazel',
+    'WORKSPACE.bazel',
+    'WORKSPACE.bzlmod',
+    'WORKSPACE',
+    '.git',
   },
+  workspace_required = false,
 })
 
 vim.lsp.enable('bazel_ls')
 ```
 
-`settings` reaches the server as `workspace/didChangeConfiguration` and is
-applied whenever it changes, so changing `bazel.path` restarts the Bazel
-subsystem in place. `init_options` works too, and is read once at startup.
+For another editor, start `bazel-language-server` over stdio for its Bazel or
+Starlark file type. No command arguments are required.
 
-## Bazel
-
-Bazel is optional. The target index is parsed from BUILD files, so the server
-starts and answers with no Bazel on `PATH`. To check what the Bazel subsystem
-makes of a workspace:
-
-```sh
-bazel-language-server doctor path/to/workspace
-```
+See [Configuration](/configuration.html) for Bazel settings and
+[Features and support](/features.html) for the available capabilities.

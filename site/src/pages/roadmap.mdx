@@ -1,0 +1,39 @@
+---
+layout: ../layouts/DocLayout.astro
+title: Roadmap
+description: Planned capabilities for bazel-language-server
+toc: true
+---
+
+# Roadmap
+
+Planned work is grouped by what becomes useful together.
+
+## Authoring
+
+1. Complete labels from the workspace index.
+2. Complete rule names and attributes from the workspace's Bazel graph.
+3. Show attribute signatures and documentation while typing a rule call.
+
+These share the same rule and attribute catalog, so completion comes first and
+signature help follows it.
+
+## Correctness and repair
+
+1. Report labels that are known not to resolve.
+2. Provide document and workspace pull diagnostics.
+3. Offer quick fixes for buildifier findings and unfetched repositories.
+
+Diagnostics must distinguish a typo from an index that is still loading or a
+repository that has not been fetched. Fixes follow only once that distinction
+is reliable.
+
+## Refactoring
+
+Rewrite labels when an editor moves a file or package. The editor remains in
+control of the move; the language server supplies the accompanying edits.
+
+## Bazel configuration
+
+Add `.bazelrc` completion, hover, and unknown-flag diagnostics using the flags
+reported by the user's configured Bazel binary.

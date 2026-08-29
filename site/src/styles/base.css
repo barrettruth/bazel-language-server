@@ -109,14 +109,6 @@ main {
   padding: 3rem clamp(1.25rem, 5vw, 3rem) 6rem;
 }
 
-.tagline {
-  font-size: 1.1rem;
-  opacity: 0.5;
-  margin-top: -0.75rem;
-  margin-bottom: 1.75rem;
-  font-style: italic;
-}
-
 header {
   display: flex;
   align-items: center;
@@ -304,19 +296,6 @@ nav .sep {
   line-height: 1.5;
 }
 
-.toc-nav code {
-  font-size: 0.85em;
-  padding: 0.1em 0.25em;
-  border-radius: 2px;
-  background: #e8e8e8;
-}
-
-@media (prefers-color-scheme: dark) {
-  .toc-nav code {
-    background: #222222;
-  }
-}
-
 @media (max-width: 64em) {
   .toc-nav {
     display: none;
@@ -340,7 +319,6 @@ nav .sep {
   transition: opacity 0.15s;
 }
 
-.toc-nav a:hover,
-.toc-nav a.active {
+.toc-nav a:hover {
   opacity: 1;
 }

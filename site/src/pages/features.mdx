@@ -1,98 +1,60 @@
 ---
 layout: ../layouts/DocLayout.astro
-title: Features
+title: Features and support
+description: Language features and Bazel support in bazel-language-server
 toc: true
 ---
 
-# Features
+# Features and support
 
-- [x] **Diagnostics** — syntax errors, reported per keystroke against a
-      recovering parser
-- [x] **Document symbols** — every target declared in a BUILD file
-- [x] **Workspace symbols** — every target in the workspace
-- [x] **Go-to-definition** — labels and `load()` paths, in this repository and
-      in the external ones it depends on
-- [x] **References** — every label referring to a target, cross-file
-- [x] **Document highlight** — occurrences of the target under the cursor
-- [x] **Rename** — rename a target and rewrite every referring label
-- [x] **Hover** — the resolved target behind the label under the cursor, and
-      why one that resolves to nothing does not
-- [x] **Formatting** — delegated to `buildifier` where it is installed
-- [ ] **Completion** — labels from the index, rule names and their attributes
-- [ ] **Unresolved-label diagnostics** — labels that name no target
-- [x] **Lint diagnostics** — `buildifier --lint=warn`, alongside the parse errors
-- [x] **Document links** — labels and `load()` paths as links, for clients that
-      prefer them to go-to-definition
-- [ ] **Code actions** — apply a `buildifier` fix, add a missing dependency,
-      fetch an unfetched repository
-- [x] **Code lens** — build, test or run the target a line declares
-- [ ] **Signature help** — the attributes of the rule being called, while typing
-- [x] **Semantic tokens** — tell labels, rule names and providers apart, which
-      no TextMate grammar can do
-- [x] **Go-to-implementation** — from a rule to the function implementing it
-- [x] **Inlay hints** — the package a relative label resolves against
-- [x] **Folding ranges** — rule calls, lists and comment runs
-- [x] **Selection ranges** — expand the selection along the syntax tree
-- [ ] **Workspace diagnostics** — the pull model, so unresolved labels can be
-      reported repository-wide rather than per open file
-- [x] **Watched-file refresh** — reindex when BUILD files change on disk
-- [ ] **File-rename edits** — rewrite labels when a file or package moves
-- [x] **Execute command** — run a `bazel` invocation the code lens offers
-- [ ] **Incremental sync** — `didChange` ranges rather than whole documents
-- [ ] **`.bazelrc`** — full LSP semantics, including completion, hover and
-      unknown-flag diagnostics from `bazel help flags-as-proto`, version-exact
-      for the user's own binary
+## Editing
 
-## Diagnostics
+- **Diagnostics** report syntax errors as you type. With `buildifier`, lint
+  warnings appear alongside them.
+- **Formatting** delegates to `buildifier`, using the correct mode for each
+  Bazel file type.
+- **Semantic highlighting** distinguishes labels, `load()` paths, rule calls,
+  and attributes.
+- **Structure** includes document symbols, folding ranges, selection ranges,
+  and package hints for relative labels.
 
-Parsing never bails on the first error, so a file being edited still produces a
-tree and still produces symbols. A truncated argument list is reported where it
-was truncated and does not swallow the rest of the file.
+Open files remain responsive while the workspace index builds. Unsaved buffers
+take precedence over disk, and changed BUILD files are replaced in the index
+without restarting the server.
 
-## Symbols
+## Navigation and refactoring
 
-Only BUILD files declare targets. `MODULE.bazel` is full of top-level calls
-carrying a `name` — `bazel_dep(name = "rules_shell")` — and reporting those as
-targets would invent labels that resolve to nothing.
+- **Go to definition** follows labels, source files, and `load()` paths.
+- **Hover** shows what a label resolves to and explains unavailable external
+  repositories.
+- **References**, **document highlights**, and **rename** operate across BUILD
+  files. Rename changes the declaration and every source-written label.
+- **Document links** expose labels and `load()` paths to clients that render
+  clickable links.
+- **Go to implementation** follows a `rule(implementation = ...)` assignment to
+  its function when both are in the same `.bzl` file.
 
-Targets declared by legacy macros are named at evaluation time, so no parser can
-see them. The index reports that it is undercounting rather than presenting a
-partial list as complete.
+Labels inside Bazel make variables such as `$(location //pkg:target)` are
+navigable and participate in rename.
 
-## Formatting and lint
+## Workspace and Bazel
 
-Formatting delegates to `buildifier`, because the only correct way to format a
-BUILD file is to agree with `buildifier` byte for byte. The capability is
-advertised whether or not `buildifier` is installed: one withdrawn at startup is
-one the user cannot get back by installing the tool. A missing `buildifier`
-comes back as a request error rather than as silence, because a format that
-quietly does nothing is indistinguishable from a file needing no formatting.
+- **Workspace symbols** search targets across the repository.
+- **Bazel 8.0+** adds targets whose names are created during macro evaluation
+  and resolves external repositories using Bazel's own mapping.
+- **Code lenses** offer `build` for targets and `test` for test rules. Commands
+  run detached; use a terminal when their output matters.
+- **Background refresh** follows BUILD-file changes and package additions or
+  removals.
 
-Lint findings arrive as warnings on the same channel as parse errors, and only
-once the file parses — `buildifier` declines to lint what it cannot read, and
-the parser has already said so.
+Bazel itself is optional. Without it, the source-backed features stay active;
+macro-generated targets and external-repository navigation do not. External
+repositories must be fetched before there are files to navigate to.
 
-## Navigation
+## Boundaries
 
-A label resolves against the index, and failing that against the source file it
-names. Labels inside `$(location …)`, `$(rootpath …)` and their siblings are
-resolved too: `buildifier` treats those as ordinary strings, but Bazel reads a
-label out of them, so a rename that skipped one would leave a command pointing
-at a target that no longer exists.
+Completion, unresolved-label diagnostics, code actions, file-move edits, and
+`.bazelrc` support are not available yet. Their dependency order is tracked on
+the [Roadmap](/roadmap.html).
 
-A label into another repository resolves through the mapping Bazel produces for
-this workspace, because an apparent name like `@bazel_skylib` means whatever
-that workspace says it means and nothing in general. A repository that has not
-been fetched has no files to navigate to, and hover says so along with the
-`bazel fetch` that changes it — distinct from a name the workspace never
-declared, which is a typo, and from a mapping that has not been read yet.
-
-Target patterns resolve to nothing on purpose: `//pkg:all` names a set rather
-than a target, so any single answer would be a guess.
-
-## Running targets
-
-A code lens sits above every target a BUILD file declares, offering `build`, and
-`test` as well where the rule is a test. Running one starts `bazel` detached:
-LSP has no channel for a subprocess's output, and inventing one here would be a
-worse terminal than the one you already have.
+Target patterns such as `//pkg:all` deliberately have no single definition.
