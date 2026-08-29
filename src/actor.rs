@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, SendError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -15,7 +15,7 @@ use crate::repos::Repos;
 
 pub struct Bazel {
     tx: Sender<Message>,
-    running: Arc<Mutex<Option<Interrupt>>>,
+    running: Arc<Mutex<Running>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -23,7 +23,7 @@ impl Bazel {
     #[must_use]
     pub fn spawn(root: Option<PathBuf>, index: IndexHandle) -> Self {
         let (tx, rx) = channel();
-        let running = Arc::new(Mutex::new(None));
+        let running = Arc::new(Mutex::new(Running::default()));
         let thread = {
             let running = Arc::clone(&running);
             std::thread::Builder::new()
@@ -39,42 +39,48 @@ impl Bazel {
     }
 
     pub fn reconfigure(&self, config: BazelConfig) {
-        drop(self.tx.send(Message::Configure(config)));
-        self.interrupt();
+        drop(self.enqueue(Message::Configure(config)));
     }
 
     pub fn refresh(&self) {
-        drop(self.tx.send(Message::Refresh));
-        self.interrupt();
+        drop(self.enqueue(Message::Refresh));
     }
 
     pub fn run_target(&self, verb: &str, label: &str) -> Result<()> {
         if !matches!(verb, "build" | "run" | "test") {
             bail!("unsupported Bazel command: {verb}");
         }
-        self.tx
-            .send(Message::Run {
-                verb: verb.to_owned(),
-                label: label.to_owned(),
-            })
-            .map_err(|_| anyhow::anyhow!("the Bazel subsystem has stopped"))?;
-        self.interrupt();
+        self.enqueue(Message::Run {
+            verb: verb.to_owned(),
+            label: label.to_owned(),
+        })
+        .map_err(|_| anyhow::anyhow!("the Bazel subsystem has stopped"))?;
         Ok(())
     }
 
-    fn interrupt(&self) {
-        if let Ok(running) = self.running.lock()
-            && let Some(interrupt) = running.as_ref()
+    /// Interrupt the registered command and enqueue its successor as one
+    /// operation, so this call cannot race ahead and interrupt its own work.
+    fn enqueue(&self, message: Message) -> Result<(), SendError<Message>> {
+        let mut running = self
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if running
+            .operation
+            .is_some_and(|operation| message.supersedes(operation))
         {
-            interrupt.send();
+            running.superseded = true;
+            if let Some(interrupt) = running.interrupt.as_ref() {
+                interrupt.send();
+            }
         }
+        self.tx.send(message)
     }
 }
 
 impl Drop for Bazel {
     fn drop(&mut self) {
-        drop(self.tx.send(Message::Stop));
-        self.interrupt();
+        drop(self.enqueue(Message::Stop));
         if let Some(thread) = self.thread.take() {
             drop(thread.join());
         }
@@ -88,10 +94,23 @@ enum Message {
     Stop,
 }
 
+#[derive(Clone, Copy)]
+enum Operation {
+    Probe,
+    Refresh,
+}
+
+#[derive(Default)]
+struct Running {
+    operation: Option<Operation>,
+    interrupt: Option<Interrupt>,
+    superseded: bool,
+}
+
 fn serve(
     root: Option<&Path>,
     rx: &Receiver<Message>,
-    running: &Mutex<Option<Interrupt>>,
+    running: &Mutex<Running>,
     index: &IndexHandle,
 ) {
     let mut pending = VecDeque::new();
@@ -110,18 +129,22 @@ fn serve(
             Message::Stop => return,
             Message::Configure(next) if config.as_ref() == Some(&next) => {}
             Message::Configure(next) => {
-                config = Some(next.clone());
                 client = None;
                 index.store_graph(Tier::default());
                 index.store_repos(Repos::default());
-                let Some(root) = root else { continue };
-                let candidate = BazelClient::new(next, root.to_path_buf());
-                let probe = candidate.probe_started(|child| set_running(running, child));
-                clear_running(running);
-                drain(rx, &mut pending);
-                if pending.iter().any(Message::reconfigures_or_stops) {
+                let Some(root) = root else {
+                    config = Some(next);
+                    continue;
+                };
+                let candidate = BazelClient::new(next.clone(), root.to_path_buf());
+                if !prepare(Operation::Probe, running, rx, &mut pending) {
                     continue;
                 }
+                let probe = candidate.probe_started(|child| set_running(running, child));
+                if !finish(Operation::Probe, running, rx, &mut pending) {
+                    continue;
+                }
+                config = Some(next);
                 match probe {
                     Ok(probe) => {
                         tracing::info!(
@@ -132,6 +155,7 @@ fn serve(
                         );
                         client = Some(candidate);
                         pending.push_back(Message::Refresh);
+                        coalesce_refreshes(&mut pending);
                     }
                     Err(err) => tracing::warn!("the Bazel tier is unavailable: {err:#}"),
                 }
@@ -140,13 +164,10 @@ fn serve(
                 let Some(client) = client.as_ref() else {
                     continue;
                 };
-                let refreshed = refresh(client, running);
-                clear_running(running);
-                drain(rx, &mut pending);
-                if pending.iter().any(Message::supersedes_refresh) {
+                let Some(refreshed) = refresh(client, running, rx, &mut pending) else {
                     tracing::debug!("discarded a superseded Bazel refresh");
                     continue;
-                }
+                };
                 publish(refreshed, index);
             }
             Message::Run { verb, label } => {
@@ -164,12 +185,14 @@ fn serve(
 }
 
 impl Message {
-    fn reconfigures_or_stops(&self) -> bool {
-        matches!(self, Self::Configure(_) | Self::Stop)
-    }
-
-    fn supersedes_refresh(&self) -> bool {
-        matches!(self, Self::Configure(_) | Self::Refresh | Self::Stop)
+    fn supersedes(&self, operation: Operation) -> bool {
+        match operation {
+            Operation::Probe => matches!(self, Self::Configure(_) | Self::Stop),
+            Operation::Refresh => matches!(
+                self,
+                Self::Configure(_) | Self::Refresh | Self::Run { .. } | Self::Stop
+            ),
+        }
     }
 }
 
@@ -179,15 +202,31 @@ struct Refreshed {
     elapsed: std::time::Duration,
 }
 
-fn refresh(client: &BazelClient, running: &Mutex<Option<Interrupt>>) -> Refreshed {
+fn refresh(
+    client: &BazelClient,
+    running: &Mutex<Running>,
+    rx: &Receiver<Message>,
+    pending: &mut VecDeque<Message>,
+) -> Option<Refreshed> {
+    if !prepare(Operation::Refresh, running, rx, pending) {
+        return None;
+    }
     let repos = Repos::read_started(client, |child| set_running(running, child));
+    if !finish(Operation::Refresh, running, rx, pending)
+        || !prepare(Operation::Refresh, running, rx, pending)
+    {
+        return None;
+    }
     let started = Instant::now();
     let graph = crate::graph::query(client, |child| set_running(running, child));
-    Refreshed {
+    if !finish(Operation::Refresh, running, rx, pending) {
+        return None;
+    }
+    Some(Refreshed {
         repos,
         graph,
         elapsed: started.elapsed(),
-    }
+    })
 }
 
 fn publish(refreshed: Refreshed, index: &IndexHandle) {
@@ -216,25 +255,95 @@ fn publish(refreshed: Refreshed, index: &IndexHandle) {
     }
 }
 
-fn set_running(running: &Mutex<Option<Interrupt>>, child: Interrupt) {
-    if let Ok(mut slot) = running.lock() {
-        *slot = Some(child);
+fn prepare(
+    operation: Operation,
+    running: &Mutex<Running>,
+    rx: &Receiver<Message>,
+    pending: &mut VecDeque<Message>,
+) -> bool {
+    {
+        let mut state = running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state = Running {
+            operation: Some(operation),
+            interrupt: None,
+            superseded: false,
+        };
     }
+    drain(rx, pending);
+    let superseded = running
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .superseded
+        || pending.iter().any(|message| message.supersedes(operation));
+    if superseded {
+        clear_running(running);
+    }
+    !superseded
 }
 
-fn clear_running(running: &Mutex<Option<Interrupt>>) {
-    if let Ok(mut slot) = running.lock() {
-        *slot = None;
+fn finish(
+    operation: Operation,
+    running: &Mutex<Running>,
+    rx: &Receiver<Message>,
+    pending: &mut VecDeque<Message>,
+) -> bool {
+    let mut state = running
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    drain(rx, pending);
+    let superseded =
+        state.superseded || pending.iter().any(|message| message.supersedes(operation));
+    *state = Running::default();
+    !superseded
+}
+
+fn set_running(running: &Mutex<Running>, child: Interrupt) {
+    let mut state = running
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state.superseded {
+        child.send();
     }
+    state.interrupt = Some(child);
+}
+
+fn clear_running(running: &Mutex<Running>) {
+    *running
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Running::default();
 }
 
 fn drain(rx: &Receiver<Message>, pending: &mut VecDeque<Message>) {
-    loop {
-        match rx.try_recv() {
-            Ok(message) => pending.push_back(message),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
-        }
+    while let Ok(message) = rx.try_recv() {
+        pending.push_back(message);
     }
+    if pending
+        .iter()
+        .any(|message| matches!(message, Message::Stop))
+    {
+        pending.clear();
+        pending.push_back(Message::Stop);
+        return;
+    }
+    coalesce_refreshes(pending);
+}
+
+/// Keep only the last refresh in a burst. Runs remain ordered around it.
+fn coalesce_refreshes(pending: &mut VecDeque<Message>) {
+    let mut refreshes = pending
+        .iter()
+        .filter(|message| matches!(message, Message::Refresh))
+        .count();
+    pending.retain(|message| {
+        if matches!(message, Message::Refresh) {
+            refreshes -= 1;
+            refreshes == 0
+        } else {
+            true
+        }
+    });
 }
 
 #[cfg(test)]
@@ -243,22 +352,60 @@ mod tests {
 
     #[test]
     fn stop_and_refresh_supersede_a_result() {
-        assert!(Message::Stop.supersedes_refresh());
-        assert!(Message::Refresh.supersedes_refresh());
-        assert!(Message::Configure(BazelConfig::default()).supersedes_refresh());
-        assert!(
-            !Message::Run {
+        for message in [
+            Message::Stop,
+            Message::Refresh,
+            Message::Configure(BazelConfig::default()),
+            Message::Run {
                 verb: "build".to_owned(),
                 label: "//:all".to_owned(),
-            }
-            .supersedes_refresh()
-        );
+            },
+        ] {
+            assert!(message.supersedes(Operation::Refresh));
+        }
     }
 
     #[test]
     fn only_configuration_and_stop_supersede_a_probe() {
-        assert!(Message::Stop.reconfigures_or_stops());
-        assert!(Message::Configure(BazelConfig::default()).reconfigures_or_stops());
-        assert!(!Message::Refresh.reconfigures_or_stops());
+        assert!(Message::Stop.supersedes(Operation::Probe));
+        assert!(Message::Configure(BazelConfig::default()).supersedes(Operation::Probe));
+        assert!(!Message::Refresh.supersedes(Operation::Probe));
+    }
+
+    #[test]
+    fn only_the_last_refresh_in_a_burst_survives() {
+        let mut pending = VecDeque::from([
+            Message::Refresh,
+            Message::Run {
+                verb: "build".to_owned(),
+                label: "//:one".to_owned(),
+            },
+            Message::Refresh,
+            Message::Run {
+                verb: "test".to_owned(),
+                label: "//:two".to_owned(),
+            },
+        ]);
+        coalesce_refreshes(&mut pending);
+        assert_eq!(pending.len(), 3);
+        assert!(matches!(pending[0], Message::Run { .. }));
+        assert!(matches!(pending[1], Message::Refresh));
+        assert!(matches!(pending[2], Message::Run { .. }));
+    }
+
+    #[test]
+    fn stop_discards_every_pending_operation() {
+        let (tx, rx) = channel();
+        tx.send(Message::Refresh).unwrap();
+        tx.send(Message::Run {
+            verb: "build".to_owned(),
+            label: "//:one".to_owned(),
+        })
+        .unwrap();
+        tx.send(Message::Stop).unwrap();
+        let mut pending = VecDeque::new();
+        drain(&rx, &mut pending);
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(pending[0], Message::Stop));
     }
 }
