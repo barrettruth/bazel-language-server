@@ -109,6 +109,27 @@ impl Client {
         }
     }
 
+    pub fn wait_workspace_symbol(&mut self, query: &str, wanted: &str) -> Timed {
+        let started = Instant::now();
+        loop {
+            let response = self.request("workspace/symbol", &json!({"query": query}));
+            if response.value["result"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["name"] == wanted))
+            {
+                return Timed {
+                    value: response.value,
+                    elapsed: started.elapsed(),
+                };
+            }
+            assert!(
+                started.elapsed() < TIMEOUT,
+                "workspace index did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     pub fn send_request(&mut self, method: &str, params: &Value) -> i64 {
         self.next_id += 1;
         let id = self.next_id;

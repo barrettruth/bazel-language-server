@@ -392,17 +392,10 @@ fn run_server() -> Result<()> {
     // shutdown takes the subprocess with it rather than orphaning one.
     let bazel = std::sync::Arc::new(Bazel::spawn(root.clone(), index.clone()));
     bazel.reconfigure(bazel_settings(init.initialization_options.as_ref()).unwrap_or_default());
-    if let Some(root) = root.clone() {
-        // Synchronous: ~1.4 s on a 74k-package repo, which is cheaper than the
-        // machinery to report progress on it would be.
-        index.store_disk(crate::index::build_static(&root));
-    }
-    // Held alongside the actor: dropping either stops its thread, so a shutdown
-    // takes the watch and the subprocess with it.
     let watch = root
         .as_deref()
         .map(|root| watch::spawn(root, index.clone(), bazel.clone()));
-    tracing::info!(targets = index.load().len(), "ready");
+    tracing::info!("ready");
 
     let mut docs = Documents::new(root.clone(), index.clone());
     let (completed_tx, completed_rx) = crossbeam_channel::unbounded();

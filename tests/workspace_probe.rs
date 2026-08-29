@@ -2,7 +2,7 @@ mod support;
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::{Value, json};
 use support::Client;
@@ -14,7 +14,7 @@ fn probe_workspace() {
     let relative = std::env::var("BLS_PROBE_FILE")
         .unwrap_or_else(|_| "environment/logging/BUILD.bazel".to_string());
     let text = std::fs::read_to_string(root.join(&relative)).expect("probe BUILD file");
-    let label = "//environment/logging:logging";
+    let static_label = "//cuttlefish/exported/cuttlefish/nodes:ASinModifierBounds_generation";
     let mut client = Client::spawn(&root);
     let initialized = client.initialize(&bazel_options());
 
@@ -23,22 +23,9 @@ fn probe_workspace() {
     client.wait_notification("textDocument/publishDiagnostics");
     let responsive_ms = responsive.elapsed().as_secs_f64() * 1_000.0;
 
-    let ready = Instant::now();
-    let symbols = loop {
-        let response = client.request("workspace/symbol", &json!({"query": label}));
-        let found = response.value["result"]
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| item["name"] == label));
-        if found {
-            break response.value["result"].as_array().unwrap().len();
-        }
-        assert!(
-            ready.elapsed() < Duration::from_secs(15),
-            "static index did not become ready"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    };
-    let ready_ms = ready.elapsed().as_secs_f64() * 1_000.0;
+    let ready = client.wait_workspace_symbol(static_label, static_label);
+    let symbols = ready.value["result"].as_array().unwrap().len();
+    let ready_ms = ready.elapsed.as_secs_f64() * 1_000.0;
 
     let uri = client.uri(&relative);
     let mut latencies = Vec::new();

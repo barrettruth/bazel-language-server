@@ -16,6 +16,7 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -48,6 +49,10 @@ impl Invalidates {
     const GRAPH: Self = Self {
         targets: false,
         graph: true,
+    };
+    const TARGETS: Self = Self {
+        targets: true,
+        graph: false,
     };
     const BOTH: Self = Self {
         targets: true,
@@ -121,14 +126,13 @@ enum Wake {
     Fs(notify::Result<notify::Event>),
     /// Somebody asked, through [`REINDEX_COMMAND`].
     Manual,
+    Stop,
 }
 
-/// The rebuild thread, and the watch that feeds it. Dropping it stops both.
+/// The rebuild thread. Dropping it stops the watch and joins the thread.
 pub struct Watch {
     tx: Sender<Wake>,
-    /// `None` where the watch could not be established. The thread still runs,
-    /// which is the whole point — see [`spawn`].
-    _watcher: Option<notify::RecommendedWatcher>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl Watch {
@@ -139,6 +143,15 @@ impl Watch {
     pub fn reindex(&self) {
         tracing::info!("reindexing on request");
         drop(self.tx.send(Wake::Manual));
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        drop(self.tx.send(Wake::Stop));
+        if let Some(thread) = self.thread.take() {
+            drop(thread.join());
+        }
     }
 }
 
@@ -153,24 +166,26 @@ impl Watch {
 pub fn spawn(root: &Path, index: IndexHandle, bazel: Arc<Bazel>) -> Watch {
     let (tx, rx) = channel();
     let watching = root.to_path_buf();
-    std::thread::Builder::new()
+    let events = tx.clone();
+    let thread = std::thread::Builder::new()
         .name("watch".to_owned())
-        .spawn(move || settle(&watching, &index, &bazel, &rx))
+        .spawn(move || {
+            let _watcher = match establish(&watching, events) {
+                Ok(watcher) => Some(watcher),
+                Err(err) => {
+                    tracing::warn!(
+                        "the workspace is not being watched, so the index updates only on \
+                         `{REINDEX_COMMAND}`: {err:#}"
+                    );
+                    None
+                }
+            };
+            settle(&watching, &index, &bazel, &rx);
+        })
         .expect("spawning the watch thread");
-
-    let watcher = match establish(root, tx.clone()) {
-        Ok(watcher) => Some(watcher),
-        Err(err) => {
-            tracing::warn!(
-                "the workspace is not being watched, so the index updates only on \
-                 `{REINDEX_COMMAND}`: {err:#}"
-            );
-            None
-        }
-    };
     Watch {
         tx,
-        _watcher: watcher,
+        thread: Some(thread),
     }
 }
 
@@ -188,8 +203,12 @@ fn establish(root: &Path, tx: Sender<Wake>) -> Result<notify::RecommendedWatcher
 
 /// Collapse a burst of events into one rebuild.
 fn settle(root: &Path, index: &IndexHandle, bazel: &Bazel, rx: &Receiver<Wake>) {
+    rebuild(root, index, bazel, Invalidates::TARGETS, 0);
     let mut nth = 0_u64;
     while let Ok(first) = rx.recv() {
+        if matches!(first, Wake::Stop) {
+            return;
+        }
         let mut reaches = reached(root, &first);
         if !reaches.anything() {
             continue;
@@ -198,9 +217,9 @@ fn settle(root: &Path, index: &IndexHandle, bazel: &Bazel, rx: &Receiver<Wake>) 
         // build, and the tiers it reaches are the union of what it touched.
         loop {
             match rx.recv_timeout(SETTLE) {
+                Ok(Wake::Stop) | Err(RecvTimeoutError::Disconnected) => return,
                 Ok(wake) => reaches = reaches.with(reached(root, &wake)),
                 Err(RecvTimeoutError::Timeout) => break,
-                Err(RecvTimeoutError::Disconnected) => return,
             }
         }
         nth += 1;
@@ -217,6 +236,7 @@ fn reached(root: &Path, wake: &Wake) -> Invalidates {
     match wake {
         Wake::Manual => Invalidates::BOTH,
         Wake::Fs(event) => wanted(root, event),
+        Wake::Stop => Invalidates::NOTHING,
     }
 }
 

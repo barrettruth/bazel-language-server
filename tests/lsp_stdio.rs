@@ -35,6 +35,7 @@ fn stdio_session_serves_navigation_and_diagnostics() {
     assert!(symbols.value["result"].as_array().unwrap().len() >= 2);
 
     let label = "//lib/sub:sub_srcs";
+    client.wait_workspace_symbol(label, label);
     let (line, character) = position(&text, label);
     let definition = client.request(
         "textDocument/definition",
