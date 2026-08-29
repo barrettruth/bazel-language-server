@@ -1,11 +1,10 @@
 //! One recursive workspace watch, with Bazel output trees excluded.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use notify::{RecursiveMode, Watcher};
@@ -108,7 +107,7 @@ pub const REINDEX_COMMAND: &str = "bazel-language-server.reindex";
 /// What wakes the rebuild thread.
 enum Wake {
     /// Something changed on disk.
-    Fs(notify::Result<notify::Event>),
+    Fs,
     /// Somebody asked, through [`REINDEX_COMMAND`].
     Manual,
     Stop,
@@ -116,45 +115,48 @@ enum Wake {
 
 #[derive(Default)]
 struct EventQueue {
-    state: AtomicU8,
+    state: Mutex<EventState>,
+}
+
+#[derive(Default)]
+struct EventState {
+    queued: bool,
+    pending: Invalidates,
 }
 
 impl EventQueue {
-    const IDLE: u8 = 0;
-    const QUEUED: u8 = 1;
-    const OVERFLOWED: u8 = 2;
+    const MAX_FILES: usize = 1_024;
 
-    fn send(&self, tx: &Sender<Wake>, event: notify::Result<notify::Event>) {
-        loop {
-            let state = self.state.load(Ordering::Acquire);
-            let next = if state == Self::IDLE {
-                Self::QUEUED
-            } else {
-                Self::OVERFLOWED
-            };
-            if self
-                .state
-                .compare_exchange(state, next, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                if state != Self::IDLE {
-                    return;
-                }
-                break;
-            }
+    fn send(&self, root: &Path, tx: &Sender<Wake>, event: &notify::Result<notify::Event>) {
+        let reaches = wanted(root, event);
+        if !reaches.anything() {
+            return;
         }
-        if tx.send(Wake::Fs(event)).is_err() {
-            self.state.store(Self::IDLE, Ordering::Release);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.pending = std::mem::take(&mut state.pending).with(reaches);
+        if state.pending.target_files.len() > Self::MAX_FILES {
+            state.pending.full_targets = true;
+            state.pending.target_files.clear();
+        }
+        if state.queued {
+            return;
+        }
+        state.queued = true;
+        if tx.send(Wake::Fs).is_err() {
+            *state = EventState::default();
         }
     }
 
-    fn take(&self, root: &Path, event: &notify::Result<notify::Event>) -> Invalidates {
-        if self.state.swap(Self::IDLE, Ordering::AcqRel) == Self::OVERFLOWED {
-            tracing::debug!("filesystem events were coalesced; rebuilding everything");
-            Invalidates::BOTH
-        } else {
-            wanted(root, event)
-        }
+    fn take(&self) -> Invalidates {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.queued = false;
+        std::mem::take(&mut state.pending)
     }
 }
 
@@ -230,8 +232,9 @@ fn establish(
     tx: Sender<Wake>,
     queue: Arc<EventQueue>,
 ) -> Result<notify::RecommendedWatcher> {
+    let classified = root.to_path_buf();
     let mut watcher = notify::recommended_watcher(move |event| {
-        queue.send(&tx, event);
+        queue.send(&classified, &tx, &event);
     })
     .context("creating the workspace watcher")?;
     watcher
@@ -262,14 +265,19 @@ fn settle(
         if matches!(first, Wake::Stop) {
             return;
         }
-        let mut reaches = reached(root, &first, events);
+        let mut reaches = reached(&first, events);
         if !reaches.anything() {
             continue;
         }
+        let deadline = Instant::now() + SETTLE;
         loop {
-            match rx.recv_timeout(SETTLE) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match rx.recv_timeout(remaining) {
                 Ok(Wake::Stop) | Err(RecvTimeoutError::Disconnected) => return,
-                Ok(wake) => reaches = reaches.with(reached(root, &wake, events)),
+                Ok(wake) => reaches = reaches.with(reached(&wake, events)),
                 Err(RecvTimeoutError::Timeout) => break,
             }
         }
@@ -279,10 +287,10 @@ fn settle(
 }
 
 /// Which tiers a wake reaches.
-fn reached(root: &Path, wake: &Wake, events: &EventQueue) -> Invalidates {
+fn reached(wake: &Wake, events: &EventQueue) -> Invalidates {
     match wake {
         Wake::Manual => Invalidates::BOTH,
-        Wake::Fs(event) => events.take(root, event),
+        Wake::Fs => events.take(),
         Wake::Stop => Invalidates::NOTHING,
     }
 }
@@ -296,13 +304,18 @@ fn wanted(root: &Path, event: &notify::Result<notify::Event>) -> Invalidates {
             Invalidates::BOTH
         }
         Ok(event) if changes_package_tree(event) => Invalidates::BOTH,
-        Ok(event) => event
-            .paths
-            .iter()
-            .filter(|path| !excluded(root, path))
-            .fold(Invalidates::NOTHING, |reaches, path| {
-                reaches.with(invalidated(path))
-            }),
+        Ok(event) => {
+            let ignored = crate::index::read_bazelignore(root);
+            event
+                .paths
+                .iter()
+                .filter(|path| {
+                    !excluded(root, path) && !crate::index::is_ignored(root, path, &ignored)
+                })
+                .fold(Invalidates::NOTHING, |reaches, path| {
+                    reaches.with(invalidated(path))
+                })
+        }
         Err(err) => {
             tracing::warn!("watching the workspace: {err}");
             Invalidates::NOTHING
@@ -353,7 +366,6 @@ fn rebuild(root: &Path, index: &IndexHandle, bazel: &Bazel, reaches: Invalidates
         tracing::info!(nth, "the target table is untouched by this change");
     }
     if reaches.graph {
-        index.store_graph(crate::index::Tier::default());
         bazel.refresh();
     }
 }
@@ -417,14 +429,34 @@ mod tests {
     }
 
     #[test]
-    fn a_full_event_slot_becomes_one_rescan() {
+    fn filesystem_events_coalesce_before_the_watcher_wakes() {
         let (tx, rx) = channel();
         let events = EventQueue::default();
-        events.send(&tx, Ok(notify::Event::new(notify::EventKind::Any)));
-        events.send(&tx, Ok(notify::Event::new(notify::EventKind::Any)));
+        let root = Path::new("/ws");
+        for path in ["/ws/one/BUILD.bazel", "/ws/two/BUILD.bazel"] {
+            events.send(
+                root,
+                &tx,
+                &Ok(notify::Event::new(notify::EventKind::Any).add_path(PathBuf::from(path))),
+            );
+        }
         let wake = rx.recv().unwrap();
-        assert_eq!(reached(Path::new("/ws"), &wake, &events), Invalidates::BOTH);
+        let reaches = reached(&wake, &events);
+        assert!(!reaches.full_targets);
+        assert_eq!(reaches.target_files.len(), 2);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ignored_build_files_do_not_reach_the_graph() {
+        let root = std::env::temp_dir().join(format!("bls-watch-ignore-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("ignored")).unwrap();
+        std::fs::write(root.join(".bazelignore"), "ignored\n").unwrap();
+        let event =
+            notify::Event::new(notify::EventKind::Any).add_path(root.join("ignored/BUILD.bazel"));
+        assert_eq!(wanted(&root, &Ok(event)), Invalidates::NOTHING);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

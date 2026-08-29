@@ -275,7 +275,7 @@ fn is_excluded(entry: &walkdir::DirEntry) -> bool {
 /// Bazel does not load packages under these, so neither may we: indexing them
 /// invents targets that no label can resolve to. One path per line, relative to
 /// the root, `#` for comments, and no wildcards — Bazel matches literally.
-fn read_bazelignore(root: &Path) -> Vec<std::path::PathBuf> {
+pub(crate) fn read_bazelignore(root: &Path) -> Vec<std::path::PathBuf> {
     let Ok(text) = std::fs::read_to_string(root.join(".bazelignore")) else {
         return Vec::new();
     };
@@ -289,7 +289,7 @@ fn read_bazelignore(root: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-fn is_ignored(root: &Path, path: &Path, ignored: &[std::path::PathBuf]) -> bool {
+pub(crate) fn is_ignored(root: &Path, path: &Path, ignored: &[std::path::PathBuf]) -> bool {
     if ignored.is_empty() {
         return false;
     }

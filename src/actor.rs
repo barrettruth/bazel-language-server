@@ -127,7 +127,8 @@ fn serve(
         };
         match message {
             Message::Stop => return,
-            Message::Configure(next) if config.as_ref() == Some(&next) => {}
+            Message::Configure(next)
+                if config.as_ref() == Some(&next) && (client.is_some() || !next.enable) => {}
             Message::Configure(next) => {
                 client = None;
                 index.store_graph(Tier::default());
@@ -161,14 +162,20 @@ fn serve(
                 }
             }
             Message::Refresh => {
+                index.store_graph(Tier::default());
+                index.store_repos(Repos::default());
                 let Some(client) = client.as_ref() else {
                     continue;
                 };
                 let Some(refreshed) = refresh(client, running, rx, &mut pending) else {
                     tracing::debug!("discarded a superseded Bazel refresh");
+                    preserve_refresh_after_runs(&mut pending);
                     continue;
                 };
-                publish(refreshed, index);
+                if !publish_current(refreshed, running, rx, &mut pending, index) {
+                    tracing::debug!("discarded a superseded Bazel refresh");
+                    preserve_refresh_after_runs(&mut pending);
+                }
             }
             Message::Run { verb, label } => {
                 let Some(client) = client.as_ref() else {
@@ -219,14 +226,33 @@ fn refresh(
     }
     let started = Instant::now();
     let graph = crate::graph::query(client, |child| set_running(running, child));
-    if !finish(Operation::Refresh, running, rx, pending) {
-        return None;
-    }
     Some(Refreshed {
         repos,
         graph,
         elapsed: started.elapsed(),
     })
+}
+
+fn publish_current(
+    refreshed: Refreshed,
+    running: &Mutex<Running>,
+    rx: &Receiver<Message>,
+    pending: &mut VecDeque<Message>,
+    index: &IndexHandle,
+) -> bool {
+    let mut state = running
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    drain(rx, pending);
+    let superseded = state.superseded
+        || pending
+            .iter()
+            .any(|message| message.supersedes(Operation::Refresh));
+    if !superseded {
+        publish(refreshed, index);
+    }
+    *state = Running::default();
+    !superseded
 }
 
 fn publish(refreshed: Refreshed, index: &IndexHandle) {
@@ -330,6 +356,21 @@ fn drain(rx: &Receiver<Message>, pending: &mut VecDeque<Message>) {
     coalesce_refreshes(pending);
 }
 
+fn preserve_refresh_after_runs(pending: &mut VecDeque<Message>) {
+    let has_run = pending
+        .iter()
+        .any(|message| matches!(message, Message::Run { .. }));
+    let another_refresh_will_follow = pending.iter().any(|message| {
+        matches!(
+            message,
+            Message::Configure(_) | Message::Refresh | Message::Stop
+        )
+    });
+    if has_run && !another_refresh_will_follow {
+        pending.push_back(Message::Refresh);
+    }
+}
+
 /// Keep only the last refresh in a burst. Runs remain ordered around it.
 fn coalesce_refreshes(pending: &mut VecDeque<Message>) {
     let mut refreshes = pending
@@ -407,5 +448,17 @@ mod tests {
         drain(&rx, &mut pending);
         assert_eq!(pending.len(), 1);
         assert!(matches!(pending[0], Message::Stop));
+    }
+
+    #[test]
+    fn a_run_that_supersedes_refresh_preserves_one_refresh() {
+        let mut pending = VecDeque::from([Message::Run {
+            verb: "build".to_owned(),
+            label: "//:one".to_owned(),
+        }]);
+        preserve_refresh_after_runs(&mut pending);
+        assert_eq!(pending.len(), 2);
+        assert!(matches!(pending[0], Message::Run { .. }));
+        assert!(matches!(pending[1], Message::Refresh));
     }
 }
