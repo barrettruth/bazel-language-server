@@ -140,14 +140,24 @@ fn first_moved_site<'a>(
     sites: &'a [(PathBuf, Range)],
     name: &str,
 ) -> Option<&'a PathBuf> {
-    sites.iter().find_map(|(path, range)| {
-        let document = buffers.at(path)?;
-        let text = document.text();
-        let lines = document.line_index();
-        let start = lines.offset(text, range.start);
-        let end = lines.offset(text, range.end);
-        (text.get(start..end) != Some(name)).then_some(path)
-    })
+    let mut remaining = sites;
+    while let Some(((path, _), tail)) = remaining.split_first() {
+        let in_file = 1 + tail.partition_point(|(next, _)| next == path);
+        if let Some(document) = buffers.at(path) {
+            let text = document.text();
+            let lines = document.line_index();
+            let moved = remaining[..in_file].iter().any(|(_, range)| {
+                let start = lines.offset(text, range.start);
+                let end = lines.offset(text, range.end);
+                text.get(start..end) != Some(name)
+            });
+            if moved {
+                return Some(path);
+            }
+        }
+        remaining = &remaining[in_file..];
+    }
+    None
 }
 
 /// The name under the cursor as a byte range, and the target it renames.

@@ -117,10 +117,9 @@ fn symbol_kind(rule: &str) -> SymbolKind {
 /// present this as exhaustive. See `ROADMAP.md` G4.
 #[must_use]
 pub fn workspace_symbols(index: &crate::index::Index, query: &str) -> Vec<WorkspaceSymbol> {
-    let needle = query.to_lowercase();
     index
         .targets()
-        .filter(|(label, _)| needle.is_empty() || label.to_lowercase().contains(&needle))
+        .filter(|(label, _)| contains_case_insensitive(label, query))
         .take(512)
         .filter_map(|(label, target)| {
             let uri = file_uri(&target.file)?;
@@ -144,6 +143,19 @@ pub fn workspace_symbols(index: &crate::index::Index, query: &str) -> Vec<Worksp
             })
         })
         .collect()
+}
+
+fn contains_case_insensitive(text: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    if text.is_ascii() && query.is_ascii() {
+        return text
+            .as_bytes()
+            .windows(query.len())
+            .any(|window| window.eq_ignore_ascii_case(query.as_bytes()));
+    }
+    text.to_lowercase().contains(&query.to_lowercase())
 }
 
 #[cfg(test)]
@@ -180,5 +192,12 @@ filegroup(\n    name = \"srcs\",\n    srcs = [],\n)\n\ncc_library(name = \"core\
         assert!(declarations(&document("MODULE.bazel", module)).is_empty());
         // The same text read as a BUILD file would look like a target.
         assert_eq!(declarations(&document("BUILD.bazel", module)).len(), 1);
+    }
+
+    #[test]
+    fn workspace_queries_ignore_case() {
+        assert!(contains_case_insensitive("//lib:HTTPServer", "http"));
+        assert!(contains_case_insensitive("//münchen:Straße", "straße"));
+        assert!(!contains_case_insensitive("//lib:server", "client"));
     }
 }

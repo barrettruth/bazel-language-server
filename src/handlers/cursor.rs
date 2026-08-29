@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::label::{Label, make_variable_labels, parse_label};
 use lsp_types::{Position, Range, Uri};
 use starlark_cst::ast::{Arg, AstNode, LiteralExpr, LoadItem, LoadStmt};
-use starlark_cst::{FileKind, SyntaxElement, SyntaxKind, SyntaxNode};
+use starlark_cst::{FileKind, SyntaxKind, SyntaxNode, TextSize};
 
 pub(super) fn file_uri(path: &Path) -> Option<Uri> {
     let mut uri = String::from("file://");
@@ -73,18 +73,9 @@ pub(super) struct StringAt {
 /// `None` when the cursor is anywhere else — on a quote, an identifier, or in
 /// the whitespace between them.
 pub(super) fn string_at(root: &SyntaxNode, offset: u32, kind: FileKind) -> Option<StringAt> {
-    // `token_at_offset` answers with whatever token is at the offset, and with
-    // two of them on a boundary. The kind test is the real query, so the scan
-    // states it directly — O(tokens) against a parse that is O(bytes) and has
-    // just happened anyway, so it is not the cost that matters here.
     let token = root
-        .descendants_with_tokens()
-        .filter_map(SyntaxElement::into_token)
-        .find(|token| {
-            token.kind() == SyntaxKind::STRING
-                && (u32::from(token.text_range().start())..u32::from(token.text_range().end()))
-                    .contains(&offset)
-        })?;
+        .token_at_offset(TextSize::from(offset))
+        .find(|token| token.kind() == SyntaxKind::STRING)?;
     let parent = token.parent()?;
 
     // A `load()` item holds its string token directly; every other string is
