@@ -52,8 +52,15 @@ impl Repos {
     /// If either command cannot run or answers with something that is not what
     /// it documents.
     pub fn read(client: &BazelClient) -> Result<Self> {
+        Self::read_started(client, |_| {})
+    }
+
+    pub fn read_started(
+        client: &BazelClient,
+        mut started: impl FnMut(crate::bazel::Interrupt),
+    ) -> Result<Self> {
         let dumped = client
-            .run(&["mod", "dump_repo_mapping", ""])
+            .run_started(&["mod", "dump_repo_mapping", ""], &mut started)
             .context("asking Bazel for the repository mapping")?;
         if !dumped.ok() {
             // A wrapper written `bazelisk $@` rather than `bazelisk "$@"` drops
@@ -77,7 +84,7 @@ impl Repos {
             .context("the repository mapping is one JSON object of apparent to canonical names")?;
 
         let base = client
-            .run(&["info", "output_base"])
+            .run_shared_started(&["info", "output_base"], &mut started)
             .context("asking Bazel for the output base")?;
         if !base.ok() {
             bail!(

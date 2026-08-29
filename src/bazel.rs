@@ -133,7 +133,7 @@ pub const ROOT_MARKERS: &[&str] = &[
 ///
 /// The whole subsystem is optional. With `enable = false`, or with no `bazel`
 /// on `PATH`, the server still serves the static tier — see invariant 2.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BazelConfig {
     pub enable: bool,
@@ -294,11 +294,15 @@ impl BazelClient {
     /// If the subsystem is disabled, the binary is missing or exits non-zero,
     /// it names no release, or that release is older than [`FLOOR`].
     pub fn probe(&self) -> Result<Probe> {
+        self.probe_started(|_| {})
+    }
+
+    pub fn probe_started(&self, started: impl FnOnce(Interrupt)) -> Result<Probe> {
         if !self.config.enable {
             bail!("the Bazel subsystem is disabled (bazel.enable = false)");
         }
         let out = self
-            .run(&["--version"])
+            .run_started(&["--version"], started)
             .with_context(|| format!("could not run `{}`", self.config.path))?;
         if !out.ok() {
             bail!("`{} --version` failed: {}", self.config.path, out.stderr);
@@ -333,9 +337,13 @@ impl BazelClient {
     /// # Errors
     ///
     /// If the process cannot be spawned or its output cannot be collected.
-    pub fn run(&self, args: &[&str]) -> Result<Invocation> {
+    pub fn run_started(
+        &self,
+        args: &[&str],
+        started: impl FnOnce(Interrupt),
+    ) -> Result<Invocation> {
         let mut stdout = Vec::new();
-        let outcome = self.stream(args, |_| {}, &mut |chunk| stdout.extend_from_slice(chunk))?;
+        let outcome = self.stream(args, started, &mut |chunk| stdout.extend_from_slice(chunk))?;
         Ok(Invocation {
             stdout,
             stderr: outcome.stderr,
@@ -367,16 +375,45 @@ impl BazelClient {
         started: impl FnOnce(Interrupt),
         sink: &mut dyn FnMut(&[u8]),
     ) -> Result<Outcome> {
-        let mut command = Command::new(&self.config.path);
-        command
-            .current_dir(&self.workspace)
+        self.stream_with(args, true, started, sink)
+    }
+
+    pub fn run_shared_started(
+        &self,
+        args: &[&str],
+        started: impl FnOnce(Interrupt),
+    ) -> Result<Invocation> {
+        let mut stdout = Vec::new();
+        let outcome = self.stream_with(args, false, started, &mut |chunk| {
+            stdout.extend_from_slice(chunk);
+        })?;
+        Ok(Invocation {
+            stdout,
+            stderr: outcome.stderr,
+            status: outcome.status,
+        })
+    }
+
+    pub fn spawn(&self, args: &[&str]) -> Result<()> {
+        let mut child = self
+            .command(args, true)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(base) = &self.output_base {
-            command.arg(format!("--output_base={}", base.display()));
-        }
-        command.args(&self.config.args).args(args);
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("spawning `{}`", self.config.path))?;
+        std::thread::spawn(move || drop(child.wait()));
+        Ok(())
+    }
+
+    fn stream_with(
+        &self,
+        args: &[&str],
+        private_output_base: bool,
+        started: impl FnOnce(Interrupt),
+        sink: &mut dyn FnMut(&[u8]),
+    ) -> Result<Outcome> {
+        let mut command = self.command(args, private_output_base);
 
         tracing::debug!(?args, "bazel");
         let child = Arc::new(
@@ -407,6 +444,20 @@ impl BazelClient {
             stderr: drain.join().unwrap_or_default(),
             status: status.code(),
         })
+    }
+
+    fn command(&self, args: &[&str], private_output_base: bool) -> Command {
+        let mut command = Command::new(&self.config.path);
+        command
+            .current_dir(&self.workspace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if private_output_base && let Some(base) = &self.output_base {
+            command.arg(format!("--output_base={}", base.display()));
+        }
+        command.args(&self.config.args).args(args);
+        command
     }
 }
 

@@ -23,7 +23,7 @@ use crate::actor::Bazel;
 use crate::bazel::{BazelClient, BazelConfig};
 use crate::document::Documents;
 use crate::index::IndexHandle;
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use lsp_server::{Connection, Message, Response};
 use lsp_types::{
@@ -318,12 +318,8 @@ fn run_server() -> Result<()> {
     let index = IndexHandle::new();
     // Held for the life of the loop: dropping it stops the Bazel thread, so a
     // shutdown takes the subprocess with it rather than orphaning one.
-    let bazel = std::sync::Arc::new(Bazel::default());
-    bazel.reconfigure(
-        bazel_settings(init.initialization_options.as_ref()).unwrap_or_default(),
-        root.as_deref(),
-        &index,
-    );
+    let bazel = std::sync::Arc::new(Bazel::spawn(root.clone(), index.clone()));
+    bazel.reconfigure(bazel_settings(init.initialization_options.as_ref()).unwrap_or_default());
     if let Some(root) = root.clone() {
         // Synchronous: ~1.4 s on a 74k-package repo, which is cheaper than the
         // machinery to report progress on it would be.
@@ -377,11 +373,11 @@ fn run_server() -> Result<()> {
             {
                 let sent: Option<DidChangeConfigurationParams> =
                     serde_json::from_value(note.params.clone()).ok();
-                bazel.reconfigure(
-                    bazel_settings(sent.as_ref().map(|sent| &sent.settings)).unwrap_or_default(),
-                    root.as_deref(),
-                    &index,
-                );
+                if let Some(config) =
+                    bazel_settings(sent.as_ref().map(|sent| &sent.settings))
+                {
+                    bazel.reconfigure(config);
+                }
             }
             Message::Notification(note) => match apply(&note, &mut docs) {
                 Ok(Some(uri)) => publish(&connection, &docs, &uri)?,
@@ -691,26 +687,10 @@ fn execute_command(
     let [verb, label] = arguments.as_slice() else {
         anyhow::bail!("expected a verb and a label, got {arguments:?}");
     };
-    let Some(root) = root else {
+    let Some(_root) = root else {
         anyhow::bail!("no workspace to run in");
     };
-    let config = bazel.config();
-    if !config.enable {
-        anyhow::bail!("the Bazel subsystem is disabled (bazel.enable = false)");
-    }
-
-    let binary = &config.path;
-    tracing::info!(%binary, %verb, %label, "bazel");
-    std::process::Command::new(binary)
-        .args(&config.args)
-        .arg(verb)
-        .arg(label)
-        .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .with_context(|| format!("running `{binary} {verb} {label}`"))?;
+    bazel.run_target(verb, label)?;
     Ok(None)
 }
 
