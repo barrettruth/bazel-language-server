@@ -16,6 +16,7 @@ anyhow = "1"
 arc-swap = "1"
 bytes = "1.12.1"
 clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
 lsp-server = "0.10"
 lsp-types = { version = "0.11", package = "gen-lsp-types", features = [
   "fluent-uri",

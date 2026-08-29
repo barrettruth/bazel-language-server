@@ -39,7 +39,7 @@ pub fn folding_ranges(document: &Document) -> Vec<FoldingRange> {
         push(&mut ranges, start, end, None);
     }
 
-    for (start, end) in comment_runs(&root, text, &lines) {
+    for (start, end) in comment_runs(&root, text, lines) {
         push(&mut ranges, start, end, Some(FoldingRangeKind::Comment));
     }
 

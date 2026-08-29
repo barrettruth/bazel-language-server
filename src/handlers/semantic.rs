@@ -38,7 +38,7 @@ pub fn semantic_tokens(document: &Document) -> SemanticTokens {
             if let Some(range) = load.module().and_then(|module| module.value_range()) {
                 absolute.push(span(
                     text,
-                    &lines,
+                    lines,
                     range.start().into(),
                     range.len().into(),
                     NAMESPACE,
@@ -55,7 +55,7 @@ pub fn semantic_tokens(document: &Document) -> SemanticTokens {
                 let range = callee.text_range();
                 absolute.push(span(
                     text,
-                    &lines,
+                    lines,
                     range.start().into(),
                     range.len().into(),
                     FUNCTION,
@@ -74,7 +74,7 @@ pub fn semantic_tokens(document: &Document) -> SemanticTokens {
                 let range = ident.text_range();
                 absolute.push(span(
                     text,
-                    &lines,
+                    lines,
                     range.start().into(),
                     range.len().into(),
                     PARAMETER,
@@ -90,7 +90,7 @@ pub fn semantic_tokens(document: &Document) -> SemanticTokens {
         {
             absolute.push(span(
                 text,
-                &lines,
+                lines,
                 range.start().into(),
                 range.len().into(),
                 STRING,

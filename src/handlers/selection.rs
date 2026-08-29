@@ -27,7 +27,7 @@ pub fn selection_ranges(document: &Document, positions: &[Position]) -> Vec<Sele
         .iter()
         .map(|position| {
             let offset = lines.offset(text, *position);
-            chain(&root, text, &lines, offset)
+            chain(&root, text, lines, offset)
         })
         .collect()
 }

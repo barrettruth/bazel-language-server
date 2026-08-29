@@ -39,8 +39,9 @@ pub trait Buffers {
 /// here, wherever the map changes. Publishing it from the caller instead would
 /// make every future path that touches a document a chance to leave the index
 /// disagreeing with the editor.
+#[derive(Clone)]
 pub struct Documents {
-    texts: FxHashMap<Uri, Document>,
+    texts: FxHashMap<Uri, Arc<Document>>,
     root: Option<PathBuf>,
     index: IndexHandle,
 }
@@ -50,7 +51,10 @@ impl Buffers for Documents {
     /// open, and a second map keyed on path is state to keep in step with this
     /// one for a lookup that never shows up in a profile.
     fn at(&self, path: &Path) -> Option<&Document> {
-        self.texts.values().find(|document| document.path() == path)
+        self.texts
+            .values()
+            .find(|document| document.path() == path)
+            .map(Arc::as_ref)
     }
 }
 
@@ -66,14 +70,41 @@ impl Documents {
 
     #[must_use]
     pub fn get(&self, uri: &Uri) -> Option<&Document> {
-        self.texts.get(uri)
+        self.texts.get(uri).map(Arc::as_ref)
     }
 
     /// Hold `text` as the current contents of `uri`, opened or edited.
-    pub fn set(&mut self, uri: Uri, path: PathBuf, text: String) {
-        let document = Document::new(path, text, self.root.as_deref());
-        self.texts.insert(uri, document);
+    pub fn set(&mut self, uri: Uri, path: PathBuf, version: i32, text: String) {
+        let document = Document::versioned(path, version, text, self.root.as_deref());
+        self.texts.insert(uri, Arc::new(document));
         self.republish();
+    }
+
+    pub fn change(
+        &mut self,
+        uri: &Uri,
+        version: i32,
+        changes: Vec<lsp_types::TextDocumentContentChangeEvent>,
+    ) -> anyhow::Result<()> {
+        let current = self
+            .texts
+            .get(uri)
+            .ok_or_else(|| anyhow::anyhow!("change for a document that is not open"))?;
+        anyhow::ensure!(
+            version > current.version(),
+            "document version {version} does not follow {}",
+            current.version()
+        );
+        let text = apply_changes(current.text(), changes)?;
+        let document = Document::versioned(
+            current.path().to_path_buf(),
+            version,
+            text,
+            self.root.as_deref(),
+        );
+        self.texts.insert(uri.clone(), Arc::new(document));
+        self.republish();
+        Ok(())
     }
 
     /// Forget `uri`. The disk answers for that file again from here.
@@ -107,8 +138,10 @@ impl Documents {
 pub struct Document {
     text: String,
     path: PathBuf,
-    dialect: Dialect,
     kind: FileKind,
+    version: i32,
+    parsed: Parse,
+    lines: LineIndex,
 }
 
 impl Document {
@@ -121,14 +154,24 @@ impl Document {
     /// A path Bazel recognises as nothing is read as Starlark: the client
     /// opened it against this server, and a syntactic answer is the closest
     /// true one available.
+    #[cfg(test)]
     #[must_use]
     pub fn new(path: PathBuf, text: String, root: Option<&Path>) -> Self {
+        Self::versioned(path, 0, text, root)
+    }
+
+    #[must_use]
+    pub fn versioned(path: PathBuf, version: i32, text: String, root: Option<&Path>) -> Self {
         let (dialect, kind) = classify(&path, root).unwrap_or((Dialect::Standard, FileKind::Bzl));
+        let parsed = parse(&text, dialect);
+        let lines = LineIndex::new(&text);
         Self {
             text,
             path,
-            dialect,
             kind,
+            version,
+            parsed,
+            lines,
         }
     }
 
@@ -147,16 +190,21 @@ impl Document {
         self.kind
     }
 
+    #[must_use]
+    pub fn version(&self) -> i32 {
+        self.version
+    }
+
     /// Line starts, for a request converting more than one offset.
     #[must_use]
-    pub fn line_index(&self) -> LineIndex {
-        LineIndex::new(&self.text)
+    pub fn line_index(&self) -> &LineIndex {
+        &self.lines
     }
 
     /// The syntax tree, in the dialect the path implies.
     #[must_use]
-    pub fn parse(&self) -> Parse {
-        parse(&self.text, self.dialect)
+    pub fn parse(&self) -> &Parse {
+        &self.parsed
     }
 
     /// Add what this buffer declares to `tier`, and claim the file if it can.
@@ -173,18 +221,17 @@ impl Document {
             return;
         }
         let path: Arc<Path> = Arc::from(self.path.as_path());
-        let parsed = self.parse();
         if !collect_file(
             root,
             &path,
-            &parsed,
+            &self.parsed,
             &self.text,
             &mut tier.targets,
             &mut tier.references,
         ) {
             return;
         }
-        if parsed.errors().is_empty() {
+        if self.parsed.errors().is_empty() {
             tier.speaks_for.insert(path);
         }
     }
@@ -203,13 +250,43 @@ impl Document {
 
     /// The byte offset of a position in this document.
     pub fn offset(&self, position: Position) -> usize {
-        self.line_index().offset(&self.text, position)
+        self.lines.offset(&self.text, position)
     }
+}
+
+fn apply_changes(
+    original: &str,
+    changes: Vec<lsp_types::TextDocumentContentChangeEvent>,
+) -> anyhow::Result<String> {
+    let mut text = original.to_owned();
+    for change in changes {
+        match change {
+            lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(
+                whole,
+            ) => text = whole.text,
+            lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangePartial(
+                partial,
+            ) => {
+                let lines = LineIndex::new(&text);
+                let start = lines.offset(&text, partial.range.start);
+                let end = lines.offset(&text, partial.range.end);
+                anyhow::ensure!(start <= end, "change range ends before it starts");
+                anyhow::ensure!(
+                    lines.position(&text, start) == partial.range.start
+                        && lines.position(&text, end) == partial.range.end,
+                    "change range is outside the document"
+                );
+                text.replace_range(start..end, &partial.text);
+            }
+        }
+    }
+    Ok(text)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn buffer(name: &str, text: &str) -> (PathBuf, Document) {
         let path = PathBuf::from("/ws").join(name);
@@ -259,5 +336,40 @@ mod tests {
             assert!(tier.targets.is_empty(), "{name} declared something");
             assert!(!tier.speaks_for.contains(path.as_path()), "{name} claimed");
         }
+    }
+
+    #[test]
+    fn incremental_changes_apply_in_order_and_in_utf16() {
+        let changes = serde_json::from_value(json!([
+            {
+                "range": {
+                    "start": {"line": 0, "character": 1},
+                    "end": {"line": 0, "character": 3}
+                },
+                "text": "x"
+            },
+            {
+                "range": {
+                    "start": {"line": 0, "character": 2},
+                    "end": {"line": 0, "character": 3}
+                },
+                "text": "y"
+            }
+        ]))
+        .unwrap();
+        assert_eq!(apply_changes("a😀b\n", changes).unwrap(), "axy\n");
+    }
+
+    #[test]
+    fn an_invalid_incremental_range_is_rejected() {
+        let changes = serde_json::from_value(json!([{
+            "range": {
+                "start": {"line": 9, "character": 0},
+                "end": {"line": 9, "character": 0}
+            },
+            "text": "x"
+        }]))
+        .unwrap();
+        assert!(apply_changes("a\n", changes).is_err());
     }
 }

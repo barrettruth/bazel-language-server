@@ -75,7 +75,7 @@ impl Fixture {
         let file = self.root.join(relative);
         let uri = super::cursor::file_uri(&file).expect("a uri for a fixture path");
         let mut docs = crate::document::Documents::new(Some(self.root.clone()), handle.clone());
-        docs.set(uri, file, text.to_string());
+        docs.set(uri, file, 0, text.to_string());
         handle.load()
     }
 

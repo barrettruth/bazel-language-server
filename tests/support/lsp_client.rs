@@ -100,24 +100,44 @@ impl Client {
     }
 
     pub fn request(&mut self, method: &str, params: &Value) -> Timed {
-        self.next_id += 1;
-        let id = self.next_id;
         let started = Instant::now();
-        self.send(&json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params
-        }));
-        let value = self.wait_for(|message| message.get("id") == Some(&json!(id)));
+        let id = self.send_request(method, params);
+        let value = self.wait_response(id);
         Timed {
             value,
             elapsed: started.elapsed(),
         }
     }
 
+    pub fn send_request(&mut self, method: &str, params: &Value) -> i64 {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        }));
+        id
+    }
+
+    pub fn wait_response(&mut self, id: i64) -> Value {
+        self.wait_for(|message| message.get("id") == Some(&json!(id)))
+    }
+
+    #[allow(dead_code)]
     pub fn wait_notification(&mut self, method: &str) -> Value {
-        self.wait_for(|message| message.get("method").and_then(Value::as_str) == Some(method))
+        self.wait_notification_matching(method, |_| true)
+    }
+
+    pub fn wait_notification_matching(
+        &mut self,
+        method: &str,
+        matches: impl Fn(&Value) -> bool,
+    ) -> Value {
+        self.wait_for(|message| {
+            message.get("method").and_then(Value::as_str) == Some(method) && matches(message)
+        })
     }
 
     pub fn uri(&self, relative: &str) -> String {

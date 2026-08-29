@@ -16,19 +16,20 @@ mod label;
 mod line_index;
 mod repos;
 mod watch;
+mod worker;
 
 use std::path::{Path, PathBuf};
 
 use crate::actor::Bazel;
 use crate::bazel::{BazelClient, BazelConfig};
-use crate::document::Documents;
+use crate::document::{Document, Documents};
 use crate::index::IndexHandle;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use lsp_server::{Connection, Message, Response};
+use lsp_server::{Connection, Message, ReqQueue, RequestId, Response};
 use lsp_types::{
-    CodeLensRequest, Definition, DefinitionRequest, DefinitionResponse,
-    DidChangeConfigurationNotification, DidChangeConfigurationParams,
+    CancelNotification, CancelParams, CodeLensRequest, Definition, DefinitionRequest,
+    DefinitionResponse, DidChangeConfigurationNotification, DidChangeConfigurationParams,
     DidChangeTextDocumentNotification, DidChangeTextDocumentParams,
     DidCloseTextDocumentNotification, DidCloseTextDocumentParams, DidOpenTextDocumentNotification,
     DidOpenTextDocumentParams, DocumentFormattingRequest, DocumentHighlightRequest,
@@ -37,9 +38,76 @@ use lsp_types::{
     LocationLink, LspNotificationMethod, LspRequestMethod, Notification, PrepareRenameRequest,
     PrepareRenameResult, PublishDiagnosticsNotification, PublishDiagnosticsParams,
     ReferencesRequest, RenameOptions, RenameRequest, Request as _, SelectionRangeRequest,
-    SemanticTokensRequest, ServerCapabilities, TextDocumentSync, TextDocumentSyncKind, TextEdit,
-    Uri, WorkspaceSymbolRequest,
+    SemanticTokensRequest, ServerCapabilities, TextDocumentSync, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextEdit, Uri, WorkspaceSymbolRequest,
 };
+
+enum Completed {
+    Response(Response),
+    Diagnostics {
+        uri: Uri,
+        version: i32,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+    },
+}
+
+struct RequestContext<'a> {
+    connection: &'a Connection,
+    workers: &'a worker::Pool<Completed>,
+    index: &'a IndexHandle,
+    root: Option<&'a Path>,
+    bazel: &'a Bazel,
+    watch: Option<&'a watch::Watch>,
+    link_support: bool,
+}
+
+impl RequestContext<'_> {
+    fn dispatch(
+        &self,
+        requests: &mut ReqQueue<(), ()>,
+        docs: &Documents,
+        request: lsp_server::Request,
+    ) -> Result<bool> {
+        if self.connection.handle_shutdown(&request)? {
+            return Ok(true);
+        }
+
+        let method: LspRequestMethod<'_> = request.method.as_str().into();
+        if method == ExecuteCommandRequest::METHOD {
+            let response = match execute_command(&request, self.root, self.bazel, self.watch) {
+                Ok(value) => Response::new_ok(request.id.clone(), value),
+                Err(err) => request_error(&request, &err),
+            };
+            self.connection.sender.send(Message::Response(response))?;
+            return Ok(false);
+        }
+
+        requests.incoming.register(request.id.clone(), ());
+        let snapshot = docs.clone();
+        let index = self.index.clone();
+        let root = self.root.map(Path::to_path_buf);
+        let link_support = self.link_support;
+        self.workers.execute(move || {
+            let id = request.id.clone();
+            let method = request.method.clone();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                respond(&request, &snapshot, &index, root.as_deref(), link_support)
+            }));
+            let response = if let Ok(result) = result {
+                request_result(&request, result)
+            } else {
+                tracing::error!(%method, "request handler panicked");
+                Response::new_err(
+                    id,
+                    lsp_server::ErrorCode::InternalError as i32,
+                    "request handler panicked".to_owned(),
+                )
+            };
+            Completed::Response(response)
+        });
+        Ok(false)
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "bazel-language-server", version, about)]
@@ -245,7 +313,11 @@ fn bazel_settings(sent: Option<&serde_json::Value>) -> Option<BazelConfig> {
 /// beside the dispatch table it corresponds to is easier to keep honest.
 fn capabilities() -> ServerCapabilities {
     ServerCapabilities {
-        text_document_sync: Some(TextDocumentSync::Kind(TextDocumentSyncKind::Full)),
+        text_document_sync: Some(TextDocumentSync::Options(TextDocumentSyncOptions {
+            open_close: Some(true),
+            change: Some(TextDocumentSyncKind::Incremental),
+            ..Default::default()
+        })),
         document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
         workspace_symbol_provider: Some(lsp_types::WorkspaceSymbolProvider::Bool(true)),
         definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
@@ -333,59 +405,58 @@ fn run_server() -> Result<()> {
     tracing::info!(targets = index.load().len(), "ready");
 
     let mut docs = Documents::new(root.clone(), index.clone());
+    let (completed_tx, completed_rx) = crossbeam_channel::unbounded();
+    let worker_count = std::thread::available_parallelism()
+        .map_or(2, std::num::NonZero::get)
+        .clamp(2, 8);
+    let workers = worker::Pool::new(worker_count, &completed_tx);
+    let mut requests = ReqQueue::<(), ()>::default();
+    let request_context = RequestContext {
+        connection: &connection,
+        workers: &workers,
+        index: &index,
+        root: root.as_deref(),
+        bazel: &bazel,
+        watch: watch.as_ref(),
+        link_support,
+    };
 
-    for message in &connection.receiver {
-        match message {
-            // A message the server cannot make sense of fails that message.
-            // Letting the error out of the loop would exit the process and take
-            // every open buffer's language support with it, over one bad URI.
-            Message::Request(request) => {
-                if connection.handle_shutdown(&request)? {
-                    break;
-                }
-                let id = request.id.clone();
-                let response = match respond(
-                    &request,
-                    &docs,
-                    &index,
-                    root.as_deref(),
-                    link_support,
-                    &bazel,
-                    watch.as_ref(),
-                ) {
-                    Ok(response) => response,
-                    Err(err) => {
-                        tracing::error!(method = request.method, "{err:#}");
-                        Response::new_err(
-                            id,
-                            lsp_server::ErrorCode::InvalidParams as i32,
-                            err.to_string(),
-                        )
+    'session: loop {
+        crossbeam_channel::select! {
+            recv(connection.receiver) -> message => {
+                let Ok(message) = message else { break };
+                match message {
+                    Message::Request(request) => {
+                        if request_context.dispatch(&mut requests, &docs, request)? {
+                            break 'session;
+                        }
                     }
-                };
-                connection.sender.send(Message::Response(response))?;
-            }
-            // Configuration is answered here rather than in `apply`, which is
-            // about the open documents and nothing else.
-            Message::Notification(note)
-                if LspNotificationMethod::from(note.method.as_str())
-                    == DidChangeConfigurationNotification::METHOD =>
-            {
-                let sent: Option<DidChangeConfigurationParams> =
-                    serde_json::from_value(note.params.clone()).ok();
-                if let Some(config) =
-                    bazel_settings(sent.as_ref().map(|sent| &sent.settings))
-                {
-                    bazel.reconfigure(config);
+                    Message::Notification(note) => handle_notification(
+                        &connection,
+                        &workers,
+                        &mut requests,
+                        &mut docs,
+                        &bazel,
+                        note,
+                    )?,
+                    Message::Response(_) => {}
                 }
             }
-            Message::Notification(note) => match apply(&note, &mut docs) {
-                Ok(Some(uri)) => publish(&connection, &docs, &uri)?,
-                Ok(None) => {}
-                // A notification has no reply, so this is the only report.
-                Err(err) => tracing::error!(method = note.method, "{err:#}"),
-            },
-            Message::Response(_) => {}
+            recv(completed_rx) -> completed => {
+                let Ok(completed) = completed else { break };
+                match completed {
+                    Completed::Response(response) => {
+                        if requests.incoming.complete(&response.id).is_some() {
+                            connection.sender.send(Message::Response(response))?;
+                        }
+                    }
+                    Completed::Diagnostics { uri, version, diagnostics } => {
+                        if docs.get(&uri).is_some_and(|document| document.version() == version) {
+                            publish_diagnostics(&connection, uri, version, diagnostics)?;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -401,8 +472,6 @@ fn respond(
     index: &IndexHandle,
     root: Option<&Path>,
     link_support: bool,
-    bazel: &Bazel,
-    watch: Option<&watch::Watch>,
 ) -> Result<Response> {
     let id = request.id.clone();
     let method: LspRequestMethod<'_> = request.method.as_str().into();
@@ -434,8 +503,6 @@ fn respond(
         Response::new_ok(id, implementation(request, docs, root)?)
     } else if method == CodeLensRequest::METHOD {
         Response::new_ok(id, code_lenses(request, docs, root)?)
-    } else if method == ExecuteCommandRequest::METHOD {
-        Response::new_ok(id, execute_command(request, root, bazel, watch)?)
     } else if method == InlayHintRequest::METHOD {
         Response::new_ok(id, inlay_hints(request, docs, index, root)?)
     } else if method == WorkspaceSymbolRequest::METHOD {
@@ -792,10 +859,13 @@ fn prepare_rename(
     Ok(range.map(PrepareRenameResult::Range))
 }
 
-/// Apply a notification to the open-document map.
-///
-/// Returns the document whose diagnostics are now stale, if any.
-fn apply(note: &lsp_server::Notification, docs: &mut Documents) -> Result<Option<Uri>> {
+enum Applied {
+    Changed(Uri),
+    Closed { uri: Uri, version: i32 },
+    None,
+}
+
+fn apply(note: &lsp_server::Notification, docs: &mut Documents) -> Result<Applied> {
     let method: LspNotificationMethod<'_> = note.method.as_str().into();
     if method == DidOpenTextDocumentNotification::METHOD {
         let params: DidOpenTextDocumentParams = serde_json::from_value(note.params.clone())?;
@@ -803,38 +873,26 @@ fn apply(note: &lsp_server::Notification, docs: &mut Documents) -> Result<Option
         docs.set(
             uri.clone(),
             uri_to_path(&uri).into(),
+            params.text_document.version,
             params.text_document.text,
         );
-        return Ok(Some(uri));
+        return Ok(Applied::Changed(uri));
     }
     if method == DidChangeTextDocumentNotification::METHOD {
         let params: DidChangeTextDocumentParams = serde_json::from_value(note.params.clone())?;
         let uri = params.text_document.text_document_identifier.uri;
-        // Full sync is advertised, so a change carries the whole buffer and the
-        // last one is its current state. A partial change carries a range
-        // replacement instead; storing that as the document would leave every
-        // request answering about text the user cannot see, so it is refused
-        // and the last good text stands.
-        if let Some(change) = params.content_changes.into_iter().next_back() {
-            let text = match change {
-                lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(
-                    whole,
-                ) => whole.text,
-                lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangePartial(_) => {
-                    anyhow::bail!("client sent an incremental change for a document synced in full")
-                }
-            };
-            docs.set(uri.clone(), uri_to_path(&uri).into(), text);
-        }
-        return Ok(Some(uri));
+        docs.change(&uri, params.text_document.version, params.content_changes)?;
+        return Ok(Applied::Changed(uri));
     }
     if method == DidCloseTextDocumentNotification::METHOD {
         let params: DidCloseTextDocumentParams = serde_json::from_value(note.params.clone())?;
-        docs.forget(&params.text_document.uri);
-        return Ok(None);
+        let uri = params.text_document.uri;
+        let version = docs.get(&uri).map_or(0, Document::version);
+        docs.forget(&uri);
+        return Ok(Applied::Closed { uri, version });
     }
     tracing::trace!(method = note.method, "unhandled notification");
-    Ok(None)
+    Ok(Applied::None)
 }
 
 /// Whether the client understands `LocationLink`.
@@ -871,18 +929,81 @@ fn definition_response(links: Vec<LocationLink>, link_support: bool) -> Option<D
     })
 }
 
-fn publish(connection: &Connection, docs: &Documents, uri: &Uri) -> Result<()> {
+fn handle_notification(
+    connection: &Connection,
+    workers: &worker::Pool<Completed>,
+    requests: &mut ReqQueue<(), ()>,
+    docs: &mut Documents,
+    bazel: &Bazel,
+    note: lsp_server::Notification,
+) -> Result<()> {
+    let method: LspNotificationMethod<'_> = note.method.as_str().into();
+    if method == CancelNotification::METHOD {
+        let params: CancelParams = serde_json::from_value(note.params)?;
+        let id = match params.id {
+            lsp_types::Id::Int(id) => RequestId::from(id),
+            lsp_types::Id::String(id) => RequestId::from(id),
+        };
+        if let Some(response) = requests.incoming.cancel(id) {
+            connection.sender.send(Message::Response(response))?;
+        }
+        return Ok(());
+    }
+    if method == DidChangeConfigurationNotification::METHOD {
+        let sent: Option<DidChangeConfigurationParams> = serde_json::from_value(note.params).ok();
+        if let Some(config) = bazel_settings(sent.as_ref().map(|sent| &sent.settings)) {
+            bazel.reconfigure(config);
+        }
+        return Ok(());
+    }
+
+    match apply(&note, docs) {
+        Ok(Applied::Changed(uri)) => schedule_diagnostics(connection, workers, docs, &uri)?,
+        Ok(Applied::Closed { uri, version }) => {
+            publish_diagnostics(connection, uri, version, Vec::new())?;
+        }
+        Ok(Applied::None) => {}
+        Err(err) => tracing::error!(method = note.method, "{err:#}"),
+    }
+    Ok(())
+}
+
+fn schedule_diagnostics(
+    connection: &Connection,
+    workers: &worker::Pool<Completed>,
+    docs: &Documents,
+    uri: &Uri,
+) -> Result<()> {
     let Some(document) = docs.get(uri) else {
         return Ok(());
     };
-    let mut diagnostics = handlers::syntax_diagnostics(document);
-    if diagnostics.is_empty() {
-        diagnostics.extend(format::lint(document.text(), document.kind()));
+    let version = document.version();
+    let syntax = handlers::syntax_diagnostics(document);
+    let clean = syntax.is_empty();
+    publish_diagnostics(connection, uri.clone(), version, syntax)?;
+    if clean {
+        let uri = uri.clone();
+        let text = document.text().to_owned();
+        let kind = document.kind();
+        workers.execute(move || Completed::Diagnostics {
+            uri,
+            version,
+            diagnostics: format::lint(&text, kind),
+        });
     }
+    Ok(())
+}
+
+fn publish_diagnostics(
+    connection: &Connection,
+    uri: Uri,
+    version: i32,
+    diagnostics: Vec<lsp_types::Diagnostic>,
+) -> Result<()> {
     let params = PublishDiagnosticsParams {
-        uri: uri.clone(),
+        uri,
         diagnostics,
-        version: None,
+        version: Some(version),
     };
     connection
         .sender
@@ -891,6 +1012,23 @@ fn publish(connection: &Connection, docs: &Documents, uri: &Uri) -> Result<()> {
             params: serde_json::to_value(params)?,
         }))?;
     Ok(())
+}
+
+fn request_result(request: &lsp_server::Request, result: Result<Response>) -> Response {
+    match result {
+        Ok(response) => response,
+        Err(err) => request_error(request, &err),
+    }
+}
+
+fn request_error(request: &lsp_server::Request, err: &anyhow::Error) -> Response {
+    tracing::error!(method = request.method, "{err:#}");
+    let code = if err.downcast_ref::<serde_json::Error>().is_some() {
+        lsp_server::ErrorCode::InvalidParams
+    } else {
+        lsp_server::ErrorCode::RequestFailed
+    };
+    Response::new_err(request.id.clone(), code as i32, err.to_string())
 }
 
 /// The filesystem path of a `file://` URI.

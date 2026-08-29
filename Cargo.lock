@@ -90,6 +90,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "clap",
+ "crossbeam-channel",
  "gen-lsp-types",
  "lsp-server",
  "notify",
