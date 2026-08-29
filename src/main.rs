@@ -36,10 +36,12 @@ use lsp_types::{
     DocumentLinkRequest, DocumentSymbolRequest, ExecuteCommandRequest, FoldingRangeRequest,
     HoverRequest, ImplementationRequest, InitializeParams, InlayHintRequest, Location,
     LocationLink, LspNotificationMethod, LspRequestMethod, Notification, PrepareRenameRequest,
-    PrepareRenameResult, PublishDiagnosticsNotification, PublishDiagnosticsParams,
-    ReferencesRequest, RenameOptions, RenameRequest, Request as _, SelectionRangeRequest,
-    SemanticTokensRequest, ServerCapabilities, TextDocumentSync, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextEdit, Uri, WorkspaceSymbolRequest,
+    PrepareRenameResult, ProgressNotification, ProgressParams, ProgressToken,
+    PublishDiagnosticsNotification, PublishDiagnosticsParams, ReferencesRequest, RenameOptions,
+    RenameRequest, Request as _, SelectionRangeRequest, SemanticTokensRequest, ServerCapabilities,
+    TextDocumentSync, TextDocumentSyncKind, TextDocumentSyncOptions, TextEdit, Uri,
+    WorkDoneProgressBegin, WorkDoneProgressCreateParams, WorkDoneProgressCreateRequest,
+    WorkDoneProgressEnd, WorkspaceSymbolRequest,
 };
 
 enum Completed {
@@ -49,6 +51,60 @@ enum Completed {
         version: i32,
         diagnostics: Vec<lsp_types::Diagnostic>,
     },
+}
+
+enum Outgoing {
+    IndexProgress,
+}
+
+struct IndexProgress {
+    token: ProgressToken,
+    created: bool,
+    ready: Option<watch::Ready>,
+}
+
+impl IndexProgress {
+    fn created(&mut self, connection: &Connection) -> Result<()> {
+        self.created = true;
+        send_progress(
+            connection,
+            &self.token,
+            WorkDoneProgressBegin {
+                title: "Indexing Bazel workspace".to_owned(),
+                cancellable: Some(false),
+                message: None,
+                percentage: None,
+            },
+        )?;
+        if let Some(ready) = self.ready.take() {
+            self.finish(connection, &ready)?;
+        }
+        Ok(())
+    }
+
+    fn ready(&mut self, connection: &Connection, ready: watch::Ready) -> Result<()> {
+        if self.created {
+            self.finish(connection, &ready)
+        } else {
+            self.ready = Some(ready);
+            Ok(())
+        }
+    }
+
+    fn finish(&self, connection: &Connection, ready: &watch::Ready) -> Result<()> {
+        send_progress(
+            connection,
+            &self.token,
+            WorkDoneProgressEnd {
+                message: Some(format!(
+                    "{} BUILD files, {} targets in {:.2}s",
+                    ready.files,
+                    ready.targets,
+                    ready.elapsed.as_secs_f64()
+                )),
+            },
+        )
+    }
 }
 
 struct RequestContext<'a> {
@@ -64,7 +120,7 @@ struct RequestContext<'a> {
 impl RequestContext<'_> {
     fn dispatch(
         &self,
-        requests: &mut ReqQueue<worker::Cancellation, ()>,
+        requests: &mut ReqQueue<worker::Cancellation, Outgoing>,
         docs: &Documents,
         request: lsp_server::Request,
     ) -> Result<bool> {
@@ -363,33 +419,68 @@ fn capabilities() -> ServerCapabilities {
     }
 }
 
-fn run_server() -> Result<()> {
-    tracing::info!("bazel-language-server {}", env!("CARGO_PKG_VERSION"));
-    let (connection, io_threads) = Connection::stdio();
-    let capabilities = capabilities();
-    // Drive the handshake directly so capabilities and serverInfo share the
-    // required InitializeResult envelope.
+fn initialize(connection: &Connection) -> Result<InitializeParams> {
     let (id, params) = connection.initialize_start()?;
     connection.initialize_finish(
         id,
         serde_json::json!({
-            "capabilities": capabilities,
+            "capabilities": capabilities(),
             "serverInfo": {
                 "name": "bazel-language-server",
                 "version": env!("CARGO_PKG_VERSION"),
             },
         }),
     )?;
-    let init: InitializeParams = serde_json::from_value(params)?;
+    Ok(serde_json::from_value(params)?)
+}
+
+fn start_index_progress(
+    connection: &Connection,
+    init: &InitializeParams,
+    has_workspace: bool,
+    requests: &mut ReqQueue<worker::Cancellation, Outgoing>,
+) -> Result<Option<IndexProgress>> {
+    if !has_workspace || !supports_work_done_progress(init) {
+        return Ok(None);
+    }
+    let token = ProgressToken::String("bazel-language-server-index".to_owned());
+    let request = requests.outgoing.register(
+        WorkDoneProgressCreateRequest::METHOD.to_string(),
+        WorkDoneProgressCreateParams {
+            token: token.clone(),
+        },
+        Outgoing::IndexProgress,
+    );
+    connection.sender.send(Message::Request(request))?;
+    Ok(Some(IndexProgress {
+        token,
+        created: false,
+        ready: None,
+    }))
+}
+
+fn run_server() -> Result<()> {
+    tracing::info!("bazel-language-server {}", env!("CARGO_PKG_VERSION"));
+    let (connection, io_threads) = Connection::stdio();
+    let init = initialize(&connection)?;
 
     let root = workspace_root(&init);
     let link_support = supports_definition_links(&init);
+    let mut requests = ReqQueue::<worker::Cancellation, Outgoing>::default();
+    let mut index_progress =
+        start_index_progress(&connection, &init, root.is_some(), &mut requests)?;
     let index = IndexHandle::new();
     let bazel = std::sync::Arc::new(Bazel::spawn(root.clone(), index.clone()));
     bazel.reconfigure(bazel_settings(init.initialization_options.as_ref()).unwrap_or_default());
-    let watch = root
-        .as_deref()
-        .map(|root| watch::spawn(root, index.clone(), bazel.clone()));
+    let (watch, mut ready_rx) = if let Some(root) = root.as_deref() {
+        let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
+        (
+            Some(watch::spawn(root, index.clone(), bazel.clone(), ready_tx)),
+            ready_rx,
+        )
+    } else {
+        (None, crossbeam_channel::never())
+    };
     tracing::info!("ready");
 
     let mut docs = Documents::new(root.clone(), index.clone());
@@ -398,7 +489,6 @@ fn run_server() -> Result<()> {
         .map_or(2, std::num::NonZero::get)
         .clamp(2, 8);
     let workers = worker::Pool::new(worker_count, &completed_tx);
-    let mut requests = ReqQueue::<worker::Cancellation, ()>::default();
     let request_context = RequestContext {
         connection: &connection,
         workers: &workers,
@@ -427,7 +517,19 @@ fn run_server() -> Result<()> {
                         &bazel,
                         note,
                     )?,
-                    Message::Response(_) => {}
+                    Message::Response(response) => {
+                        if let Some(Outgoing::IndexProgress) =
+                            requests.outgoing.complete(response.id.clone())
+                        {
+                            if response.response_result.is_ok() {
+                                if let Some(progress) = &mut index_progress {
+                                    progress.created(&connection)?;
+                                }
+                            } else {
+                                index_progress = None;
+                            }
+                        }
+                    }
                 }
             }
             recv(completed_rx) -> completed => {
@@ -444,6 +546,14 @@ fn run_server() -> Result<()> {
                         }
                     }
                 }
+            }
+            recv(ready_rx) -> ready => {
+                if let Ok(ready) = ready
+                    && let Some(progress) = &mut index_progress
+                {
+                    progress.ready(&connection, ready)?;
+                }
+                ready_rx = crossbeam_channel::never();
             }
         }
     }
@@ -886,6 +996,32 @@ fn supports_definition_links(init: &InitializeParams) -> bool {
         .unwrap_or(false)
 }
 
+fn supports_work_done_progress(init: &InitializeParams) -> bool {
+    init.capabilities
+        .window
+        .as_ref()
+        .and_then(|window| window.work_done_progress)
+        .unwrap_or(false)
+}
+
+fn send_progress(
+    connection: &Connection,
+    token: &ProgressToken,
+    value: impl serde::Serialize,
+) -> Result<()> {
+    let params = ProgressParams {
+        token: token.clone(),
+        value: serde_json::to_value(value)?,
+    };
+    connection
+        .sender
+        .send(Message::Notification(lsp_server::Notification {
+            method: ProgressNotification::METHOD.to_string(),
+            params: serde_json::to_value(params)?,
+        }))?;
+    Ok(())
+}
+
 /// Narrow a link to a plain location, dropping the origin range with it.
 fn definition_response(links: Vec<LocationLink>, link_support: bool) -> Option<DefinitionResponse> {
     if links.is_empty() {
@@ -909,7 +1045,7 @@ fn definition_response(links: Vec<LocationLink>, link_support: bool) -> Option<D
 fn handle_notification(
     connection: &Connection,
     workers: &worker::Pool<Completed>,
-    requests: &mut ReqQueue<worker::Cancellation, ()>,
+    requests: &mut ReqQueue<worker::Cancellation, Outgoing>,
     docs: &mut Documents,
     bazel: &Bazel,
     note: lsp_server::Notification,

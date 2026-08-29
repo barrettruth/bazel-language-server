@@ -36,6 +36,14 @@ fn stdio_session_serves_navigation_and_diagnostics() {
 
     let label = "//lib/sub:sub_srcs";
     client.wait_workspace_symbol(label, label);
+    let indexed = client.wait_notification_matching("$/progress", |note| {
+        note["params"]["value"]["kind"] == "end"
+    });
+    assert!(
+        indexed["params"]["value"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("BUILD files"))
+    );
     let (line, character) = position(&text, label);
     let definition = client.request(
         "textDocument/definition",

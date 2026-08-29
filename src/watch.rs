@@ -119,6 +119,12 @@ pub struct Watch {
     thread: Option<JoinHandle<()>>,
 }
 
+pub struct Ready {
+    pub files: usize,
+    pub targets: usize,
+    pub elapsed: Duration,
+}
+
 impl Watch {
     /// Queue a full rebuild.
     pub fn reindex(&self) {
@@ -140,7 +146,12 @@ impl Drop for Watch {
 ///
 /// Manual reindexing remains available if watch registration fails.
 #[must_use]
-pub fn spawn(root: &Path, index: IndexHandle, bazel: Arc<Bazel>) -> Watch {
+pub fn spawn(
+    root: &Path,
+    index: IndexHandle,
+    bazel: Arc<Bazel>,
+    ready: crossbeam_channel::Sender<Ready>,
+) -> Watch {
     let (tx, rx) = channel();
     let watching = root.to_path_buf();
     let events = tx.clone();
@@ -157,7 +168,7 @@ pub fn spawn(root: &Path, index: IndexHandle, bazel: Arc<Bazel>) -> Watch {
                     None
                 }
             };
-            settle(&watching, &index, &bazel, &rx);
+            settle(&watching, &index, &bazel, &rx, &ready);
         })
         .expect("spawning the watch thread");
     Watch {
@@ -179,8 +190,21 @@ fn establish(root: &Path, tx: Sender<Wake>) -> Result<notify::RecommendedWatcher
 }
 
 /// Build once, then collapse each event burst into one update.
-fn settle(root: &Path, index: &IndexHandle, bazel: &Bazel, rx: &Receiver<Wake>) {
+fn settle(
+    root: &Path,
+    index: &IndexHandle,
+    bazel: &Bazel,
+    rx: &Receiver<Wake>,
+    ready: &crossbeam_channel::Sender<Ready>,
+) {
+    let started = std::time::Instant::now();
     rebuild(root, index, bazel, Invalidates::TARGETS, 0);
+    let snapshot = index.load_disk();
+    drop(ready.send(Ready {
+        files: snapshot.files.len(),
+        targets: snapshot.len(),
+        elapsed: started.elapsed(),
+    }));
     let mut nth = 0_u64;
     while let Ok(first) = rx.recv() {
         if matches!(first, Wake::Stop) {

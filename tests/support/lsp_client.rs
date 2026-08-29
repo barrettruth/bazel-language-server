@@ -207,6 +207,13 @@ impl Client {
                 .messages
                 .recv_timeout(remaining)
                 .unwrap_or_else(|err| panic!("language server response: {err}"));
+            if message.get("method").and_then(Value::as_str)
+                == Some("window/workDoneProgress/create")
+            {
+                let id = message["id"].clone();
+                self.send(&json!({"jsonrpc": "2.0", "id": id, "result": null}));
+                continue;
+            }
             if wanted(&message) {
                 return message;
             }
