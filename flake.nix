@@ -22,10 +22,12 @@
           pkgs.bazel-buildtools
           pkgs.biome
           pkgs.just
+          pkgs.mdx-language-server
           pkgs.nodejs_22
           pkgs.openssh
           pkgs.pnpm
           pkgs.rsync
+          pkgs.vtsls
         ];
       in
       {
