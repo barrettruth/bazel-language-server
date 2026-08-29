@@ -13,7 +13,7 @@
 //! and during a build that is the difference between a handful of events and a
 //! flood.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
@@ -33,41 +33,57 @@ use crate::index::IndexHandle;
 const SETTLE: Duration = Duration::from_millis(250);
 
 /// Which tiers a changed file can possibly affect.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
 struct Invalidates {
-    /// The target table, which is built from BUILD files and nothing else.
-    targets: bool,
+    full_targets: bool,
+    target_files: Vec<PathBuf>,
     /// What Bazel would say, which every file Bazel loads can change.
     graph: bool,
 }
 
 impl Invalidates {
     const NOTHING: Self = Self {
-        targets: false,
+        full_targets: false,
+        target_files: Vec::new(),
         graph: false,
     };
     const GRAPH: Self = Self {
-        targets: false,
+        full_targets: false,
+        target_files: Vec::new(),
         graph: true,
     };
     const TARGETS: Self = Self {
-        targets: true,
+        full_targets: true,
+        target_files: Vec::new(),
         graph: false,
     };
     const BOTH: Self = Self {
-        targets: true,
+        full_targets: true,
+        target_files: Vec::new(),
         graph: true,
     };
 
-    fn with(self, other: Self) -> Self {
+    fn file(path: &Path) -> Self {
         Self {
-            targets: self.targets || other.targets,
-            graph: self.graph || other.graph,
+            full_targets: false,
+            target_files: vec![path.to_path_buf()],
+            graph: true,
         }
     }
 
-    fn anything(self) -> bool {
-        self.targets || self.graph
+    fn with(mut self, other: Self) -> Self {
+        self.full_targets |= other.full_targets;
+        self.graph |= other.graph;
+        if self.full_targets {
+            self.target_files.clear();
+        } else {
+            self.target_files.extend(other.target_files);
+        }
+        self
+    }
+
+    fn anything(&self) -> bool {
+        self.full_targets || !self.target_files.is_empty() || self.graph
     }
 }
 
@@ -87,7 +103,8 @@ fn invalidated(path: &Path) -> Invalidates {
         return Invalidates::NOTHING;
     };
     match name {
-        "BUILD" | "BUILD.bazel" | ".bazelignore" => Invalidates::BOTH,
+        "BUILD" | "BUILD.bazel" => Invalidates::file(path),
+        ".bazelignore" => Invalidates::BOTH,
         "MODULE.bazel" | "MODULE.bazel.lock" | "WORKSPACE" | "WORKSPACE.bazel"
         | "WORKSPACE.bzlmod" | "REPO.bazel" | ".bazelrc" => Invalidates::GRAPH,
         _ if path.extension().is_some_and(|kind| kind == "bzl") => Invalidates::GRAPH,
@@ -252,6 +269,7 @@ fn wanted(root: &Path, event: &notify::Result<notify::Event>) -> Invalidates {
             tracing::debug!("the watcher dropped events; rebuilding everything");
             Invalidates::BOTH
         }
+        Ok(event) if changes_package_tree(event) => Invalidates::BOTH,
         Ok(event) => event
             .paths
             .iter()
@@ -266,12 +284,23 @@ fn wanted(root: &Path, event: &notify::Result<notify::Event>) -> Invalidates {
     }
 }
 
+fn changes_package_tree(event: &notify::Event) -> bool {
+    use notify::EventKind::{Create, Modify, Remove};
+    use notify::event::{CreateKind, ModifyKind, RemoveKind};
+
+    matches!(
+        event.kind,
+        Create(CreateKind::Folder) | Remove(RemoveKind::Folder)
+    ) || matches!(event.kind, Modify(ModifyKind::Name(_)))
+        && event.paths.iter().any(|path| path.is_dir())
+}
+
 /// Refresh whichever tiers the change could have reached.
 ///
 /// `nth` counts settled bursts for the life of the session, so a log says how
 /// often editing actually costs a rebuild rather than how long one takes.
 fn rebuild(root: &Path, index: &IndexHandle, bazel: &Bazel, reaches: Invalidates, nth: u64) {
-    if reaches.targets {
+    if reaches.full_targets {
         let started = std::time::Instant::now();
         let built = crate::index::build_static(root);
         let targets = built.len();
@@ -281,6 +310,21 @@ fn rebuild(root: &Path, index: &IndexHandle, bazel: &Bazel, reaches: Invalidates
             targets,
             ms = started.elapsed().as_millis(),
             "reindexed"
+        );
+    } else if !reaches.target_files.is_empty() {
+        let started = std::time::Instant::now();
+        let mut changed = reaches.target_files;
+        changed.sort_unstable();
+        changed.dedup();
+        let built = crate::index::update_static(root, &index.load_disk(), &changed);
+        let targets = built.len();
+        index.store_disk(built);
+        tracing::info!(
+            nth,
+            files = changed.len(),
+            targets,
+            ms = started.elapsed().as_millis(),
+            "updated static index"
         );
     } else {
         tracing::info!(nth, "the target table is untouched by this change");
@@ -298,13 +342,15 @@ mod tests {
     /// `.bazelignore` can move an entry in it.
     #[test]
     fn only_a_build_file_reaches_the_target_table() {
-        for path in ["/ws/lib/BUILD", "/ws/lib/BUILD.bazel", "/ws/.bazelignore"] {
-            assert_eq!(
-                invalidated(Path::new(path)),
-                Invalidates::BOTH,
-                "{path} reaches both tiers"
-            );
+        for path in ["/ws/lib/BUILD", "/ws/lib/BUILD.bazel"] {
+            let reaches = invalidated(Path::new(path));
+            assert!(reaches.graph);
+            assert_eq!(reaches.target_files, vec![PathBuf::from(path)]);
         }
+        assert_eq!(
+            invalidated(Path::new("/ws/.bazelignore")),
+            Invalidates::BOTH
+        );
     }
 
     /// Bazel loads these and the target table never reads them, so rebuilding
@@ -339,10 +385,14 @@ mod tests {
     fn a_burst_reaches_the_union_of_its_files() {
         let bzl = invalidated(Path::new("/ws/lib/defs.bzl"));
         let text = invalidated(Path::new("/ws/lib/a.txt"));
-        assert_eq!(bzl.with(text), Invalidates::GRAPH);
+        assert_eq!(bzl.clone().with(text.clone()), Invalidates::GRAPH);
+        let both = bzl
+            .clone()
+            .with(invalidated(Path::new("/ws/lib/BUILD.bazel")));
+        assert!(both.graph);
         assert_eq!(
-            bzl.with(invalidated(Path::new("/ws/lib/BUILD.bazel"))),
-            Invalidates::BOTH
+            both.target_files,
+            vec![PathBuf::from("/ws/lib/BUILD.bazel")]
         );
         assert!(!text.anything());
     }

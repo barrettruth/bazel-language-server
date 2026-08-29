@@ -72,11 +72,10 @@ pub struct Reference {
 }
 
 /// What one writer knows. Immutable once built; never mutated in place.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Tier {
-    /// How many BUILD files this was built from, including those that declare
-    /// nothing. A count rather than a list: the paths live on the entries.
-    pub files: u32,
+    /// BUILD files read into this tier, including files with no declarations.
+    pub files: FxHashSet<Arc<Path>>,
     /// Keyed by `//package:name`, the form a label resolves to.
     pub targets: FxHashMap<String, Target>,
     /// Every mention of a label in a rule-call argument, under the same key as
@@ -251,8 +250,8 @@ impl Index {
 
     /// How many BUILD files the walk over the disk read.
     #[must_use]
-    pub fn files(&self) -> u32 {
-        self.disk.files
+    pub fn files(&self) -> usize {
+        self.disk.files.len()
     }
 
     #[must_use]
@@ -293,6 +292,11 @@ impl IndexHandle {
 
     pub fn store_disk(&self, tier: Tier) {
         self.disk.store(Arc::new(tier));
+    }
+
+    #[must_use]
+    pub fn load_disk(&self) -> Arc<Tier> {
+        self.disk.load_full()
     }
 
     pub fn store_buffer(&self, tier: Tier) {
@@ -384,35 +388,57 @@ pub fn build_static(root: &Path) -> Tier {
         if !entry.file_type().is_file() {
             continue;
         }
-        let path = entry.path();
-        let Some((dialect, kind)) = classify(path, Some(root)) else {
-            continue;
-        };
-        if !matches!(kind, starlark_cst::FileKind::Build) {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        if collect_file(
-            root,
-            &Arc::from(path),
-            &parse(&text, dialect),
-            &text,
-            &mut index.targets,
-            &mut index.references,
-        ) {
-            index.files += 1;
-        }
+        collect_disk_file(root, entry.path(), &mut index);
     }
 
     tracing::info!(
-        files = index.files,
+        files = index.files.len(),
         targets = index.targets.len(),
         labels_referenced = index.references.len(),
         "built static index"
     );
     index
+}
+
+/// Replace the contributions of changed BUILD files in a published tier.
+#[must_use]
+pub fn update_static(root: &Path, current: &Tier, changed: &[std::path::PathBuf]) -> Tier {
+    let changed: FxHashSet<&Path> = changed.iter().map(std::path::PathBuf::as_path).collect();
+    let mut next = current.clone();
+    next.files.retain(|file| !changed.contains(file.as_ref()));
+    next.targets
+        .retain(|_, target| !changed.contains(target.file.as_ref()));
+    next.references.retain(|_, references| {
+        references.retain(|reference| !changed.contains(reference.file.as_ref()));
+        !references.is_empty()
+    });
+    for path in changed {
+        collect_disk_file(root, path, &mut next);
+    }
+    next
+}
+
+fn collect_disk_file(root: &Path, path: &Path, tier: &mut Tier) {
+    let Some((dialect, kind)) = classify(path, Some(root)) else {
+        return;
+    };
+    if !matches!(kind, starlark_cst::FileKind::Build) {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let path: Arc<Path> = Arc::from(path);
+    if collect_file(
+        root,
+        &path,
+        &parse(&text, dialect),
+        &text,
+        &mut tier.targets,
+        &mut tier.references,
+    ) {
+        tier.files.insert(path);
+    }
 }
 
 /// Everything one BUILD file contributes, appended to `targets` and
@@ -689,6 +715,74 @@ mod tests {
         // The reader that already had a snapshot is unaffected.
         assert_eq!(before.len(), 0);
         assert_eq!(handle.load().len(), 1);
+    }
+
+    #[test]
+    fn a_file_update_replaces_and_removes_its_entries() {
+        let root = std::env::temp_dir().join("bls-file-update-test");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let build = root.join("lib/BUILD.bazel");
+        std::fs::write(
+            &build,
+            "filegroup(name = \"old\", srcs = [\":dep\"])\nfilegroup(name = \"dep\")\n",
+        )
+        .unwrap();
+
+        let initial = build_static(&root);
+        assert!(initial.targets.contains_key("//lib:old"));
+        assert_eq!(initial.references["//lib:dep"].len(), 1);
+
+        std::fs::write(&build, "filegroup(name = \"new\")\n").unwrap();
+        let changed = update_static(&root, &initial, std::slice::from_ref(&build));
+        assert!(!changed.targets.contains_key("//lib:old"));
+        assert!(changed.targets.contains_key("//lib:new"));
+        assert!(!changed.references.contains_key("//lib:dep"));
+        assert_eq!(changed.files.len(), 1);
+
+        std::fs::remove_file(&build).unwrap();
+        let removed = update_static(&root, &changed, std::slice::from_ref(&build));
+        assert!(removed.targets.is_empty());
+        assert!(removed.files.is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    #[ignore = "requires BLS_WORKSPACE"]
+    fn probe_workspace_file_update() {
+        let root =
+            std::path::PathBuf::from(std::env::var_os("BLS_WORKSPACE").expect("BLS_WORKSPACE"));
+        let relative = std::env::var("BLS_PROBE_FILE")
+            .unwrap_or_else(|_| "environment/logging/BUILD.bazel".to_owned());
+        let path = root.join(&relative);
+        let initial = build_static(&root);
+        let before = (
+            initial.files.len(),
+            initial.targets.len(),
+            initial.references.values().map(Vec::len).sum::<usize>(),
+        );
+
+        let started = std::time::Instant::now();
+        let changed = update_static(&root, &initial, &[path]);
+        let elapsed = started.elapsed();
+        let after = (
+            changed.files.len(),
+            changed.targets.len(),
+            changed.references.values().map(Vec::len).sum::<usize>(),
+        );
+
+        assert_eq!(after, before);
+        println!(
+            "{}",
+            serde_json::json!({
+                "workspace": root,
+                "file": relative,
+                "files": after.0,
+                "targets": after.1,
+                "references": after.2,
+                "file_update_ms": elapsed.as_secs_f64() * 1_000.0,
+            })
+        );
     }
 
     /// The `bazel-<workspace>` convenience symlink points at the execroot,
