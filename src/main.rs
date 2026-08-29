@@ -504,7 +504,7 @@ fn run_server() -> Result<()> {
     let (completed_tx, completed_rx) = crossbeam_channel::bounded(worker_count * 8);
     let workers = worker::Pool::new(worker_count, &completed_tx);
     let diagnostics = worker::Latest::new(&completed_tx);
-    {
+    let session = (|| -> Result<()> {
         let request_context = RequestContext {
             connection: &connection,
             workers: &workers,
@@ -562,13 +562,16 @@ fn run_server() -> Result<()> {
             }
             }
         }
-    }
+        Ok(())
+    })();
 
     drop(completed_rx);
     drop(diagnostics);
     drop(workers);
     drop(connection);
-    io_threads.join()?;
+    let transport = io_threads.join();
+    session?;
+    transport?;
     tracing::info!("shut down");
     Ok(())
 }
