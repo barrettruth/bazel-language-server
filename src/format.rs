@@ -120,18 +120,26 @@ struct Point {
 /// syntax error already has the parser's diagnostics on it, and buildifier
 /// declines to lint what it cannot read.
 #[must_use]
-pub fn lint(text: &str, kind: FileKind) -> Vec<Diagnostic> {
-    lint_with(BUILDIFIER, text, kind)
+pub fn lint_cancelled(text: &str, kind: FileKind, cancellation: &Cancellation) -> Vec<Diagnostic> {
+    if cancellation.is_cancelled() {
+        return Vec::new();
+    }
+    lint_with(BUILDIFIER, text, kind, cancellation)
 }
 
-fn lint_with(binary: &str, text: &str, kind: FileKind) -> Vec<Diagnostic> {
+fn lint_with(
+    binary: &str,
+    text: &str,
+    kind: FileKind,
+    cancellation: &Cancellation,
+) -> Vec<Diagnostic> {
     let args = [
         format!("-type={}", file_type(kind)),
         "--mode=check".to_string(),
         "--lint=warn".to_string(),
         "--format=json".to_string(),
     ];
-    let output = match invoke(binary, &args, text, &Cancellation::default()) {
+    let output = match invoke(binary, &args, text, cancellation) {
         Ok(output) => output,
         Err(Unusable::Rejected(reason)) => {
             tracing::debug!("{binary} lint: {reason}");

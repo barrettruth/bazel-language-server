@@ -19,6 +19,7 @@ mod watch;
 mod worker;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::actor::Bazel;
 use crate::bazel::{BazelClient, BazelConfig};
@@ -44,11 +45,13 @@ use lsp_types::{
     WorkDoneProgressEnd, WorkspaceSymbolRequest,
 };
 
+const SERVER_CANCELLED: i32 = -32802;
+
 enum Completed {
     Response(Response),
     Diagnostics {
         uri: Uri,
-        version: i32,
+        document: Arc<Document>,
         diagnostics: Vec<lsp_types::Diagnostic>,
     },
 }
@@ -142,11 +145,12 @@ impl RequestContext<'_> {
         requests
             .incoming
             .register(request.id.clone(), cancellation.clone());
+        let queued_id = request.id.clone();
         let snapshot = docs.clone();
         let index = self.index.load();
         let root = self.root.map(Path::to_path_buf);
         let link_support = self.link_support;
-        self.workers.execute(move || {
+        let admitted = self.workers.execute(move || {
             let id = request.id.clone();
             let method = request.method.clone();
             if cancellation.is_cancelled() {
@@ -178,6 +182,16 @@ impl RequestContext<'_> {
             };
             Completed::Response(response)
         });
+        if !admitted {
+            requests.incoming.complete(&queued_id);
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_err(
+                    queued_id,
+                    SERVER_CANCELLED,
+                    "server request queue is full".to_owned(),
+                )))?;
+        }
         Ok(false)
     }
 }
@@ -489,6 +503,7 @@ fn run_server() -> Result<()> {
         .map_or(2, std::num::NonZero::get)
         .clamp(2, 8);
     let workers = worker::Pool::new(worker_count, &completed_tx);
+    let diagnostics = worker::Latest::new(&completed_tx);
     let request_context = RequestContext {
         connection: &connection,
         workers: &workers,
@@ -511,7 +526,7 @@ fn run_server() -> Result<()> {
                     }
                     Message::Notification(note) => handle_notification(
                         &connection,
-                        &workers,
+                        &diagnostics,
                         &mut requests,
                         &mut docs,
                         &bazel,
@@ -534,18 +549,7 @@ fn run_server() -> Result<()> {
             }
             recv(completed_rx) -> completed => {
                 let Ok(completed) = completed else { break };
-                match completed {
-                    Completed::Response(response) => {
-                        if requests.incoming.complete(&response.id).is_some() {
-                            connection.sender.send(Message::Response(response))?;
-                        }
-                    }
-                    Completed::Diagnostics { uri, version, diagnostics } => {
-                        if docs.get(&uri).is_some_and(|document| document.version() == version) {
-                            publish_diagnostics(&connection, uri, version, diagnostics)?;
-                        }
-                    }
-                }
+                handle_completed(&connection, &mut requests, &docs, completed)?;
             }
             recv(ready_rx) -> ready => {
                 if let Ok(ready) = ready
@@ -561,6 +565,30 @@ fn run_server() -> Result<()> {
     drop(connection);
     io_threads.join()?;
     tracing::info!("shut down");
+    Ok(())
+}
+
+fn handle_completed(
+    connection: &Connection,
+    requests: &mut ReqQueue<worker::Cancellation, Outgoing>,
+    docs: &Documents,
+    completed: Completed,
+) -> Result<()> {
+    match completed {
+        Completed::Response(response) => {
+            if requests.incoming.complete(&response.id).is_some() {
+                connection.sender.send(Message::Response(response))?;
+            }
+        }
+        Completed::Diagnostics {
+            uri,
+            document,
+            diagnostics,
+        } if docs.is_current(&uri, &document) => {
+            publish_diagnostics(connection, uri, document.version(), diagnostics)?;
+        }
+        Completed::Diagnostics { .. } => {}
+    }
     Ok(())
 }
 
@@ -1042,7 +1070,7 @@ fn definition_response(links: Vec<LocationLink>, link_support: bool) -> Option<D
 
 fn handle_notification(
     connection: &Connection,
-    workers: &worker::Pool<Completed>,
+    diagnostics: &worker::Latest<Uri, Completed>,
     requests: &mut ReqQueue<worker::Cancellation, Outgoing>,
     docs: &mut Documents,
     bazel: &Bazel,
@@ -1075,8 +1103,9 @@ fn handle_notification(
     }
 
     match apply(&note, docs) {
-        Ok(Applied::Changed(uri)) => schedule_diagnostics(connection, workers, docs, &uri)?,
+        Ok(Applied::Changed(uri)) => schedule_diagnostics(connection, diagnostics, docs, &uri)?,
         Ok(Applied::Closed { uri, version }) => {
+            diagnostics.cancel(&uri);
             publish_diagnostics(connection, uri, version, Vec::new())?;
         }
         Ok(Applied::None) => {}
@@ -1087,7 +1116,7 @@ fn handle_notification(
 
 fn schedule_diagnostics(
     connection: &Connection,
-    workers: &worker::Pool<Completed>,
+    diagnostics: &worker::Latest<Uri, Completed>,
     docs: &Documents,
     uri: &Uri,
 ) -> Result<()> {
@@ -1097,15 +1126,15 @@ fn schedule_diagnostics(
     let version = document.version();
     let syntax = handlers::syntax_diagnostics(document);
     let clean = syntax.is_empty();
+    diagnostics.cancel(uri);
     publish_diagnostics(connection, uri.clone(), version, syntax)?;
     if clean {
         let uri = uri.clone();
-        let text = document.text().to_owned();
-        let kind = document.kind();
-        workers.execute(move || Completed::Diagnostics {
+        let document = docs.shared(&uri).expect("the document scheduled above");
+        diagnostics.execute(uri.clone(), move |cancellation| Completed::Diagnostics {
             uri,
-            version,
-            diagnostics: format::lint(&text, kind),
+            diagnostics: format::lint_cancelled(document.text(), document.kind(), cancellation),
+            document,
         });
     }
     Ok(())

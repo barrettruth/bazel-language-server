@@ -60,6 +60,18 @@ impl Documents {
         self.texts.get(uri).map(Arc::as_ref)
     }
 
+    #[must_use]
+    pub fn shared(&self, uri: &Uri) -> Option<Arc<Document>> {
+        self.texts.get(uri).cloned()
+    }
+
+    #[must_use]
+    pub fn is_current(&self, uri: &Uri, document: &Arc<Document>) -> bool {
+        self.texts
+            .get(uri)
+            .is_some_and(|current| Arc::ptr_eq(current, document))
+    }
+
     /// Hold `text` as the current contents of `uri`, opened or edited.
     pub fn set(&mut self, uri: Uri, path: PathBuf, version: i32, text: String) {
         let document = Document::versioned(path, version, text, self.root.as_deref());
