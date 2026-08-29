@@ -303,15 +303,18 @@ fn wanted(root: &Path, event: &notify::Result<notify::Event>) -> Invalidates {
             tracing::debug!("the watcher dropped events; rebuilding everything");
             Invalidates::BOTH
         }
-        Ok(event) if changes_package_tree(event) => Invalidates::BOTH,
         Ok(event) => {
             let ignored = crate::index::read_bazelignore(root);
+            let relevant = |path: &Path| {
+                !excluded(root, path) && !crate::index::is_ignored(root, path, &ignored)
+            };
+            if changes_package_tree(event) && event.paths.iter().any(|path| relevant(path)) {
+                return Invalidates::BOTH;
+            }
             event
                 .paths
                 .iter()
-                .filter(|path| {
-                    !excluded(root, path) && !crate::index::is_ignored(root, path, &ignored)
-                })
+                .filter(|path| relevant(path))
                 .fold(Invalidates::NOTHING, |reaches, path| {
                     reaches.with(invalidated(path))
                 })
@@ -456,6 +459,10 @@ mod tests {
         let event =
             notify::Event::new(notify::EventKind::Any).add_path(root.join("ignored/BUILD.bazel"));
         assert_eq!(wanted(&root, &Ok(event)), Invalidates::NOTHING);
+        let directory =
+            notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::Folder))
+                .add_path(root.join("ignored/generated"));
+        assert_eq!(wanted(&root, &Ok(directory)), Invalidates::NOTHING);
         std::fs::remove_dir_all(root).ok();
     }
 
