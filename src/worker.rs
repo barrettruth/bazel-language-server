@@ -1,8 +1,52 @@
 //! Bounded execution for work that must not stall the protocol loop.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use shared_child::SharedChild;
+
 type Job<T> = Box<dyn FnOnce() -> T + Send>;
+
+#[derive(Clone, Default)]
+pub struct Cancellation(Arc<CancellationState>);
+
+#[derive(Default)]
+struct CancellationState {
+    cancelled: AtomicBool,
+    process: Mutex<Option<Arc<SharedChild>>>,
+}
+
+impl Cancellation {
+    pub fn cancel(&self) {
+        self.0.cancelled.store(true, Ordering::Release);
+        if let Ok(process) = self.0.process.lock()
+            && let Some(process) = process.as_ref()
+        {
+            drop(process.kill());
+        }
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0.cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn track(&self, process: &Arc<SharedChild>) {
+        if let Ok(mut running) = self.0.process.lock() {
+            *running = Some(Arc::clone(process));
+        }
+        if self.is_cancelled() {
+            drop(process.kill());
+        }
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut running) = self.0.process.lock() {
+            running.take();
+        }
+    }
+}
 
 pub struct Pool<T> {
     jobs: Option<crossbeam_channel::Sender<Job<T>>>,
@@ -48,5 +92,29 @@ impl<T> Drop for Pool<T> {
         for thread in self.threads.drain(..) {
             drop(thread.join());
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::process::{Command, Stdio};
+
+    use super::*;
+
+    #[test]
+    fn cancellation_terminates_a_tracked_process() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "exec sleep 10"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = Arc::new(SharedChild::spawn(&mut command).unwrap());
+        let cancellation = Cancellation::default();
+        cancellation.track(&child);
+        cancellation.cancel();
+
+        let status = child.wait().unwrap();
+        assert!(!status.success());
     }
 }

@@ -121,7 +121,7 @@ fn cancellation_is_answered_while_formatting_runs() {
     );
     client.notify("$/cancelRequest", &json!({"id": request}));
     let response = client.wait_response(request);
-    assert!(response["error"].is_object(), "{response}");
+    assert_eq!(response["error"]["code"], -32800, "{response}");
 
     client.notify(
         "textDocument/didClose",

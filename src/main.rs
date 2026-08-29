@@ -64,7 +64,7 @@ struct RequestContext<'a> {
 impl RequestContext<'_> {
     fn dispatch(
         &self,
-        requests: &mut ReqQueue<(), ()>,
+        requests: &mut ReqQueue<worker::Cancellation, ()>,
         docs: &Documents,
         request: lsp_server::Request,
     ) -> Result<bool> {
@@ -82,7 +82,10 @@ impl RequestContext<'_> {
             return Ok(false);
         }
 
-        requests.incoming.register(request.id.clone(), ());
+        let cancellation = worker::Cancellation::default();
+        requests
+            .incoming
+            .register(request.id.clone(), cancellation.clone());
         let snapshot = docs.clone();
         let index = self.index.clone();
         let root = self.root.map(Path::to_path_buf);
@@ -90,8 +93,22 @@ impl RequestContext<'_> {
         self.workers.execute(move || {
             let id = request.id.clone();
             let method = request.method.clone();
+            if cancellation.is_cancelled() {
+                return Completed::Response(Response::new_err(
+                    id,
+                    lsp_server::ErrorCode::RequestCanceled as i32,
+                    "canceled by client".to_owned(),
+                ));
+            }
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                respond(&request, &snapshot, &index, root.as_deref(), link_support)
+                respond(
+                    &request,
+                    &snapshot,
+                    &index,
+                    root.as_deref(),
+                    link_support,
+                    &cancellation,
+                )
             }));
             let response = if let Ok(result) = result {
                 request_result(&request, result)
@@ -381,7 +398,7 @@ fn run_server() -> Result<()> {
         .map_or(2, std::num::NonZero::get)
         .clamp(2, 8);
     let workers = worker::Pool::new(worker_count, &completed_tx);
-    let mut requests = ReqQueue::<(), ()>::default();
+    let mut requests = ReqQueue::<worker::Cancellation, ()>::default();
     let request_context = RequestContext {
         connection: &connection,
         workers: &workers,
@@ -443,6 +460,7 @@ fn respond(
     index: &IndexHandle,
     root: Option<&Path>,
     link_support: bool,
+    cancellation: &worker::Cancellation,
 ) -> Result<Response> {
     let id = request.id.clone();
     let method: LspRequestMethod<'_> = request.method.as_str().into();
@@ -457,7 +475,7 @@ fn respond(
     } else if method == HoverRequest::METHOD {
         Response::new_ok(id, hover(request, docs, index, root)?)
     } else if method == DocumentFormattingRequest::METHOD {
-        Response::new_ok(id, formatting(request, docs)?)
+        Response::new_ok(id, formatting(request, docs, cancellation)?)
     } else if method == RenameRequest::METHOD {
         Response::new_ok(id, rename(request, docs, index, root)?)
     } else if method == PrepareRenameRequest::METHOD {
@@ -537,14 +555,18 @@ fn hover(
 /// A document the server does not hold is not an error — the client may format
 /// a file it never opened — and neither is a buildifier that is absent or
 /// unhappy. Both are no edits; only the second says so on stderr.
-fn formatting(request: &lsp_server::Request, docs: &Documents) -> Result<Vec<TextEdit>> {
+fn formatting(
+    request: &lsp_server::Request,
+    docs: &Documents,
+    cancellation: &worker::Cancellation,
+) -> Result<Vec<TextEdit>> {
     let params: lsp_types::DocumentFormattingParams =
         serde_json::from_value(request.params.clone())?;
     let uri = params.text_document.uri;
     let Some(document) = docs.get(&uri) else {
         return Ok(Vec::new());
     };
-    let edits = format::format(document.text(), document.kind())?;
+    let edits = format::format_cancelled(document.text(), document.kind(), cancellation)?;
     tracing::debug!(?uri, count = edits.len(), "formatting");
     Ok(edits)
 }
@@ -887,7 +909,7 @@ fn definition_response(links: Vec<LocationLink>, link_support: bool) -> Option<D
 fn handle_notification(
     connection: &Connection,
     workers: &worker::Pool<Completed>,
-    requests: &mut ReqQueue<(), ()>,
+    requests: &mut ReqQueue<worker::Cancellation, ()>,
     docs: &mut Documents,
     bazel: &Bazel,
     note: lsp_server::Notification,
@@ -899,7 +921,13 @@ fn handle_notification(
             lsp_types::Id::Int(id) => RequestId::from(id),
             lsp_types::Id::String(id) => RequestId::from(id),
         };
-        if let Some(response) = requests.incoming.cancel(id) {
+        if let Some(cancellation) = requests.incoming.complete(&id) {
+            cancellation.cancel();
+            let response = Response::new_err(
+                id,
+                lsp_server::ErrorCode::RequestCanceled as i32,
+                "canceled by client".to_owned(),
+            );
             connection.sender.send(Message::Response(response))?;
         }
         return Ok(());

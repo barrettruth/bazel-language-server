@@ -5,15 +5,17 @@
 
 use std::io::{Read, Write};
 use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, Position, Range, TextEdit};
 use serde::Deserialize;
+use shared_child::SharedChild;
 use starlark_cst::FileKind;
 
 use crate::line_index::LineIndex;
+use crate::worker::Cancellation;
 
 /// Looked up on `PATH`, like `bazel` is.
 const BUILDIFIER: &str = "buildifier";
@@ -25,14 +27,28 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 ///
 /// Empty for already-formatted or rejected input; errors mean the tool itself
 /// could not be used.
+#[cfg(test)]
 pub fn format(text: &str, kind: FileKind) -> Result<Vec<TextEdit>> {
-    format_with(BUILDIFIER, text, kind)
+    format_cancelled(text, kind, &Cancellation::default())
+}
+
+pub fn format_cancelled(
+    text: &str,
+    kind: FileKind,
+    cancellation: &Cancellation,
+) -> Result<Vec<TextEdit>> {
+    format_with(BUILDIFIER, text, kind, cancellation)
 }
 
 /// `format`, against a named binary, so the absent-formatter path is reachable
 /// from a test on a machine that has one.
-fn format_with(binary: &str, text: &str, kind: FileKind) -> Result<Vec<TextEdit>> {
-    let formatted = match run(binary, text, file_type(kind)) {
+fn format_with(
+    binary: &str,
+    text: &str,
+    kind: FileKind,
+    cancellation: &Cancellation,
+) -> Result<Vec<TextEdit>> {
+    let formatted = match run(binary, text, file_type(kind), cancellation) {
         Ok(formatted) => formatted,
         Err(Unusable::Rejected(reason)) => {
             tracing::debug!("{binary} refused the buffer: {reason}");
@@ -115,7 +131,7 @@ fn lint_with(binary: &str, text: &str, kind: FileKind) -> Vec<Diagnostic> {
         "--lint=warn".to_string(),
         "--format=json".to_string(),
     ];
-    let output = match invoke(binary, &args, text) {
+    let output = match invoke(binary, &args, text, &Cancellation::default()) {
         Ok(output) => output,
         Err(Unusable::Rejected(reason)) => {
             tracing::debug!("{binary} lint: {reason}");
@@ -226,8 +242,13 @@ struct Output {
     success: bool,
 }
 
-fn run(binary: &str, text: &str, file_type: &str) -> std::result::Result<String, Unusable> {
-    let output = invoke(binary, &[format!("-type={file_type}")], text)?;
+fn run(
+    binary: &str,
+    text: &str,
+    file_type: &str,
+    cancellation: &Cancellation,
+) -> std::result::Result<String, Unusable> {
+    let output = invoke(binary, &[format!("-type={file_type}")], text, cancellation)?;
     if !output.success {
         let reason = output.stderr.trim();
         return Err(Unusable::Rejected(if reason.is_empty() {
@@ -239,23 +260,32 @@ fn run(binary: &str, text: &str, file_type: &str) -> std::result::Result<String,
     Ok(output.stdout)
 }
 
-fn invoke(binary: &str, args: &[String], text: &str) -> std::result::Result<Output, Unusable> {
+fn invoke(
+    binary: &str,
+    args: &[String],
+    text: &str,
+    cancellation: &Cancellation,
+) -> std::result::Result<Output, Unusable> {
     // Every stream is a pipe. An inherited stdout would put the child's bytes
     // in the middle of an LSP frame, and the client would read it as us.
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("running `{binary}`"))
-        .map_err(Unusable::Broken)?;
+        .stderr(Stdio::piped());
+    let child = Arc::new(
+        SharedChild::spawn(&mut command)
+            .with_context(|| format!("running `{binary}`"))
+            .map_err(Unusable::Broken)?,
+    );
+    cancellation.track(&child);
+    let _tracked = Tracked(cancellation);
 
     let streams = child
-        .stdin
-        .take()
-        .zip(child.stdout.take())
-        .zip(child.stderr.take())
+        .take_stdin()
+        .zip(child.take_stdout())
+        .zip(child.take_stderr())
         .context("the child's pipes")
         .map_err(Unusable::Broken)?;
     let ((stdin, stdout), stderr) = streams;
@@ -271,7 +301,7 @@ fn invoke(binary: &str, args: &[String], text: &str) -> std::result::Result<Outp
     if pumped.is_err() {
         // The request is already lost; take the process with it rather than
         // leave it holding a thread and a set of pipes.
-        child.kill().ok();
+        drop(child.kill());
     }
     let status = child
         .wait()
@@ -297,6 +327,14 @@ fn invoke(binary: &str, args: &[String], text: &str) -> std::result::Result<Outp
         },
         success: status.success(),
     })
+}
+
+struct Tracked<'a>(&'a Cancellation);
+
+impl Drop for Tracked<'_> {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
 }
 
 /// Feed the child and collect what it says.
@@ -385,6 +423,7 @@ mod tests {
             "buildifier-that-is-not-installed",
             "cc_library(name=\"x\")\n",
             FileKind::Build,
+            &Cancellation::default(),
         )
         .expect_err("a missing binary cannot format");
         assert!(
