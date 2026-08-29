@@ -169,12 +169,12 @@ fn serve(
                 };
                 let Some(refreshed) = refresh(client, running, rx, &mut pending) else {
                     tracing::debug!("discarded a superseded Bazel refresh");
-                    preserve_refresh_after_runs(&mut pending);
+                    preserve_refresh(&mut pending);
                     continue;
                 };
                 if !publish_current(refreshed, running, rx, &mut pending, index) {
                     tracing::debug!("discarded a superseded Bazel refresh");
-                    preserve_refresh_after_runs(&mut pending);
+                    preserve_refresh(&mut pending);
                 }
             }
             Message::Run { verb, label } => {
@@ -356,17 +356,11 @@ fn drain(rx: &Receiver<Message>, pending: &mut VecDeque<Message>) {
     coalesce_refreshes(pending);
 }
 
-fn preserve_refresh_after_runs(pending: &mut VecDeque<Message>) {
-    let has_run = pending
+fn preserve_refresh(pending: &mut VecDeque<Message>) {
+    let another_refresh_will_follow = pending
         .iter()
-        .any(|message| matches!(message, Message::Run { .. }));
-    let another_refresh_will_follow = pending.iter().any(|message| {
-        matches!(
-            message,
-            Message::Configure(_) | Message::Refresh | Message::Stop
-        )
-    });
-    if has_run && !another_refresh_will_follow {
+        .any(|message| matches!(message, Message::Refresh | Message::Stop));
+    if !another_refresh_will_follow {
         pending.push_back(Message::Refresh);
     }
 }
@@ -451,14 +445,11 @@ mod tests {
     }
 
     #[test]
-    fn a_run_that_supersedes_refresh_preserves_one_refresh() {
-        let mut pending = VecDeque::from([Message::Run {
-            verb: "build".to_owned(),
-            label: "//:one".to_owned(),
-        }]);
-        preserve_refresh_after_runs(&mut pending);
+    fn supersession_preserves_one_refresh() {
+        let mut pending = VecDeque::from([Message::Configure(BazelConfig::default())]);
+        preserve_refresh(&mut pending);
         assert_eq!(pending.len(), 2);
-        assert!(matches!(pending[0], Message::Run { .. }));
+        assert!(matches!(pending[0], Message::Configure(_)));
         assert!(matches!(pending[1], Message::Refresh));
     }
 }
