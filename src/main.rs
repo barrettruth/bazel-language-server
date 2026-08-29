@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use crate::actor::Bazel;
 use crate::bazel::{BazelClient, BazelConfig};
 use crate::document::{Document, Documents};
-use crate::index::IndexHandle;
+use crate::index::{Index, IndexHandle};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use lsp_server::{Connection, Message, ReqQueue, RequestId, Response};
@@ -143,7 +143,7 @@ impl RequestContext<'_> {
             .incoming
             .register(request.id.clone(), cancellation.clone());
         let snapshot = docs.clone();
-        let index = self.index.clone();
+        let index = self.index.load();
         let root = self.root.map(Path::to_path_buf);
         let link_support = self.link_support;
         self.workers.execute(move || {
@@ -567,7 +567,7 @@ fn run_server() -> Result<()> {
 fn respond(
     request: &lsp_server::Request,
     docs: &Documents,
-    index: &IndexHandle,
+    index: &Index,
     root: Option<&Path>,
     link_support: bool,
     cancellation: &worker::Cancellation,
@@ -620,7 +620,7 @@ fn respond(
 fn document_highlight(
     request: &lsp_server::Request,
     docs: &Documents,
-    index: &IndexHandle,
+    index: &Index,
     root: Option<&Path>,
 ) -> Result<Vec<lsp_types::DocumentHighlight>> {
     let params: lsp_types::DocumentHighlightParams =
@@ -630,7 +630,7 @@ fn document_highlight(
     let (Some(document), Some(root)) = (docs.get(&uri), root) else {
         return Ok(Vec::new());
     };
-    let highlights = handlers::document_highlight(document, root, &index.load(), position.position);
+    let highlights = handlers::document_highlight(document, root, index, position.position);
     tracing::debug!(?uri, count = highlights.len(), "documentHighlight");
     Ok(highlights)
 }
@@ -642,7 +642,7 @@ fn document_highlight(
 fn hover(
     request: &lsp_server::Request,
     docs: &Documents,
-    index: &IndexHandle,
+    index: &Index,
     root: Option<&Path>,
 ) -> Result<Option<lsp_types::Hover>> {
     let params: lsp_types::HoverParams = serde_json::from_value(request.params.clone())?;
@@ -651,7 +651,7 @@ fn hover(
     let (Some(document), Some(root)) = (docs.get(&uri), root) else {
         return Ok(None);
     };
-    let card = handlers::hover(document, root, &index.load(), position.position);
+    let card = handlers::hover(document, root, index, position.position);
     tracing::debug!(?uri, answered = card.is_some(), "hover");
     Ok(card)
 }
@@ -699,7 +699,7 @@ fn document_symbols(
 fn definition(
     request: &lsp_server::Request,
     docs: &Documents,
-    index: &IndexHandle,
+    index: &Index,
     root: Option<&Path>,
     link_support: bool,
 ) -> Result<Option<DefinitionResponse>> {
@@ -708,7 +708,7 @@ fn definition(
     let uri = position.text_document.uri;
     let links = match (docs.get(&uri), root) {
         (Some(document), Some(root)) => {
-            handlers::definition(document, root, &index.load(), position.position)
+            handlers::definition(document, root, index, position.position)
         }
         _ => Vec::new(),
     };
@@ -720,7 +720,7 @@ fn definition(
 fn references(
     request: &lsp_server::Request,
     docs: &Documents,
-    index: &IndexHandle,
+    index: &Index,
     root: Option<&Path>,
 ) -> Result<Vec<Location>> {
     let params: lsp_types::ReferenceParams = serde_json::from_value(request.params.clone())?;
@@ -730,7 +730,7 @@ fn references(
         (Some(document), Some(root)) => handlers::references(
             document,
             root,
-            &index.load(),
+            index,
             position.position,
             params.context.include_declaration,
         ),
@@ -743,10 +743,10 @@ fn references(
 /// Every target in the workspace matching a query.
 fn workspace_symbols(
     request: &lsp_server::Request,
-    index: &IndexHandle,
+    index: &Index,
 ) -> Result<Vec<lsp_types::WorkspaceSymbol>> {
     let params: lsp_types::WorkspaceSymbolParams = serde_json::from_value(request.params.clone())?;
-    let symbols = handlers::workspace_symbols(&index.load(), &params.query);
+    let symbols = handlers::workspace_symbols(index, &params.query);
     tracing::debug!(
         query = params.query,
         count = symbols.len(),
@@ -759,15 +759,13 @@ fn workspace_symbols(
 fn inlay_hints(
     request: &lsp_server::Request,
     docs: &Documents,
-    index: &IndexHandle,
+    index: &Index,
     root: Option<&Path>,
 ) -> Result<Vec<lsp_types::InlayHint>> {
     let params: lsp_types::InlayHintParams = serde_json::from_value(request.params.clone())?;
     let uri = params.text_document.uri;
     let hints = match (docs.get(&uri), root) {
-        (Some(document), Some(root)) => {
-            handlers::inlay_hints(document, root, &index.load(), params.range)
-        }
+        (Some(document), Some(root)) => handlers::inlay_hints(document, root, index, params.range),
         _ => Vec::new(),
     };
     tracing::debug!(?uri, count = hints.len(), "inlayHint");
@@ -888,13 +886,13 @@ fn semantic_tokens(
 fn document_links(
     request: &lsp_server::Request,
     docs: &Documents,
-    index: &IndexHandle,
+    index: &Index,
     root: Option<&Path>,
 ) -> Result<Vec<lsp_types::DocumentLink>> {
     let params: lsp_types::DocumentLinkParams = serde_json::from_value(request.params.clone())?;
     let uri = params.text_document.uri;
     let links = match (docs.get(&uri), root) {
-        (Some(document), Some(root)) => handlers::document_links(document, root, &index.load()),
+        (Some(document), Some(root)) => handlers::document_links(document, root, index),
         _ => Vec::new(),
     };
     tracing::debug!(?uri, count = links.len(), "documentLink");
@@ -910,7 +908,7 @@ fn document_links(
 fn rename(
     request: &lsp_server::Request,
     docs: &Documents,
-    index: &IndexHandle,
+    index: &Index,
     root: Option<&Path>,
 ) -> Result<Option<lsp_types::WorkspaceEdit>> {
     let params: lsp_types::RenameParams = serde_json::from_value(request.params.clone())?;
@@ -922,7 +920,7 @@ fn rename(
     let edit = handlers::rename(
         document,
         root,
-        &index.load(),
+        index,
         docs,
         position.position,
         &params.new_name,
@@ -936,7 +934,7 @@ fn rename(
 fn prepare_rename(
     request: &lsp_server::Request,
     docs: &Documents,
-    index: &IndexHandle,
+    index: &Index,
     root: Option<&Path>,
 ) -> Result<Option<PrepareRenameResult>> {
     let params: lsp_types::PrepareRenameParams = serde_json::from_value(request.params.clone())?;
@@ -945,7 +943,7 @@ fn prepare_rename(
     let (Some(document), Some(root)) = (docs.get(&uri), root) else {
         return Ok(None);
     };
-    let range = handlers::prepare_rename(document, root, &index.load(), position.position);
+    let range = handlers::prepare_rename(document, root, index, position.position);
     tracing::debug!(?uri, renameable = range.is_some(), "prepareRename");
     Ok(range.map(PrepareRenameResult::Range))
 }
