@@ -36,7 +36,10 @@ vim.lsp.enable('bazel_ls')
 
 It handles `BUILD`, `BUILD.bazel`, `*.bzl`, `MODULE.bazel`, `WORKSPACE` and
 `*.scl`. Bazel itself is optional: the target index is parsed from BUILD files,
-so the server answers without a Bazel process and without a build.
+so the server answers without a Bazel process and without a build. Workspace
+indexing runs after startup; open buffers remain usable while the initial
+snapshot is being built, and later BUILD-file changes replace only that file's
+entries.
 
 Where Bazel is present it adds two things a parser cannot reach. Targets a
 legacy macro names at evaluation time become navigable, reported at the macro
@@ -86,6 +89,16 @@ bazel-language-server index path/to/workspace
 bazel-language-server doctor path/to/workspace
 ```
 
+### Workspace validation
+
+The repository includes a release-mode LSP probe for large workspaces. It
+reports JSON timings for startup responsiveness, static-index readiness,
+navigation, a large generated BUILD file and single-file index replacement.
+
+```sh
+nix develop -c just validate-workspace /path/to/workspace
+```
+
 ## Features
 
 - [x] **Diagnostics** — syntax errors, reported per keystroke against a
@@ -117,10 +130,12 @@ bazel-language-server doctor path/to/workspace
 - [x] **Selection ranges** — expand the selection along the syntax tree
 - [ ] **Workspace diagnostics** — the pull model, so unresolved labels can be
       reported repository-wide rather than per open file
-- [x] **Watched-file refresh** — reindex when BUILD files change on disk
+- [x] **Watched-file refresh** — replace changed BUILD files and rebuild on
+      package-topology changes
 - [ ] **File-rename edits** — rewrite labels when a file or package moves
 - [x] **Execute command** — run a `bazel` invocation the code lens offers
-- [ ] **Incremental sync** — `didChange` ranges rather than whole documents
+- [x] **Incremental sync** — ordered UTF-16 `didChange` ranges and versioned
+      diagnostics
 - [ ] **`.bazelrc`** — full LSP semantics, including completion, hover and
       unknown-flag diagnostics from `bazel help flags-as-proto`, version-exact
       for the user's own binary

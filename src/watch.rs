@@ -1,17 +1,4 @@
-//! One recursive watch over the workspace.
-//!
-//! Exactly one, on the root. Registering a watch per directory is the shape
-//! that breaks: at 4,096 directories setup takes 72 s and is quadratic, and at
-//! 4,100 every call still returns `Ok(())` while no event is ever delivered
-//! again, because macOS `FSEvents` spends a file descriptor per stream path
-//! against `RLIMIT_NOFILE`. One recursive watch over a 74k-package tree is
-//! 0.002 s and reaches the deepest package in 15.8 ms.
-//!
-//! We own this rather than registering `workspace/didChangeWatchedFiles`
-//! because `DidChangeWatchedFilesRegistrationOptions` carries watchers and no
-//! exclude, so "everything but `bazel-out`" cannot be said in the protocol —
-//! and during a build that is the difference between a handful of events and a
-//! flood.
+//! One recursive workspace watch, with Bazel output trees excluded.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,11 +12,7 @@ use notify::{RecursiveMode, Watcher};
 use crate::actor::Bazel;
 use crate::index::IndexHandle;
 
-/// How long a burst may keep arriving before the rebuild starts.
-///
-/// A branch switch rewrites thousands of files and a save rewrites one; both
-/// should cost a single rebuild. Long enough to swallow the first, short enough
-/// that the second feels immediate.
+/// Debounce window for filesystem bursts.
 const SETTLE: Duration = Duration::from_millis(250);
 
 /// Which tiers a changed file can possibly affect.
@@ -87,17 +70,7 @@ impl Invalidates {
     }
 }
 
-/// What a change to `path` can reach.
-///
-/// `build_static` skips every file whose kind is not `Build`
-/// (`crate::index`), so a `.bzl` edit cannot move a single entry in the target
-/// table no matter what the macro inside it does — the table records what a
-/// BUILD file literally declares, and only Bazel evaluates the rest. Rebuilding
-/// it anyway costs ~1.4 s on a large repo to arrive at the identical answer.
-///
-/// `.bazelignore` is the exception among the non-BUILD files: it decides which
-/// directories are packages at all, so it changes what the walk may even look
-/// at.
+/// Classify a change by the index tiers it can affect.
 fn invalidated(path: &Path) -> Invalidates {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return Invalidates::NOTHING;
@@ -112,13 +85,7 @@ fn invalidated(path: &Path) -> Invalidates {
     }
 }
 
-/// Whether a path lies somewhere the index never looks.
-///
-/// The `bazel-*` convenience symlinks point into the output base, whose
-/// symlink forest re-enters the source tree — following them finds 94,118
-/// BUILD files in a tree that has 74,001. They exist only at the root, so the
-/// check is depth-scoped, and a workspace directory of its own called
-/// `bazel-tools` keeps its targets.
+/// Whether a path lies in metadata or a root-level Bazel output tree.
 fn excluded(root: &Path, path: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return true;
@@ -153,10 +120,7 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// Rebuild both tiers, whatever the watcher has or has not noticed.
-    ///
-    /// Returns without waiting: the rebuild is 0.72 s at 20k packages and
-    /// invariant 1 does not care whose request it is.
+    /// Queue a full rebuild.
     pub fn reindex(&self) {
         tracing::info!("reindexing on request");
         drop(self.tx.send(Wake::Manual));
@@ -172,13 +136,9 @@ impl Drop for Watch {
     }
 }
 
-/// Rebuild `root`'s index on demand, and whenever something it reads changes.
+/// Start background indexing and filesystem refresh for `root`.
 ///
-/// **The thread starts even when the watch does not.** A failed watch is
-/// exactly the situation the manual reindex exists for, so making the thread
-/// conditional on the watcher would remove the escape hatch precisely when it
-/// is needed. A server with no watch is one that reindexes only when asked,
-/// which is degraded and usable rather than degraded and stuck.
+/// Manual reindexing remains available if watch registration fails.
 #[must_use]
 pub fn spawn(root: &Path, index: IndexHandle, bazel: Arc<Bazel>) -> Watch {
     let (tx, rx) = channel();
@@ -218,7 +178,7 @@ fn establish(root: &Path, tx: Sender<Wake>) -> Result<notify::RecommendedWatcher
     Ok(watcher)
 }
 
-/// Collapse a burst of events into one rebuild.
+/// Build once, then collapse each event burst into one update.
 fn settle(root: &Path, index: &IndexHandle, bazel: &Bazel, rx: &Receiver<Wake>) {
     rebuild(root, index, bazel, Invalidates::TARGETS, 0);
     let mut nth = 0_u64;
@@ -230,8 +190,6 @@ fn settle(root: &Path, index: &IndexHandle, bazel: &Bazel, rx: &Receiver<Wake>) 
         if !reaches.anything() {
             continue;
         }
-        // Everything still arriving is part of the same edit, checkout or
-        // build, and the tiers it reaches are the union of what it touched.
         loop {
             match rx.recv_timeout(SETTLE) {
                 Ok(Wake::Stop) | Err(RecvTimeoutError::Disconnected) => return,
@@ -245,10 +203,6 @@ fn settle(root: &Path, index: &IndexHandle, bazel: &Bazel, rx: &Receiver<Wake>) 
 }
 
 /// Which tiers a wake reaches.
-///
-/// A manual reindex reaches everything by definition: it is asked for when the
-/// watcher is not trusted, so believing the watcher about what changed would
-/// defeat it.
 fn reached(root: &Path, wake: &Wake) -> Invalidates {
     match wake {
         Wake::Manual => Invalidates::BOTH,
@@ -257,12 +211,8 @@ fn reached(root: &Path, wake: &Wake) -> Invalidates {
     }
 }
 
-/// Whether an event should cost a rebuild.
-///
-/// `need_rescan` is the backend saying it dropped events — `FSEvents`'
-/// `MustScanSubDirs` and its two dropped flags, inotify's `IN_Q_OVERFLOW`,
-/// the Windows overflow. What was lost is unknowable, so the answer is to
-/// rebuild everything, and not asking is a silent staleness bug.
+/// Map backend events to index invalidations. Dropped events require a full
+/// rebuild because their paths are unknown.
 fn wanted(root: &Path, event: &notify::Result<notify::Event>) -> Invalidates {
     match event {
         Ok(event) if event.need_rescan() => {
@@ -295,10 +245,7 @@ fn changes_package_tree(event: &notify::Event) -> bool {
         && event.paths.iter().any(|path| path.is_dir())
 }
 
-/// Refresh whichever tiers the change could have reached.
-///
-/// `nth` counts settled bursts for the life of the session, so a log says how
-/// often editing actually costs a rebuild rather than how long one takes.
+/// Refresh the affected tiers.
 fn rebuild(root: &Path, index: &IndexHandle, bazel: &Bazel, reaches: Invalidates, nth: u64) {
     if reaches.full_targets {
         let started = std::time::Instant::now();
@@ -338,8 +285,6 @@ fn rebuild(root: &Path, index: &IndexHandle, bazel: &Bazel, reaches: Invalidates
 mod tests {
     use super::*;
 
-    /// The target table is built from BUILD files alone, so only they and
-    /// `.bazelignore` can move an entry in it.
     #[test]
     fn only_a_build_file_reaches_the_target_table() {
         for path in ["/ws/lib/BUILD", "/ws/lib/BUILD.bazel"] {
@@ -353,8 +298,6 @@ mod tests {
         );
     }
 
-    /// Bazel loads these and the target table never reads them, so rebuilding
-    /// it would spend ~1.4 s arriving at the identical answer.
     #[test]
     fn what_only_bazel_reads_refreshes_only_the_graph() {
         for path in [
@@ -380,7 +323,6 @@ mod tests {
         }
     }
 
-    /// A burst is one rebuild, reaching the union of what it touched.
     #[test]
     fn a_burst_reaches_the_union_of_its_files() {
         let bzl = invalidated(Path::new("/ws/lib/defs.bzl"));
@@ -397,8 +339,6 @@ mod tests {
         assert!(!text.anything());
     }
 
-    /// The convenience symlinks exist only at the root, so a package that
-    /// merely starts with the same letters keeps its targets.
     #[test]
     fn the_convenience_symlinks_are_excluded_and_nothing_else_is() {
         let root = Path::new("/ws");

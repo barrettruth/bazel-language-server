@@ -10,22 +10,7 @@ use crate::document::Document;
 use crate::label::{Label, parse_label};
 use crate::repos::Resolved;
 
-/// What the string under the cursor names.
-///
-/// Three strings get a card. A label is resolved to the target it names, or to
-/// the source file where no rule declares one. A target's own `name` gets the
-/// same card plus how many references the index holds. A `load()` path is
-/// resolved to the `.bzl` file it reads.
-///
-/// Everything else declines — a symbol inside a `load()`, a `name` in a file
-/// that declares no targets, prose, a string that is no label at all — because
-/// saying anything more would mean opening a second file and resolving a name
-/// in it, and there is no symbol table here to do that with. Rule and
-/// attribute documentation is the same answer: it is per-workspace, comes from
-/// `--proto:rule_classes`, and waits on the graph tier. See `ROADMAP.md` G5.
-///
-/// The label is always shown resolved — `//lib:srcs` where the author wrote
-/// `":srcs"` — which is most of what makes the card worth reading.
+/// Describe the resolved target, source file or loaded module under the cursor.
 #[must_use]
 pub fn hover(
     document: &Document,
@@ -40,8 +25,6 @@ pub fn hover(
     let package = enclosing_package(root, document.path());
 
     let markdown = match &found.role {
-        // A load path names a file, so the index is not consulted, exactly as
-        // it is not in `definition`.
         StringRole::LoadModule => {
             let label = parse_label(&found.value, package.as_deref())?;
             if let Some(elsewhere) = external_card(index, &label) {
@@ -92,8 +75,6 @@ pub fn hover(
             value: markdown,
         }
         .into(),
-        // The label alone, without its quotes, so the client underlines what
-        // the card is about.
         range: Some(Range {
             start: lines.position(text, found.range.start as usize),
             end: lines.position(text, found.range.end as usize),
@@ -101,12 +82,7 @@ pub fn hover(
     })
 }
 
-/// The card for a label naming another repository, where it does not simply
-/// resolve.
-///
-/// Which of the four states it is decides what the reader does next — fetch,
-/// fix a typo, wait for Bazel, or nothing — so the card says which. An empty
-/// answer here reads as a feature that was never written.
+/// Describe where an external repository resolves, or why it does not.
 fn external_card(index: &crate::index::Index, label: &Label) -> Option<String> {
     let repo = label.repo.as_deref()?;
     let detail = match index.repos().locate(repo) {
@@ -128,10 +104,7 @@ fn external_card(index: &crate::index::Index, label: &Label) -> Option<String> {
     Some(card(&label.key(), &detail))
 }
 
-/// A card: the resolved label, fenced, and one line saying what it is.
-///
-/// The fence carries no language, because its contents are a label rather than
-/// code and a Starlark highlighter renders `//lib:srcs` as punctuation.
+/// A resolved label and one line of detail.
 fn card(label: &str, detail: &str) -> String {
     format!("```\n{label}\n```\n{detail}")
 }
@@ -146,14 +119,7 @@ fn declared_card(index: &crate::index::Index, root: &Path, label: &Label) -> Opt
     ))
 }
 
-/// How many references the index holds, said as what it is.
-///
-/// A floor, and permanently so. The count is a property of the static index
-/// rather than of the target: labels a legacy macro computes are invisible to a
-/// parser, and the graph tier cannot raise the number either, because the query
-/// feeding it is pruned of attributes and so carries no edges at all. The true
-/// figure is this one or larger, and a bare "5 references" would be read as the
-/// answer.
+/// Count source-written references; computed macro edges are unavailable.
 fn tally(index: &crate::index::Index, label: &Label) -> String {
     let counted = match index.references(&label.key()).len() {
         0 => "No references".to_string(),
@@ -163,11 +129,7 @@ fn tally(index: &crate::index::Index, label: &Label) -> String {
     format!("{counted} in the static index, which does not see macro-generated labels")
 }
 
-/// A path as a label spells it: relative to the workspace, forward slashes.
-///
-/// A path from outside the workspace keeps its own spelling rather than being
-/// dropped — an absolute path is still true, and a card with a hole in it is
-/// not.
+/// A workspace-relative path with label separators.
 fn relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -318,10 +280,7 @@ mod tests {
         }
     }
 
-    /// Only a BUILD file declares targets. `module(name = "beacon")` names a
-    /// module, and a repository with a `//:beacon` alias in it would otherwise
-    /// get a card describing that alias — an answer about something the cursor
-    /// is not on, which invariant 4 rates worse than no answer.
+    /// A top-level `name` outside a BUILD file is not a target declaration.
     #[test]
     fn a_name_outside_a_build_file_declares_no_target() {
         let root = std::env::temp_dir().join("bls-hover-module-name");

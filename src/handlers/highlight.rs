@@ -7,15 +7,7 @@ use lsp_types::{DocumentHighlight, DocumentHighlightKind, Position};
 use super::cursor::{declaration_site, enclosing_package, name_sites, string_at, target_label};
 use crate::document::Document;
 
-/// Every occurrence of the target under the cursor, within one file.
-///
-/// `references` narrowed to the document the cursor is in, which is what an
-/// editor paints as you rest on a label. The declaration is a `Write` and the
-/// labels naming it are `Read`s, so a client can colour the definition apart
-/// from its uses.
-///
-/// Partial in the same two ways `references` is: external repositories and the
-/// targets legacy macros compute at evaluation time wait on the graph tier.
+/// Source occurrences in this document, marking declaration and reads.
 #[must_use]
 pub fn document_highlight(
     document: &Document,

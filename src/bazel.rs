@@ -132,7 +132,7 @@ pub const ROOT_MARKERS: &[&str] = &[
 /// User-facing configuration for the Bazel subsystem.
 ///
 /// The whole subsystem is optional. With `enable = false`, or with no `bazel`
-/// on `PATH`, the server still serves the static tier — see invariant 2.
+/// on `PATH`, the server still serves parsed BUILD data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BazelConfig {
@@ -142,9 +142,7 @@ pub struct BazelConfig {
     /// Give the server its own `--output_base` so queries never queue behind
     /// the user's build.
     ///
-    /// Off by default: a second Bazel server measured **+1.2 GB** at 20k
-    /// packages, and the lock only bites code that waits on Bazel — which,
-    /// per invariant 1, nothing does.
+    /// Off by default because it starts a second Bazel server.
     pub private_output_base: bool,
     pub args: Vec<String>,
 }
@@ -283,11 +281,6 @@ impl BazelClient {
     }
 
     /// The installed Bazel, if this server can drive it.
-    ///
-    /// Reported rather than assumed: invariant 3 says a Bazel that cannot
-    /// answer must be explained, not silently degraded. Every way this fails
-    /// names which one it was, because "unfetched repo", "no bazel on PATH"
-    /// and "too old" call for three different things from the user.
     ///
     /// # Errors
     ///

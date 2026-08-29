@@ -111,10 +111,7 @@ fn symbol_kind(rule: &str) -> SymbolKind {
     }
 }
 
-/// Workspace symbols from the static index.
-///
-/// Undercounts until the graph tier lands, which is why the caller must not
-/// present this as exhaustive. See `ROADMAP.md` G4.
+/// Matching targets from the current snapshot, capped for picker usability.
 #[must_use]
 pub fn workspace_symbols(index: &crate::index::Index, query: &str) -> Vec<WorkspaceSymbol> {
     index

@@ -214,10 +214,7 @@ fn cmd_index(path: &std::path::Path) {
     }
 }
 
-/// Publish what Bazel knows into `handle`, and say whether it answered.
-///
-/// A report rather than a requirement: invariant 2 says the command works with
-/// no Bazel, so an unusable one prints why and the static tier still stands.
+/// Publish the Bazel graph when available.
 fn cmd_graph(root: &Path, handle: &IndexHandle) -> bool {
     let client = BazelClient::new(BazelConfig::default(), root.to_path_buf());
     if let Err(err) = client.probe() {
@@ -285,16 +282,7 @@ fn cmd_doctor(path: &std::path::Path) {
     }
 }
 
-/// The Bazel settings a client sent, under whichever of the two keys it uses.
-///
-/// `initializationOptions` arrives once with `initialize`; VS Code puts its
-/// settings there. Neovim's `vim.lsp.config{ settings = … }` instead sends
-/// `workspace/didChangeConfiguration` straight after `initialized`, so a server
-/// that read only the first would silently ignore the way most of its users
-/// configure it. Both are read, and the later one wins.
-///
-/// Anything the object does not carry keeps its default, so a client sending
-/// `{"bazel": {"path": "bazelisk"}}` changes the binary and nothing else.
+/// Read the `bazel` section used by initialization and configuration changes.
 fn bazel_settings(sent: Option<&serde_json::Value>) -> Option<BazelConfig> {
     let section = sent?.get("bazel")?;
     match serde_json::from_value(section.clone()) {
@@ -306,11 +294,7 @@ fn bazel_settings(sent: Option<&serde_json::Value>) -> Option<BazelConfig> {
     }
 }
 
-/// Every request this server answers, as the client is told about it.
-///
-/// Held apart from the loop because it is the server's contract: what the
-/// client will send is decided here and nowhere else, and a capability read
-/// beside the dispatch table it corresponds to is easier to keep honest.
+/// The request surface advertised to clients.
 fn capabilities() -> ServerCapabilities {
     ServerCapabilities {
         text_document_sync: Some(TextDocumentSync::Options(TextDocumentSyncOptions {
@@ -366,10 +350,8 @@ fn run_server() -> Result<()> {
     tracing::info!("bazel-language-server {}", env!("CARGO_PKG_VERSION"));
     let (connection, io_threads) = Connection::stdio();
     let capabilities = capabilities();
-    // `Connection::initialize` wraps its argument in `{"capabilities": …}`, so
-    // passing a whole InitializeResult nests it twice; the client then sees no
-    // `textDocumentSync`, never sends `didOpen`, and every document request
-    // comes back empty. Drive the handshake directly to send `serverInfo` too.
+    // Drive the handshake directly so capabilities and serverInfo share the
+    // required InitializeResult envelope.
     let (id, params) = connection.initialize_start()?;
     connection.initialize_finish(
         id,
@@ -385,11 +367,7 @@ fn run_server() -> Result<()> {
 
     let root = workspace_root(&init);
     let link_support = supports_definition_links(&init);
-    // Defaults until the client's settings are read, so the one place that
-    // starts Bazel goes through the configuration `doctor` reports on.
     let index = IndexHandle::new();
-    // Held for the life of the loop: dropping it stops the Bazel thread, so a
-    // shutdown takes the subprocess with it rather than orphaning one.
     let bazel = std::sync::Arc::new(Bazel::spawn(root.clone(), index.clone()));
     bazel.reconfigure(bazel_settings(init.initialization_options.as_ref()).unwrap_or_default());
     let watch = root
@@ -708,19 +686,7 @@ fn code_lenses(
     Ok(lenses)
 }
 
-/// The two commands a client may ask for directly.
-///
-/// [`watch::REINDEX_COMMAND`] rebuilds both tiers. It returns immediately: the
-/// rebuild goes to the watch thread, so invariant 1 holds for a command the
-/// same as for a request.
-///
-/// [`handlers::RUN_COMMAND`] runs the Bazel invocation a lens offered. This is
-/// the one place the server starts Bazel, and it is not a handler answering
-/// about a buffer: the user clicked "test //x", so the invocation *is* the
-/// answer. It is detached rather than awaited, because a build takes minutes
-/// and the request loop serves every other document. Nothing comes back beyond
-/// that it started — LSP has no channel for a subprocess's output, and
-/// inventing one here would be a worse terminal than the one the user has.
+/// Queue a reindex or start a code-lens Bazel command.
 fn execute_command(
     request: &lsp_server::Request,
     root: Option<&Path>,
@@ -888,11 +854,7 @@ fn apply(note: &lsp_server::Notification, docs: &mut Documents) -> Result<Applie
     Ok(Applied::None)
 }
 
-/// Whether the client understands `LocationLink`.
-///
-/// A client that does not gets `Location`s instead. Sending links to one that
-/// never asked for them is a response it cannot parse, which reads as a broken
-/// server rather than as a missing capability.
+/// Whether definition responses may use `LocationLink`.
 fn supports_definition_links(init: &InitializeParams) -> bool {
     init.capabilities
         .text_document
@@ -1033,17 +995,7 @@ fn uri_to_path(uri: &Uri) -> String {
     uri.path().decode().to_string_lossy().into_owned()
 }
 
-/// Prefer a real Bazel root over whatever the editor called the workspace.
-///
-/// Clients disagree about which field carries the root. `workspaceFolders` is
-/// the current one, `rootUri` and `rootPath` are deprecated but still what
-/// several clients actually send, and reading only the first leaves the index
-/// silently empty — the server starts, attaches, answers every request with
-/// nothing, and logs no error. So try all of them, then the working directory,
-/// and record which one won.
-// rootUri and rootPath are deprecated in favour of workspaceFolders, and are
-// read anyway: the deprecation describes the spec's intent, not what clients
-// send.
+/// Resolve the workspace from modern fields, legacy fields, then cwd.
 #[allow(deprecated)]
 fn workspace_root(init: &InitializeParams) -> Option<PathBuf> {
     let from_folders = init

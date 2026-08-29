@@ -7,17 +7,10 @@ use lsp_types::{Location, Position};
 use super::cursor::{enclosing_package, file_uri, name_sites, string_at, target_label};
 use crate::document::Document;
 
-/// Every place in the main repository that names the target under the cursor.
+/// Source-written references to the target under the cursor.
 ///
-/// The cursor may be on a label (`"//lib:srcs"`, `":srcs"`) or on the `name` of
-/// the rule declaring it; both resolve to the same target.
-///
-/// **Partial by construction, in two ways a caller must not paper over.**
-/// External repositories are not searched, because resolving `@repo//…` needs
-/// the repo mapping only Bazel can produce. And the static tier cannot see
-/// targets or references that legacy macros compute at evaluation time — a
-/// macro emitting `deps = [name + "_lib"]` is invisible here. Both wait on the
-/// graph tier; see `ROADMAP.md` G4.
+/// Computed macro edges and external repositories have no source sites in the
+/// index and are omitted.
 #[must_use]
 pub fn references(
     document: &Document,

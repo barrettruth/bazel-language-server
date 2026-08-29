@@ -1,27 +1,7 @@
-//! Formatting and linting, delegated to `buildifier`.
+//! Formatting and linting through a bounded `buildifier` subprocess.
 //!
-//! This is the one subprocess the server runs inside a request, and it is a
-//! deliberate exception rather than a crack in invariant 1. What that invariant
-//! is about is Bazel: seconds to minutes of work, one global lock per output
-//! base, and an answer that belongs in an index because several requests will
-//! want it. buildifier is none of those. It is a parser and a printer over one
-//! buffer — single-digit milliseconds, no server, no lock, no network — and its
-//! answer is good for exactly one request.
-//!
-//! `textDocument/formatting` is also synchronous by nature: the user pressed a
-//! key and is waiting for the buffer to change, so there is no snapshot that
-//! could usefully answer instead. Every language server that formats runs the
-//! language's formatter this way, and here it is the requirement — the point of
-//! formatting a BUILD file is to agree with `buildifier` byte for byte, which a
-//! reimplementation would do only until the next release of it.
-//!
-//! Bazel calls stay where they are: in `crate::bazel`, which the module graph
-//! keeps unreachable from a handler.
-//!
-//! buildifier may be absent, exactly as Bazel may be. Missing, hung, failing or
-//! answering with something that is not text all come back the same way — no
-//! edits, and a warning on stderr, so a formatter that is not working is
-//! distinguishable from a buffer that needs no formatting.
+//! Callers run these operations on request workers. Missing, rejected and
+//! timed-out invocations remain distinguishable in their results and logs.
 
 use std::io::{Read, Write};
 use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
@@ -38,24 +18,13 @@ use crate::line_index::LineIndex;
 /// Looked up on `PATH`, like `bazel` is.
 const BUILDIFIER: &str = "buildifier";
 
-/// Ceiling on one run.
-///
-/// A parse and a print over one buffer is milliseconds at any size a person
-/// edits, so anything approaching this is a hang — and the loop waiting on it
-/// is the one serving every other document.
+/// Ceiling on one formatter invocation.
 const TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The edits that make `text` agree with buildifier.
 ///
-/// Empty when the buffer is already formatted, and empty when buildifier ran
-/// and refused the input: the syntax diagnostics already say why, and a second
-/// report of the same thing is noise.
-///
-/// An `Err` means buildifier itself could not be used — absent, hung, or
-/// answering with something that is not text. That reaches the client as a
-/// request error it shows the user, which is the only outcome they can act on;
-/// a format that quietly does nothing is indistinguishable from a file that
-/// needed no formatting.
+/// Empty for already-formatted or rejected input; errors mean the tool itself
+/// could not be used.
 pub fn format(text: &str, kind: FileKind) -> Result<Vec<TextEdit>> {
     format_with(BUILDIFIER, text, kind)
 }
@@ -86,16 +55,10 @@ fn format_with(binary: &str, text: &str, kind: FileKind) -> Result<Vec<TextEdit>
 }
 
 /// Why no formatted text came back.
-///
-/// The two are answered differently, so they cannot share a variant: a buffer
-/// buildifier parsed and disliked is the user's problem and already has
-/// diagnostics, while a buildifier that is missing or wedged is ours and has to
-/// be said out loud.
 enum Unusable {
-    /// buildifier ran and exited non-zero, having read the buffer.
+    /// The tool rejected the buffer.
     Rejected(String),
-    /// buildifier could not be started, timed out, or answered with nothing
-    /// usable.
+    /// The tool could not start, timed out or returned unusable output.
     Broken(anyhow::Error),
 }
 

@@ -267,8 +267,7 @@ mod tests {
         assert_eq!(key("@platforms", Some("lib")), None);
     }
 
-    /// A pattern names a set. Picking one of its members would be a guess, and
-    /// invariant 4 rates a wrong jump worse than no jump.
+    /// A pattern names a set, not one navigable target.
     #[test]
     fn target_patterns_are_not_labels() {
         assert_eq!(key("//lib:all", None), None);

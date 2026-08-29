@@ -21,17 +21,9 @@ impl Site {
     }
 }
 
-/// The declaring rule call, from the index snapshot or from the buffer holding
-/// that file.
-///
-/// An open buffer outranks the index, which records where the target sat on
-/// disk. Where the buffer no longer declares it, the answer is nothing:
-/// pointing at where it used to be sends the user somewhere the target is not.
+/// The declaring target from the current index snapshot.
 pub(super) fn target_site(index: &crate::index::Index, label: &Label) -> Option<Site> {
     let target = index.target(&label.key())?;
-    // The index carries where the name starts and not where the call ends, so
-    // the range is empty. Clients reveal the line either way, and re-reading
-    // the file to widen it would put IO in the request path.
     Some(Site {
         path: target.file.to_path_buf(),
         at: Position {
@@ -41,11 +33,7 @@ pub(super) fn target_site(index: &crate::index::Index, label: &Label) -> Option<
     })
 }
 
-/// The source file a label names, for the `srcs = ["main.sh"]` case.
-///
-/// A source file is a target in its own right, so this is a definition and not
-/// a consolation prize. It is tried after the index because a rule and a source
-/// file cannot share a name, and the rule is what a label with that name means.
+/// The source file a label names when no declared target shadows it.
 pub(super) fn file_site(root: &Path, label: &Label) -> Option<Site> {
     let path = root.join(label.path());
     path.is_file().then_some(Site {
@@ -57,13 +45,7 @@ pub(super) fn file_site(root: &Path, label: &Label) -> Option<Site> {
     })
 }
 
-/// The tree a label's package sits in: this workspace, or the repository the
-/// label names.
-///
-/// `None` where the repository cannot be placed, which is the only thing
-/// standing between a label and a wrong answer — resolving `@repo//lib:srcs`
-/// against this workspace finds our `lib/srcs` and offers it, and a file from
-/// the wrong repository is exactly the jump invariant 4 rules out.
+/// Resolve the source tree containing a label's package.
 pub(super) fn tree(root: &Path, index: &crate::index::Index, label: &Label) -> Option<PathBuf> {
     match label.repo.as_deref() {
         None => Some(root.to_path_buf()),
@@ -90,17 +72,7 @@ pub(super) fn package_site(tree: &Path, label: &Label) -> Option<Site> {
         })
 }
 
-/// Goto-definition for the string under the cursor.
-///
-/// A string is read as a `load()` path, a symbol in a `load()`, or a label,
-/// decided by where it sits. A label resolves to the declaring rule call in the
-/// index, or failing that to the source file it names; a `load()` resolves to
-/// the `.bzl` file, and so does a symbol inside one — following the symbol to
-/// its own `def` is out of scope.
-///
-/// Main repo only. Everything is answered from the index snapshot and the
-/// document text; nothing here can invoke Bazel, and an unresolvable label
-/// yields nothing rather than a guess.
+/// Resolve labels and `load()` strings without invoking Bazel.
 #[must_use]
 pub fn definition(
     document: &Document,

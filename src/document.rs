@@ -1,17 +1,7 @@
-//! An open buffer and the facts every request asks of it.
+//! Immutable, versioned snapshots of open buffers.
 //!
-//! A document is classified once, where the client hands over its text, so a
-//! buffer is the same kind of file to every request: `documentSymbol` and
-//! `definition` cannot disagree about whether it is a BUILD file.
-//!
-//! It is also the seam the sync model lives behind. A handler asks for text,
-//! ranges and a tree, never for how the buffer got that way, so moving from
-//! whole-document to incremental `didChange` is a change to this type.
-//!
-//! The parse and the line index are computed per call rather than stored.
-//! Either one cached beside the text is state to keep in step with it, and the
-//! only cost this project has measured worth optimising is Bazel. Measure
-//! before caching, and key what you cache on the text itself.
+//! Text, syntax and line offsets are derived together whenever a document
+//! changes, then shared by request workers through `Arc`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -47,9 +37,6 @@ pub struct Documents {
 }
 
 impl Buffers for Documents {
-    /// Scanned rather than indexed by path: a client holds tens of buffers
-    /// open, and a second map keyed on path is state to keep in step with this
-    /// one for a lookup that never shows up in a profile.
     fn at(&self, path: &Path) -> Option<&Document> {
         self.texts
             .values()
@@ -113,16 +100,7 @@ impl Documents {
         self.republish();
     }
 
-    /// Rebuild the buffer tier from every open BUILD file.
-    ///
-    /// Whole rather than patched: only BUILD documents contribute, a session
-    /// holds a handful of those, and one is tens of microseconds at the
-    /// measured 110.8 MB/s. A cache keyed on text we already hold would buy a
-    /// cost nobody has measured.
-    ///
-    /// Synchronous, on the loop that owns the map. That is what makes the tier
-    /// current for every later request rather than merely soon: the loop reads
-    /// the next message only once this has returned.
+    /// Republish facts derived from all open BUILD files.
     fn republish(&self) {
         let mut tier = Tier::default();
         if let Some(root) = self.root.as_deref() {
@@ -146,14 +124,6 @@ pub struct Document {
 
 impl Document {
     /// Hold `text` as the contents of `path`, classified against the workspace.
-    ///
-    /// `root` resolves the one file addressed by path rather than by name,
-    /// `tools/build_rules/prelude_bazel`, so a server that found a workspace
-    /// reads it as Bazel's prelude.
-    ///
-    /// A path Bazel recognises as nothing is read as Starlark: the client
-    /// opened it against this server, and a syntactic answer is the closest
-    /// true one available.
     #[cfg(test)]
     #[must_use]
     pub fn new(path: PathBuf, text: String, root: Option<&Path>) -> Self {
@@ -207,15 +177,8 @@ impl Document {
         &self.parsed
     }
 
-    /// Add what this buffer declares to `tier`, and claim the file if it can.
-    ///
-    /// **A buffer the parser had to recover in adds and never claims.** Claiming
-    /// a file is what lets the tier say a target has been *deleted*, and a file
-    /// caught mid-edit cannot tell a deletion from a declaration the user has
-    /// not finished typing. Claiming it anyway would make every target in the
-    /// file blink out of the index between keystrokes, taking navigation with
-    /// them; leaving the disk to answer keeps them, stale by a few characters.
-    /// Invariant 4 wants the stale one.
+    /// Add declarations to `tier`. Only a clean parse supersedes disk facts;
+    /// recovered syntax cannot distinguish deletion from an unfinished edit.
     fn contribute(&self, root: &Path, tier: &mut Tier) {
         if !matches!(self.kind, FileKind::Build) {
             return;
@@ -236,13 +199,8 @@ impl Document {
         }
     }
 
-    /// The byte offset of a line and UTF-16 column.
-    #[must_use]
     /// The position of a byte offset in this document.
-    ///
-    /// Rebuilds the line index on every call, which is why handlers hold a
-    /// [`Document::line_index`] instead: this is a convenience for a one-off
-    /// conversion, and in a loop it is quadratic.
+    #[must_use]
     #[cfg(test)]
     pub fn position(&self, offset: usize) -> Position {
         self.line_index().position(&self.text, offset)

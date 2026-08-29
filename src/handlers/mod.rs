@@ -1,13 +1,6 @@
-//! Request handling against in-memory state.
+//! Request handlers over document and index snapshots.
 //!
-//! Everything here is parse, walk and convert against a snapshot. No Bazel:
-//! that is invariant 1, expressed as a module boundary. The only filesystem
-//! call is a `stat` asking whether a label names a source file, which costs
-//! one syscall and cannot block on anything.
-//!
-//! One module per request, each owning the helpers only it uses. What several
-//! requests share — resolving the cursor to a string, and the string to a
-//! target and its sites — is in `cursor`. The dispatch table is in `main.rs`.
+//! Cursor and label resolution shared across handlers lives in `cursor`.
 
 mod cursor;
 mod definition;

@@ -260,9 +260,7 @@ mod tests {
         }
     }
 
-    /// The stream carries no count, so a message cut short is only visible as
-    /// bytes left over. Reporting nothing would present a partial graph as the
-    /// whole one, which invariant 4 rates worse than reporting no graph at all.
+    /// The stream carries no count, so trailing bytes reveal truncation.
     #[test]
     fn a_truncated_stream_is_an_error() {
         let stream = rule("//lib:srcs", "filegroup", "/ws/lib/BUILD.bazel:1:1");

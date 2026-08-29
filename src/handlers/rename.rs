@@ -33,23 +33,9 @@ fn validate_name(name: &str) -> Result<()> {
     )
 }
 
-/// Rename the target under the cursor, rewriting every label that names it.
+/// Rename a declared target and its source-written labels.
 ///
-/// The cursor may be on a label (`"//lib:srcs"`, `":srcs"`) or on the `name` of
-/// the rule declaring it; both rename the same target. Only the name is
-/// rewritten: `":srcs"` becomes `":sources"` and `"//lib:srcs"` becomes
-/// `"//lib:sources"`, package and colon as the author wrote them.
-///
-/// **As complete as the index is, in two ways a caller must not paper over.**
-/// External repositories are not searched, because resolving `@repo//…` needs
-/// the repo mapping only Bazel can produce. And the static tier cannot see
-/// targets or references that legacy macros compute at evaluation time — a
-/// macro emitting `deps = [name + "_lib"]` is invisible here, so a label it
-/// generates keeps the old name. Both wait on the graph tier; see
-/// `ROADMAP.md` G4.
-///
-/// A new name Bazel could not load is an error rather than an empty result,
-/// because an editor shows it and a broken workspace is the worse outcome.
+/// Only the name span changes, preserving each label's package spelling.
 ///
 /// # Errors
 ///
@@ -124,17 +110,7 @@ pub fn prepare_rename(
     })
 }
 
-/// The first file whose recorded site no longer holds the name, if any.
-///
-/// The index records where a name sat when the file was last read; a buffer the
-/// user has edited since has moved it, and an edit applied at the stale offset
-/// overwrites whatever is there now. Every other request answers a stale
-/// position with a wrong *answer*, which is recoverable — this one writes to
-/// the file, so the whole rename is refused rather than any part of it applied.
-///
-/// Only an open buffer can disagree. A file nobody has touched is what the
-/// index says it is, and is not read here: that would put the whole workspace's
-/// IO in a request.
+/// The first open buffer whose indexed name range has moved.
 fn first_moved_site<'a>(
     buffers: &dyn Buffers,
     sites: &'a [(PathBuf, Range)],
@@ -162,10 +138,7 @@ fn first_moved_site<'a>(
 
 /// The name under the cursor as a byte range, and the target it renames.
 ///
-/// Only a declared target can be renamed. A label naming a source file, an
-/// output file or nothing at all has no declaration to rewrite, and rewriting
-/// the labels alone would point every one of them at a target that does not
-/// exist — invariant 4.
+/// Only declared targets are renameable; source and output labels are not.
 fn renameable(
     document: &Document,
     root: &Path,

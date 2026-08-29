@@ -1,16 +1,7 @@
-//! The target index.
+//! Snapshot index over open buffers, BUILD files on disk and Bazel's graph.
 //!
-//! Two tiers:
-//!
-//! - **static** — every target that can be seen by parsing BUILD files. Cheap:
-//!   measured at 219 MB/s and 69 bytes per target, so ~1.4 s and ~13 MB for a
-//!   74k-package repo. Rebuilt outright rather than incrementally.
-//! - **graph** — targets only Bazel knows about, because legacy macros compute
-//!   names at evaluation time. Not implemented yet.
-//!
-//! Readers never block. An [`IndexHandle`] hands out an [`Index`] snapshot
-//! that stays consistent for the life of a request while a writer swaps in a
-//! freshly built one.
+//! Writers publish independent tiers through [`IndexHandle`]; requests retain
+//! a consistent [`Index`] while newer snapshots are installed.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -33,38 +24,18 @@ pub struct Target {
     /// The rule or macro that declared it, as written at the call site.
     pub rule: Box<str>,
     pub file: Arc<Path>,
-    /// Zero-based line of the target's name, and its column in UTF-16 code
-    /// units — the encoding LSP positions use.
-    ///
-    /// Resolved here rather than on demand because the alternative is re-reading
-    /// and re-scanning the file for every symbol a picker displays.
+    /// Zero-based line and UTF-16 column of the target name.
     pub line: u32,
     pub character: u32,
-    /// The name's width in UTF-16 code units, so the name has a range and not
-    /// just a start. A name never spans a line.
-    ///
-    /// Zero where no name is written in the file at all, which is every target
-    /// a macro computed: Bazel places those at the macro call, and there is no
-    /// span there to cover.
+    /// UTF-16 width. Zero for a name computed by a macro.
     pub length: u32,
 }
 
-/// Where a label was written, somewhere other than its own declaration.
-///
-/// The position is the *name* inside the label rather than the start of it:
-/// `//lib:srcs` points at `srcs`, which is the span a rename replaces and the
-/// span worth highlighting in a list of referrers.
-///
-/// Ordered by position so a list of these sorts into the order a reader would
-/// read them in, which is also the order that keeps a client's list stable.
-/// Path first, so that order is the same from one run to the next: the walk
-/// that finds these visits directories in whatever order the filesystem hands
-/// back.
+/// A label occurrence outside its declaration, ordered by file and position.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Reference {
     pub file: Arc<Path>,
-    /// Zero-based line of the name within the label string, and its column in
-    /// UTF-16 code units — the same convention as [`Target`].
+    /// Zero-based line and UTF-16 column of the name within the label.
     pub line: u32,
     pub character: u32,
     /// The name's width in UTF-16 code units.
@@ -78,16 +49,9 @@ pub struct Tier {
     pub files: FxHashSet<Arc<Path>>,
     /// Keyed by `//package:name`, the form a label resolves to.
     pub targets: FxHashMap<String, Target>,
-    /// Every mention of a label in a rule-call argument, under the same key as
-    /// [`Tier::targets`]. A key here need not be a key there: a label may name
-    /// a source file, an output file, or nothing at all.
+    /// Label occurrences keyed by resolved `//package:name`.
     pub references: FxHashMap<String, Vec<Reference>>,
-    /// The files this tier is the whole truth about, so that a target it does
-    /// *not* declare in one of them is a target that does not exist.
-    ///
-    /// Empty for a tier that only adds to what the ones after it know, which is
-    /// every tier but the buffers: a file the disk tier parsed may still hold
-    /// targets only Bazel can name.
+    /// Files whose parsed contents supersede lower tiers.
     pub speaks_for: FxHashSet<Arc<Path>>,
 }
 
@@ -98,13 +62,7 @@ impl Tier {
     }
 }
 
-/// A consistent view of every tier, for the life of one request.
-///
-/// Cheap: three `Arc`s. Composed rather than merged, because merging needs one
-/// writer holding what the others last published, and that is the shape that
-/// goes out of step. Precedence is the order [`Index::tiers`] returns them in —
-/// the buffer the user is typing into, then the disk under it, then what only
-/// Bazel can name.
+/// A request-local view. Precedence is buffer, disk, then Bazel graph.
 #[derive(Debug, Clone, Default)]
 pub struct Index {
     buffer: Arc<Tier>,
@@ -125,38 +83,19 @@ impl Index {
         }
     }
 
-    /// The tiers that read the source, in precedence order.
-    ///
-    /// Coverage means something only between these two, because both are
-    /// readings of the same files and a fresher reading replaces an older one.
-    /// It says nothing about the graph: no parser can see a name a macro
-    /// computes, so a buffer that has just been re-read has not contradicted
-    /// Bazel about anything.
+    /// Parsed source tiers, in precedence order.
     fn parsed(&self) -> [&Tier; 2] {
         [&self.buffer, &self.disk]
     }
 
-    /// Whether a parsed tier ahead of `nth` has already said everything true
-    /// about `file`.
-    ///
-    /// This is what makes a deletion visible. A target the user removes from an
-    /// open buffer is absent from the buffer tier and still present on disk;
-    /// without this it would go on resolving to a declaration that is no longer
-    /// written anywhere.
+    /// Whether a newer source tier supersedes `file`.
     fn covered(&self, nth: usize, file: &Path) -> bool {
         self.parsed()[..nth]
             .iter()
             .any(|ahead| ahead.speaks_for.contains(file))
     }
 
-    /// The declaration of `label`, from the source if any parser has seen it
-    /// and from Bazel otherwise.
-    ///
-    /// The graph is consulted only for a label no parsed tier holds at all,
-    /// which is exactly what it is for: the targets a legacy macro computes.
-    /// That is also what keeps it from overriding a field — its rule class is
-    /// the private name Bazel instantiated, `_local_rule` where the source says
-    /// `local_helper`, and the reader recognises the one they wrote.
+    /// The source declaration, falling back to a Bazel-computed target.
     #[must_use]
     pub fn target(&self, label: &str) -> Option<&Target> {
         if self
@@ -179,11 +118,7 @@ impl Index {
             })
     }
 
-    /// Every recorded mention of `label`, in source order per file.
-    ///
-    /// The source alone. The query that feeds the graph is pruned of attributes
-    /// and so carries no edges, which means the graph knows that a target
-    /// exists and nothing whatever about what points at it.
+    /// Source occurrences of `label`, in file order.
     #[must_use]
     pub fn references(&self, label: &str) -> Vec<&Reference> {
         self.parsed()
@@ -226,13 +161,7 @@ impl Index {
         parsed.chain(only_bazel_knows)
     }
 
-    /// Whether `label` is one only Bazel can name.
-    ///
-    /// Derived rather than recorded on the target, because it already is: a
-    /// label no parser holds is one no parser saw, which is exactly what a
-    /// macro computing a name means. A handler that cannot act on such a target
-    /// — rename above all, since there is no `name = "…"` to rewrite — asks
-    /// here and says so.
+    /// Whether only Bazel evaluation can name `label`.
     #[must_use]
     pub fn only_bazel_knows(&self, label: &str) -> bool {
         self.graph.targets.contains_key(label)
@@ -864,9 +793,7 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// Bazel refuses to load packages under `.bazelignore`, so a target found
-    /// there is one no label can resolve to. Offering it is worse than missing
-    /// it — invariant 4.
+    /// Packages under `.bazelignore` do not belong in the index.
     #[test]
     fn bazelignore_directories_are_skipped() {
         let root = std::env::temp_dir().join("bls-bazelignore-test");
