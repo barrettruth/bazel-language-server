@@ -33,7 +33,7 @@
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "bazel-language-server";
-          version = "0.1.1";
+          version = "0.2.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
         };
