@@ -25,11 +25,15 @@ impl<'a> ConfigurationView<'a> {
     pub fn new(documents: &'a Documents, snapshot: &'a ConfigurationSnapshot) -> Self {
         let mut collector = Collector::new(documents, snapshot);
         if let Some(root_file) = snapshot.root_file.as_deref() {
-            collector.visit(root_file, None);
+            if !collector.visit(root_file, None) {
+                collector.valid = false;
+            }
         } else if snapshot.problems.is_empty()
             && let Some(document) = workspace_root_document(documents, snapshot)
         {
-            collector.visit(document.path(), Some(document));
+            if !collector.visit(document.path(), Some(document)) {
+                collector.valid = false;
+            }
         }
         collector.finish()
     }
@@ -142,6 +146,7 @@ struct Collector<'a> {
     documents: &'a Documents,
     snapshot: &'a ConfigurationSnapshot,
     active: Vec<std::path::PathBuf>,
+    valid: bool,
     declarations: Vec<ConfigSite>,
     references: Vec<ConfigSite>,
 }
@@ -152,28 +157,33 @@ impl<'a> Collector<'a> {
             documents,
             snapshot,
             active: Vec::new(),
+            valid: true,
             declarations: Vec::new(),
             references: Vec::new(),
         }
     }
 
-    fn finish(self) -> ConfigurationView<'a> {
+    fn finish(mut self) -> ConfigurationView<'a> {
+        if !self.valid {
+            self.declarations.clear();
+            self.references.clear();
+        }
         ConfigurationView {
             documents: self.documents,
             snapshot: self.snapshot,
-            ready: ready(self.snapshot),
+            ready: self.valid && ready(self.snapshot),
             declarations: self.declarations,
             references: self.references,
         }
     }
 
-    fn visit(&mut self, identity: &Path, direct: Option<&Document>) {
+    fn visit(&mut self, identity: &Path, direct: Option<&Document>) -> bool {
         if self.active.iter().any(|path| path == identity) {
-            return;
+            return true;
         }
         let source = if let Some(document) = direct {
             let Some(document) = self.documents.shared_at(document.path()) else {
-                return;
+                return false;
             };
             Source::Open(document)
         } else if let Some(document) = self.open_document(identity) {
@@ -181,13 +191,13 @@ impl<'a> Collector<'a> {
         } else if let Some(file) = self.snapshot.files.get(identity) {
             Source::Saved(Arc::clone(file))
         } else {
-            return;
+            return false;
         };
         let Some(parsed) = source.parsed() else {
-            return;
+            return false;
         };
         if !parsed.errors.is_empty() {
-            return;
+            return false;
         }
         let site_file = source.site_file();
         let root = self.snapshot.root.as_deref().map(Path::to_path_buf);
@@ -225,13 +235,18 @@ impl<'a> Collector<'a> {
                         })
                         .map(Path::to_path_buf);
                     if let Some(loaded) = loaded {
-                        self.visit(&loaded, None);
+                        if !self.visit(&loaded, None) {
+                            self.active.pop();
+                            self.valid = false;
+                            return false;
+                        }
                     }
                 }
                 Some(Statement::InvalidDirective) | None => {}
             }
         }
         self.active.pop();
+        true
     }
 
     fn open_document(&self, identity: &Path) -> Option<Arc<Document>> {
@@ -490,5 +505,27 @@ mod tests {
         let view = ConfigurationView::new(&documents, &snapshot);
         assert!(view.declarations_named("saved").next().is_none());
         assert_eq!(view.declarations_named("open").count(), 1);
+    }
+
+    #[test]
+    fn malformed_open_import_invalidates_the_request_view() {
+        let workspace = Workspace::new();
+        workspace.write(".bazelrc", "import child\nbuild:after --jobs=1\n");
+        workspace.write("child", "build:inside --jobs=1\n");
+        let snapshot = ConfigurationSnapshot::build(&workspace.0);
+        let mut documents = Documents::new(Some(workspace.0.clone()), IndexHandle::new());
+        let child_uri: Uri = "file:///tmp/child.bazelrc".parse().unwrap();
+        documents.set_classified(
+            child_uri,
+            workspace.0.join("child"),
+            1,
+            "import one two\n".to_owned(),
+            true,
+        );
+
+        let view = ConfigurationView::new(&documents, &snapshot);
+        assert!(!view.ready());
+        assert_eq!(view.declarations().count(), 0);
+        assert_eq!(view.references().count(), 0);
     }
 }
