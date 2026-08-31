@@ -142,9 +142,10 @@ impl ConfigurationSnapshot {
     pub fn loaded_import(&self, target: &Path) -> Option<&Path> {
         let target = lexical_identity(target);
         self.imports.iter().find_map(|site| {
-            (site.active && lexical_identity(&site.target) == target)
-                .then_some(site.loaded.as_deref())
-                .flatten()
+            let loaded = site.loaded.as_deref()?;
+            (site.active
+                && (lexical_identity(&site.target) == target || lexical_identity(loaded) == target))
+                .then_some(loaded)
         })
     }
 
@@ -495,6 +496,25 @@ mod tests {
         assert_eq!(
             resolve_import(Path::new("/ws"), "%workspace%//config/child"),
             Path::new("/ws/config/child")
+        );
+    }
+
+    #[test]
+    fn loaded_imports_match_lexical_and_canonical_targets() {
+        let loaded: Arc<Path> = Arc::from(Path::new("/ws/config/real"));
+        let snapshot = ConfigurationSnapshot {
+            imports: vec![ImportSite {
+                file: Arc::from(Path::new("/ws/.bazelrc")),
+                range: Span::new(0, 1),
+                target: PathBuf::from("/ws/config/alias"),
+                loaded: Some(Arc::clone(&loaded)),
+                active: true,
+            }],
+            ..ConfigurationSnapshot::default()
+        };
+        assert_eq!(
+            snapshot.loaded_import(Path::new("/ws/config/real")),
+            Some(loaded.as_ref())
         );
     }
 
