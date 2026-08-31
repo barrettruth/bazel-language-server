@@ -69,6 +69,7 @@ pub struct Problem {
 #[derive(Debug, Default)]
 pub struct ConfigurationSnapshot {
     pub root: Option<Arc<Path>>,
+    pub root_file: Option<Arc<Path>>,
     pub files: FxHashMap<PathBuf, Arc<ConfigurationFile>>,
     pub entries: Vec<Entry>,
     pub declarations: Vec<ConfigSite>,
@@ -106,16 +107,35 @@ impl ConfigurationSnapshot {
             },
             active: Vec::new(),
         };
-        drop(builder.visit(&root.join(".bazelrc"), None, false));
+        let root_file = builder
+            .visit(&root.join(".bazelrc"), None, false)
+            .ok()
+            .flatten();
+        builder.snapshot.root_file = root_file;
         builder.snapshot
     }
 
     #[must_use]
     pub fn includes(&self, path: &Path) -> bool {
-        self.files.contains_key(path)
-            || self.imports.iter().any(|site| {
-                site.target == path || site.loaded.as_deref().is_some_and(|loaded| loaded == path)
-            })
+        self.identity(path).is_some()
+    }
+
+    #[must_use]
+    pub fn identity<'a>(&'a self, path: &Path) -> Option<&'a Path> {
+        if let Some((stored, _)) = self.files.get_key_value(path) {
+            return Some(stored);
+        }
+        if self
+            .root
+            .as_deref()
+            .is_some_and(|root| path == root.join(".bazelrc"))
+        {
+            return self.root_file.as_deref();
+        }
+        self.imports.iter().find_map(|site| {
+            let loaded = site.loaded.as_deref()?;
+            (site.target == path || loaded == path).then_some(loaded)
+        })
     }
 
     pub fn declarations(&self, name: &str) -> impl Iterator<Item = &ConfigSite> {
@@ -160,29 +180,26 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-    fn visit(&mut self, path: &Path, origin: Option<Origin>, optional: bool) -> Option<Arc<Path>> {
+    fn visit(
+        &mut self,
+        path: &Path,
+        origin: Option<Origin>,
+        optional: bool,
+    ) -> Result<Option<Arc<Path>>, String> {
         let canonical = match std::fs::canonicalize(path) {
             Ok(path) => path,
             Err(err) => {
-                if !optional && let Some(origin) = origin {
-                    self.problem(
-                        &origin,
-                        ProblemSeverity::Error,
-                        format!("could not import {}: {err}", path.display()),
-                    );
+                if optional {
+                    return Ok(None);
                 }
-                return None;
+                return Err(format!("could not import {}: {err}", path.display()));
             }
         };
         if self.active.contains(&canonical) {
-            if let Some(origin) = origin {
-                self.problem(
-                    &origin,
-                    ProblemSeverity::Error,
-                    format!("configuration import cycle through {}", canonical.display()),
-                );
-            }
-            return Some(Arc::from(canonical));
+            return Err(format!(
+                "configuration import cycle through {}",
+                canonical.display()
+            ));
         }
 
         let repeated = self.snapshot.files.contains_key(&canonical);
@@ -192,14 +209,10 @@ impl Builder<'_> {
             let text = match std::fs::read_to_string(&canonical) {
                 Ok(text) => text,
                 Err(err) => {
-                    if !optional && let Some(origin) = origin {
-                        self.problem(
-                            &origin,
-                            ProblemSeverity::Error,
-                            format!("could not import {}: {err}", canonical.display()),
-                        );
+                    if optional {
+                        return Ok(None);
                     }
-                    return None;
+                    return Err(format!("could not import {}: {err}", canonical.display()));
                 }
             };
             let file = Arc::new(ConfigurationFile {
@@ -222,6 +235,13 @@ impl Builder<'_> {
                 ),
             );
         }
+        if let Some(error) = file.parsed.errors.first() {
+            return Err(format!(
+                "malformed Bazelrc {}: {}",
+                canonical.display(),
+                error.message
+            ));
+        }
 
         self.active.push(canonical);
         for (line_number, line) in file.parsed.lines.iter().enumerate() {
@@ -235,21 +255,41 @@ impl Builder<'_> {
                         &line.tokens[1]
                     };
                     let target = resolve_import(self.root, &path_token.text);
-                    let loaded = active.then(|| {
-                        self.visit(
+                    let loaded = if active {
+                        match self.visit(
                             &target,
                             Some(Origin {
                                 file: Arc::clone(&file.path),
                                 range: path_token.range,
                             }),
                             !matches!(directive, Directive::Import),
-                        )
-                    });
+                        ) {
+                            Ok(loaded) => loaded,
+                            Err(message) => {
+                                let origin = Origin {
+                                    file: Arc::clone(&file.path),
+                                    range: path_token.range,
+                                };
+                                self.problem(&origin, ProblemSeverity::Error, message.clone());
+                                self.snapshot.imports.push(ImportSite {
+                                    file: Arc::clone(&file.path),
+                                    range: path_token.range,
+                                    target,
+                                    loaded: None,
+                                    active,
+                                });
+                                self.active.pop();
+                                return Err(message);
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     self.snapshot.imports.push(ImportSite {
                         file: Arc::clone(&file.path),
                         range: path_token.range,
                         target,
-                        loaded: loaded.flatten(),
+                        loaded,
                         active,
                     });
                 }
@@ -257,7 +297,7 @@ impl Builder<'_> {
             }
         }
         self.active.pop();
-        Some(file.path.clone())
+        Ok(Some(file.path.clone()))
     }
 
     fn entry(&mut self, file: Arc<ConfigurationFile>, line_number: usize) {
@@ -435,7 +475,32 @@ mod tests {
     }
 
     #[test]
-    fn a_cycle_is_an_error_but_a_diamond_replays_entries() {
+    fn optional_imports_propagate_malformed_files() {
+        let workspace = Workspace::new();
+        workspace.write(".bazelrc", "try-import config/child\nbuild --jobs=1\n");
+        workspace.write("config/child", "import one two\n");
+        let snapshot = ConfigurationSnapshot::build(&workspace.0);
+        assert_eq!(snapshot.entries.len(), 0);
+        assert_eq!(snapshot.problems.len(), 1);
+        assert!(snapshot.problems[0].message.contains("malformed Bazelrc"));
+        assert!(snapshot.imports[0].loaded.is_none());
+    }
+
+    #[test]
+    fn inactive_and_missing_import_targets_are_not_graph_members() {
+        let workspace = Workspace::new();
+        workspace.write(
+            ".bazelrc",
+            "try-import-if-bazel-version >8.7.0 config/inactive\n\
+             try-import config/missing\n",
+        );
+        let snapshot = ConfigurationSnapshot::build(&workspace.0);
+        assert!(!snapshot.includes(&workspace.0.join("config/inactive")));
+        assert!(!snapshot.includes(&workspace.0.join("config/missing")));
+    }
+
+    #[test]
+    fn a_diamond_replays_entries() {
         let workspace = Workspace::new();
         workspace.write(
             ".bazelrc",
@@ -449,23 +514,29 @@ mod tests {
             "config/right.bazelrc",
             "import config/shared.bazelrc\nbuild --define=right=1\n",
         );
-        workspace.write(
-            "config/shared.bazelrc",
-            "try-import config/left.bazelrc\nbuild:shared --define=shared=1\n",
-        );
+        workspace.write("config/shared.bazelrc", "build:shared --define=shared=1\n");
         let snapshot = ConfigurationSnapshot::build(&workspace.0);
-        assert_eq!(snapshot.entries.len(), 5);
-        assert!(
-            snapshot
-                .problems
-                .iter()
-                .any(|problem| problem.message.contains("cycle"))
-        );
+        assert_eq!(snapshot.entries.len(), 4);
         assert!(
             snapshot
                 .problems
                 .iter()
                 .any(|problem| problem.severity == ProblemSeverity::Warning)
+        );
+    }
+
+    #[test]
+    fn an_import_cycle_aborts_the_graph() {
+        let workspace = Workspace::new();
+        workspace.write(".bazelrc", "import config/child\nbuild --jobs=1\n");
+        workspace.write("config/child", "import .bazelrc\nbuild --jobs=2\n");
+        let snapshot = ConfigurationSnapshot::build(&workspace.0);
+        assert!(snapshot.entries.is_empty());
+        assert!(
+            snapshot
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("cycle"))
         );
     }
 }
