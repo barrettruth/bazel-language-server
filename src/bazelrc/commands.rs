@@ -54,6 +54,25 @@ pub fn applies(requested: &str, defined: &str) -> bool {
     }
 }
 
+/// Rc scopes Bazel 8.7 consults for one concrete command, in expansion order.
+#[must_use]
+pub fn scopes(command: &str) -> Vec<&str> {
+    if !NAMES.contains(&command) {
+        return Vec::new();
+    }
+    if matches!(command, "always" | "common" | "startup") {
+        return vec![command];
+    }
+    let mut scopes = vec!["always", "common"];
+    for inherited in ["build", "test"] {
+        if inherited != command && applies(command, inherited) {
+            scopes.push(inherited);
+        }
+    }
+    scopes.push(command);
+    scopes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,5 +91,14 @@ mod tests {
         assert!(!accepts_config("future-command"));
         assert!(accepts_config("build"));
         assert!(accepts_config("common"));
+    }
+
+    #[test]
+    fn scopes_are_ordered_from_broadest_to_invoked() {
+        assert_eq!(scopes("build"), ["always", "common", "build"]);
+        assert_eq!(
+            scopes("coverage"),
+            ["always", "common", "build", "test", "coverage"]
+        );
     }
 }

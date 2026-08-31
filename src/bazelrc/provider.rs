@@ -81,13 +81,14 @@ fn answer(
     }
     if method == HoverRequest::METHOD {
         let params: HoverParams = serde_json::from_value(request.params.clone())?;
-        let value = catalog.and_then(|catalog| {
-            hover::hover(
-                document,
-                catalog,
-                params.text_document_position_params.position,
-            )
-        });
+        let value = hover::hover(
+            document,
+            docs,
+            configuration,
+            catalog,
+            root,
+            params.text_document_position_params.position,
+        );
         return Ok(serde_json::to_value(value)?);
     }
     if method == ReferencesRequest::METHOD {
