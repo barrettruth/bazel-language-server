@@ -5,7 +5,7 @@ description: Exact Bazel 8.7 configuration support in bazel-language-server
 toc: true
 ---
 
-import BazelrcSupportMatrix from "../components/BazelrcSupportMatrix.astro";
+import BazelrcBehaviorInventory from "../components/BazelrcBehaviorInventory.astro";
 
 # Bazelrc
 
@@ -13,13 +13,13 @@ The Bazelrc language surface implements upstream Bazel 8.7.0. It is separate
 from Starlark: Bazelrc files are never parsed, formatted or linted by
 `buildifier`.
 
-## Support matrix
+## Behavior inventory
 
-<BazelrcSupportMatrix />
+<BazelrcBehaviorInventory />
 
 The tracked
 [Bazelrc 8.7 specification](https://github.com/barrettruth/bazel-language-server/blob/main/docs/bazelrc-8.7.md)
-defines the implementation contract behind this matrix.
+defines the implementation contract behind this inventory.
 
 ## Files and imports
 
@@ -104,5 +104,4 @@ never sent to buildifier.
 
 ## Boundaries
 
-The matrix above is the exhaustive public inventory as of its review date.
-Roadmap items remain separate from shipped behavior.
+The inventory above is the exhaustive public record as of its review date.

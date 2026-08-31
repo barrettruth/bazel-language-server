@@ -1,0 +1,47 @@
+---
+import {
+  bazelrcBehavior,
+  bazelrcBehaviorReviewed,
+  bazelrcSourceCommit,
+} from "../data/bazelrc-behavior";
+
+const sourceUrl = `https://github.com/bazelbuild/bazel/commit/${bazelrcSourceCommit}`;
+---
+
+<p>
+  Reviewed <time datetime={bazelrcBehaviorReviewed}>{bazelrcBehaviorReviewed}</time>
+  against upstream Bazel <a href={sourceUrl}><code>8.7.0</code></a>. Each entry
+  states the language server's exact behavior and boundary.
+</p>
+
+<div class="behavior-inventory">
+  {
+    bazelrcBehavior.map((section) => {
+      const sectionId = `behavior-${section.area
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")}`;
+
+      return (
+        <section class="behavior-section" aria-labelledby={sectionId}>
+          <h3 id={sectionId}>{section.area}</h3>
+          <table class="behavior-table">
+            <thead>
+              <tr>
+                <th scope="col">Capability</th>
+                <th scope="col">Exact behavior</th>
+              </tr>
+            </thead>
+            <tbody>
+              {section.rows.map((entry) => (
+                <tr>
+                  <td class="behavior-topic">{entry.topic}</td>
+                  <td class="behavior-detail">{entry.behavior}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      );
+    })
+  }
+</div>

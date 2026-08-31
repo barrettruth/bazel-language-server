@@ -87,7 +87,7 @@ server does not select a nearby flag catalog or silently fall back to one.
 
 The [normative Bazelrc 8.7 specification](docs/bazelrc-8.7.md) records the
 source-backed language contract. The website keeps the corresponding
-[dated support matrix](https://bazel-language-server.com/bazelrc.html#support-matrix)
+[dated behavior inventory](https://bazel-language-server.com/bazelrc.html#behavior-inventory)
 as the exhaustive public inventory.
 
 ## Configuration
