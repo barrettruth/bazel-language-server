@@ -23,9 +23,9 @@ defines the implementation contract behind this matrix.
 
 ## Files and imports
 
-The server recognizes `.bazelrc` and every `*.bazelrc` file. It indexes the
-workspace `.bazelrc`, expanding reachable imports depth-first at their textual
-position.
+The server recognizes `.bazelrc`, every `*.bazelrc` file, and arbitrary
+filenames reached from the workspace import graph. It indexes the workspace
+`.bazelrc`, expanding reachable imports depth-first at their textual position.
 
 Supported directives are `import`, `try-import`, and the Bazel 8.7
 `try-import-if-bazel-version`. Required imports report read failures; missing
@@ -33,8 +33,9 @@ optional imports do not. `%workspace%/` is recognized exactly. Other relative
 paths resolve from the workspace root, matching the Bazel process working
 directory rather than the importing file's directory.
 
-Import paths receive document links and go-to-definition. Import-path
-completion is not supported.
+Import paths receive workspace-file completion, document links, structural
+hover, and go-to-definition. Completion quotes paths whose bytes would
+otherwise be tokenized differently.
 
 ## Commands and configurations
 
@@ -48,6 +49,11 @@ inside a named configuration body, and the server reports it as an error.
 Configuration names absent from the published workspace graph are warnings,
 not invalid-name errors, because another rc layer may declare them.
 
+The server reports branch-local expansion cycles, repeated configuration
+expansion, and chains of ten or more configurations. It does not render a
+final effective option sequence or automatically select a platform
+configuration.
+
 ## Native flags
 
 When the configured executable reports numeric release 8.7, the server reads
@@ -55,6 +61,7 @@ that binary's `help flags-as-proto` output with rc files disabled. The resulting
 catalog supplies:
 
 - command-filtered canonical, negative and abbreviated completion;
+- exact enum-value completion and membership checks;
 - hover with documentation, type, default, enum values, alternate spellings,
   commands, expansion, effect and metadata facts;
 - diagnostics for exact scope contradictions, missing required values,
@@ -76,7 +83,17 @@ native lookup.
 Semantic highlighting distinguishes directives and command keys, version
 conditions, import paths, option tokens and comments. Continued lines and
 comment runs fold, and selection ranges expand through tokens and logical
-lines. These features do not require Bazel.
+lines. Commands, rc scopes, imports, and configurations have structural hover.
+Configuration names support references, document highlights, document and
+workspace symbols, and conservative workspace rename. These features do not
+require Bazel.
+
+## Formatting
+
+Formatting intentionally returns no edits. Bazel 8.7 defines tokenization but
+no canonical rc-file layout, and whitespace changes around continuations,
+comments, quotes, and escapes can change the option stream. Bazelrc files are
+never sent to buildifier.
 
 ## Boundaries
 

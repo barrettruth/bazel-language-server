@@ -60,23 +60,27 @@ the server does not select a nearby flag catalog or silently fall back to one.
 
 **Without Bazel**
 
-- Command and configuration completion
+- Command, configuration, and workspace import-path completion
 - Import links and go-to-definition for imports and configurations
-- Semantic tokens, folding, selection ranges, and diagnostics
+- Structural hover, semantic tokens, folding, selection ranges, and diagnostics
+- Configuration references, highlights, document/workspace symbols, and
+  conservative rename
+- Configuration cycle, repeated-expansion, and deep-chain diagnostics
 - A workspace graph rooted at `.bazelrc`, with open-buffer configuration
   overlays
 
 **With an exact Bazel 8.7 catalog**
 
 - Command-scoped canonical, negative, and abbreviated flag completion
+- Enum-value completion and exact membership diagnostics
 - Native flag hover with documentation and catalog metadata
 - Conservative scope, value, old-name, deprecation, and status diagnostics
 
 **Not supported**
 
-- Formatting, rename, references, and configuration symbols
-- Import-path and flag-value completion
-- Converter-specific value and configuration expansion-cycle diagnostics
+- Whole-document formatting
+- Effective option rendering and automatic platform configuration selection
+- Converter-specific non-enum value validation
 - Reconstruction of system, home, and explicit rc layers
 
 </details>

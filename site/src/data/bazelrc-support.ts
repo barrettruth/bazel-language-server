@@ -49,9 +49,16 @@ export const bazelrcSupport: BazelrcSupportSection[] = [
         boundary: "The filename must be exact or end in .bazelrc.",
       },
       {
-        feature: "Other rc filenames such as bazel.rc",
+        feature: "Arbitrary imported filenames",
+        supported: true,
+        boundary:
+          "A regular file becomes Bazelrc when reached from the workspace import graph.",
+      },
+      {
+        feature: "Unrelated open files such as bazel.rc",
         supported: false,
-        boundary: "Rename or configure the file with a .bazelrc suffix.",
+        boundary:
+          "Require a .bazelrc suffix or published import-graph membership.",
       },
       {
         feature: "Starlark parsing, buildifier formatting, or lint",
@@ -260,17 +267,18 @@ export const bazelrcSupport: BazelrcSupportSection[] = [
         feature: "Effective option/config expansion",
         supported: false,
         boundary:
-          "The server indexes references; it does not build a final command line.",
+          "Graph analysis is supported; a final option sequence is not rendered.",
       },
       {
         feature: "Configuration expansion-cycle diagnostics",
-        supported: false,
-        boundary: "Requires ordered owner-to-reference expansion edges.",
+        supported: true,
+        boundary: "Branch-local active-chain cycles are errors.",
       },
       {
         feature: "Repeated/deep expansion warnings",
-        supported: false,
-        boundary: "Requires the same expansion graph.",
+        supported: true,
+        boundary:
+          "Every occurrence is traversed; chains of ten or more configurations warn.",
       },
       {
         feature: "Automatic platform configuration selection",
@@ -352,9 +360,20 @@ export const bazelrcSupport: BazelrcSupportSection[] = [
         boundary: "They are outside the native catalog and workspace snapshot.",
       },
       {
-        feature: "Flag or enum value completion",
+        feature: "Enum value completion",
+        supported: true,
+        boundary: "Only exact nonempty enum sets reported by the 8.7 catalog.",
+      },
+      {
+        feature: "Enum membership validation",
+        supported: true,
+        boundary:
+          "Unknown values are errors only for an exact reported enum set.",
+      },
+      {
+        feature: "Other flag-value completion",
         supported: false,
-        boundary: "Enum metadata appears in hover only.",
+        boundary: "Non-enum converters do not expose a finite value set.",
       },
       {
         feature: "Converter-specific value validation",
@@ -373,8 +392,9 @@ export const bazelrcSupport: BazelrcSupportSection[] = [
       },
       {
         feature: "Import-path completion",
-        supported: false,
-        boundary: "Paths are not scanned from request handlers.",
+        supported: true,
+        boundary:
+          "Uses a bounded published workspace-file snapshot; request handlers do not scan.",
       },
       {
         feature: "Import document links",
@@ -427,28 +447,31 @@ export const bazelrcSupport: BazelrcSupportSection[] = [
       },
       {
         feature: "Command/config/import hover",
-        supported: false,
-        boundary: "Hover is native-flag-only.",
+        supported: true,
+        boundary: "Structural facts are available without a flag catalog.",
       },
       {
         feature: "Document and workspace symbols for configurations",
-        supported: false,
-        boundary: "Bazelrc requests do not expose symbols.",
+        supported: true,
+        boundary: "Declarations use decoded names and exact name-only ranges.",
       },
       {
         feature: "Configuration references and highlights",
-        supported: false,
-        boundary: "Only go-to-definition is implemented.",
+        supported: true,
+        boundary:
+          "Case-sensitive decoded identity across saved and open graph files.",
       },
       {
         feature: "Rename",
-        supported: false,
-        boundary: "No Bazelrc rename or prepare-rename.",
+        supported: true,
+        boundary:
+          "Declared names only; nonempty bare fragments; collisions are refused.",
       },
       {
         feature: "Formatting",
         supported: false,
-        boundary: "Bazelrc never reaches buildifier.",
+        boundary:
+          "Intentional non-feature: Bazel defines no canonical semantics-safe layout.",
       },
       {
         feature: "Implementation, code lens, and inlay hints",
