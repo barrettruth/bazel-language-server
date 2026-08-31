@@ -5,15 +5,13 @@ use std::path::Path;
 use anyhow::Result;
 use lsp_server::{Request, Response};
 use lsp_types::{
-    CompletionParams, CompletionRequest, DefinitionParams, DefinitionRequest, Diagnostic,
-    DiagnosticSeverity, DocumentLinkParams, DocumentLinkRequest, FoldingRangeParams,
-    FoldingRangeRequest, HoverParams, HoverRequest, LspRequestMethod, Range, Request as _,
-    SelectionRangeParams, SelectionRangeRequest, SemanticTokensParams, SemanticTokensRequest, Uri,
+    CompletionParams, CompletionRequest, DefinitionParams, DefinitionRequest, DocumentLinkParams,
+    DocumentLinkRequest, FoldingRangeParams, FoldingRangeRequest, HoverParams, HoverRequest,
+    LspRequestMethod, Request as _, SelectionRangeParams, SelectionRangeRequest,
+    SemanticTokensParams, SemanticTokensRequest, Uri,
 };
 
-use super::{
-    ConfigurationSnapshot, FlagCatalog, ProblemSeverity, completion, hover, navigation, structural,
-};
+use super::{ConfigurationSnapshot, FlagCatalog, completion, hover, navigation, structural};
 use crate::document::{Document, Documents};
 
 /// Route a text-document request here when its buffer is Bazelrc.
@@ -135,55 +133,6 @@ fn request_document<'a>(request: &Request, docs: &'a Documents) -> Option<&'a Do
     docs.get(&uri)
 }
 
-/// Structural and import-graph findings in one current Bazelrc buffer.
-#[must_use]
-pub fn diagnostics(document: &Document, configuration: &ConfigurationSnapshot) -> Vec<Diagnostic> {
-    let Some(parsed) = document.bazelrc() else {
-        return Vec::new();
-    };
-    let mut diagnostics: Vec<_> = parsed
-        .errors
-        .iter()
-        .map(|error| Diagnostic {
-            range: span(document, error.range),
-            severity: Some(DiagnosticSeverity::Error),
-            source: Some("bazel-language-server".to_owned()),
-            message: error.message.clone().into(),
-            ..Default::default()
-        })
-        .collect();
-    let saved_is_current = configuration
-        .files
-        .get(document.path())
-        .is_some_and(|file| file.text.as_ref() == document.text());
-    if saved_is_current {
-        diagnostics.extend(
-            configuration
-                .problems
-                .iter()
-                .filter(|problem| problem.file.as_ref() == document.path())
-                .map(|problem| Diagnostic {
-                    range: span(document, problem.range),
-                    severity: Some(match problem.severity {
-                        ProblemSeverity::Error => DiagnosticSeverity::Error,
-                        ProblemSeverity::Warning => DiagnosticSeverity::Warning,
-                    }),
-                    source: Some("bazel-language-server".to_owned()),
-                    message: problem.message.to_string().into(),
-                    ..Default::default()
-                }),
-        );
-    }
-    diagnostics
-}
-
-fn span(document: &Document, range: super::syntax::Span) -> Range {
-    Range {
-        start: document.line_index().position(document.text(), range.start),
-        end: document.line_index().position(document.text(), range.end),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,7 +179,8 @@ mod tests {
     fn malformed_directives_use_bazelrc_diagnostics() {
         let (docs, uri) = documents("import one two\n");
         let document = docs.get(&uri).unwrap();
-        let diagnostics = diagnostics(document, &ConfigurationSnapshot::default());
+        let diagnostics =
+            super::super::diagnostics(document, &docs, &ConfigurationSnapshot::default(), None);
         assert_eq!(diagnostics.len(), 1);
         assert!(matches!(
             &diagnostics[0].message,

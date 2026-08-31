@@ -225,7 +225,7 @@ impl FlagCatalog {
     }
 }
 
-fn is_build_setting(option: &str) -> bool {
+pub(super) fn is_build_setting(option: &str) -> bool {
     matches!(
         option,
         value if value.starts_with("--//")

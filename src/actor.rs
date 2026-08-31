@@ -22,14 +22,28 @@ pub struct Bazel {
 
 impl Bazel {
     #[must_use]
-    pub fn spawn(root: Option<PathBuf>, index: IndexHandle, catalog: CatalogHandle) -> Self {
+    pub fn spawn(
+        root: Option<PathBuf>,
+        index: IndexHandle,
+        catalog: CatalogHandle,
+        semantic_wake: crossbeam_channel::Sender<()>,
+    ) -> Self {
         let (tx, rx) = channel();
         let running = Arc::new(Mutex::new(Running::default()));
         let thread = {
             let running = Arc::clone(&running);
             std::thread::Builder::new()
                 .name("bazel".to_owned())
-                .spawn(move || serve(root.as_deref(), &rx, &running, &index, &catalog))
+                .spawn(move || {
+                    serve(
+                        root.as_deref(),
+                        &rx,
+                        &running,
+                        &index,
+                        &catalog,
+                        &semantic_wake,
+                    );
+                })
                 .expect("spawning the bazel thread")
         };
         Self {
@@ -114,6 +128,7 @@ fn serve(
     running: &Mutex<Running>,
     index: &IndexHandle,
     catalog: &CatalogHandle,
+    semantic_wake: &crossbeam_channel::Sender<()>,
 ) {
     let mut pending = VecDeque::new();
     let mut config = None;
@@ -136,6 +151,7 @@ fn serve(
                 index.store_graph(Tier::default());
                 index.store_repos(Repos::default());
                 catalog.clear();
+                let _ = semantic_wake.try_send(());
                 let Some(root) = root else {
                     config = Some(next);
                     continue;
@@ -166,6 +182,7 @@ fn serve(
                             Ok(Some(flags)) => {
                                 tracing::info!(flags = flags.flags().count(), "bazel flag catalog");
                                 catalog.store(flags);
+                                let _ = semantic_wake.try_send(());
                             }
                             Err(err) => {
                                 tracing::warn!("the Bazel flag catalog is unavailable: {err:#}");

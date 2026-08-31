@@ -61,6 +61,7 @@ pub struct Problem {
 /// The last-saved workspace rc graph.
 #[derive(Debug, Default)]
 pub struct ConfigurationSnapshot {
+    pub root: Option<Arc<Path>>,
     pub files: FxHashMap<PathBuf, Arc<ConfigurationFile>>,
     pub entries: Vec<Entry>,
     pub declarations: Vec<ConfigSite>,
@@ -75,7 +76,10 @@ impl ConfigurationSnapshot {
     pub fn build(root: &Path) -> Self {
         let mut builder = Builder {
             root,
-            snapshot: Self::default(),
+            snapshot: Self {
+                root: Some(Arc::from(root)),
+                ..Self::default()
+            },
             active: Vec::new(),
         };
         drop(builder.visit(&root.join(".bazelrc"), None, false));
@@ -284,18 +288,17 @@ pub(super) fn resolve_import(root: &Path, raw: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
 
     struct Workspace(PathBuf);
 
+    static NEXT_WORKSPACE: AtomicU64 = AtomicU64::new(0);
+
     impl Workspace {
         fn new() -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
+            let unique = NEXT_WORKSPACE.fetch_add(1, Ordering::Relaxed);
             let root =
                 std::env::temp_dir().join(format!("bls-bazelrc-{}-{unique}", std::process::id()));
             std::fs::create_dir_all(root.join("config")).unwrap();

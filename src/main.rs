@@ -116,8 +116,7 @@ struct RequestContext<'a> {
     connection: &'a Connection,
     workers: &'a worker::Pool<Completed>,
     index: &'a IndexHandle,
-    configuration: &'a bazelrc::ConfigurationHandle,
-    catalog: &'a bazelrc::CatalogHandle,
+    bazelrc: &'a BazelrcState,
     root: Option<&'a Path>,
     bazel: &'a Bazel,
     watch: Option<&'a watch::Watch>,
@@ -152,8 +151,8 @@ impl RequestContext<'_> {
         let queued_id = request.id.clone();
         let snapshot = docs.clone();
         let index = self.index.load();
-        let configuration = self.configuration.load();
-        let catalog = self.catalog.load();
+        let configuration = self.bazelrc.configuration.load();
+        let catalog = self.bazelrc.catalog.load();
         let root = self.root.map(Path::to_path_buf);
         let link_support = self.link_support;
         let admitted = self.workers.execute(move || {
@@ -203,6 +202,91 @@ impl RequestContext<'_> {
                 )))?;
         }
         Ok(false)
+    }
+}
+
+#[derive(Default)]
+struct BazelrcState {
+    configuration: bazelrc::ConfigurationHandle,
+    catalog: bazelrc::CatalogHandle,
+}
+
+struct Session<'a> {
+    request_context: RequestContext<'a>,
+    diagnostics: &'a worker::Latest<Uri, Completed>,
+    completed: crossbeam_channel::Receiver<Completed>,
+    ready: crossbeam_channel::Receiver<watch::Ready>,
+    semantic_wake: crossbeam_channel::Receiver<()>,
+}
+
+impl Session<'_> {
+    fn run(
+        mut self,
+        requests: &mut ReqQueue<worker::Cancellation, Outgoing>,
+        docs: &mut Documents,
+        index_progress: &mut Option<IndexProgress>,
+    ) -> Result<()> {
+        'session: loop {
+            crossbeam_channel::select! {
+            recv(self.request_context.connection.receiver) -> message => {
+                let Ok(message) = message else { break };
+                match message {
+                    Message::Request(request) => {
+                        if self.request_context.dispatch(requests, docs, request)? {
+                            break 'session;
+                        }
+                    }
+                    Message::Notification(note) => handle_notification(
+                        self.request_context.connection,
+                        self.diagnostics,
+                        requests,
+                        docs,
+                        self.request_context.bazelrc,
+                        self.request_context.bazel,
+                        note,
+                    )?,
+                    Message::Response(response) => {
+                        if let Some(Outgoing::IndexProgress) =
+                            requests.outgoing.complete(response.id.clone())
+                        {
+                            if response.response_result.is_ok() {
+                                if let Some(progress) = index_progress {
+                                    progress.created(self.request_context.connection)?;
+                                }
+                            } else {
+                                *index_progress = None;
+                            }
+                        }
+                    }
+                }
+            }
+            recv(self.completed) -> completed => {
+                let Ok(completed) = completed else { break };
+                handle_completed(self.request_context.connection, requests, docs, completed)?;
+            }
+            recv(self.ready) -> ready => {
+                if let Ok(ready) = ready
+                    && let Some(progress) = index_progress
+                {
+                    progress.ready(self.request_context.connection, ready)?;
+                }
+                self.ready = crossbeam_channel::never();
+            }
+            recv(self.semantic_wake) -> wake => {
+                if wake.is_err() {
+                    break;
+                }
+                while self.semantic_wake.try_recv().is_ok() {}
+                schedule_bazelrc_diagnostics(
+                    self.request_context.connection,
+                    self.diagnostics,
+                    docs,
+                    self.request_context.bazelrc,
+                )?;
+            }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -498,85 +582,47 @@ fn run_server() -> Result<()> {
     let mut index_progress =
         start_index_progress(&connection, &init, root.is_some(), &mut requests)?;
     let index = IndexHandle::new();
-    let configuration = bazelrc::ConfigurationHandle::new();
-    let catalog = bazelrc::CatalogHandle::new();
-    let bazel = std::sync::Arc::new(Bazel::spawn(root.clone(), index.clone(), catalog.clone()));
+    let bazelrc = BazelrcState::default();
+    let (semantic_wake_tx, semantic_wake_rx) = crossbeam_channel::bounded(1);
+    let bazel = std::sync::Arc::new(Bazel::spawn(
+        root.clone(),
+        index.clone(),
+        bazelrc.catalog.clone(),
+        semantic_wake_tx.clone(),
+    ));
     bazel.reconfigure(bazel_settings(init.initialization_options.as_ref()).unwrap_or_default());
-    let (watch, mut ready_rx) = start_watch(root.as_deref(), &index, &configuration, &bazel);
+    let (watch, ready_rx) = start_watch(
+        root.as_deref(),
+        &index,
+        &bazelrc.configuration,
+        &bazel,
+        semantic_wake_tx,
+    );
     tracing::info!("ready");
 
     let mut docs = Documents::new(root.clone(), index.clone());
-    let worker_count = std::thread::available_parallelism()
-        .map_or(2, std::num::NonZero::get)
-        .clamp(2, 8);
+    let worker_count = worker_count();
     let (completed_tx, completed_rx) = crossbeam_channel::bounded(worker_count * 8);
     let workers = worker::Pool::new(worker_count, &completed_tx);
     let diagnostics = worker::Latest::new(&completed_tx);
-    let session = (|| -> Result<()> {
-        let request_context = RequestContext {
+    let session = Session {
+        request_context: RequestContext {
             connection: &connection,
             workers: &workers,
             index: &index,
-            configuration: &configuration,
-            catalog: &catalog,
+            bazelrc: &bazelrc,
             root: root.as_deref(),
             bazel: &bazel,
             watch: watch.as_ref(),
             link_support,
-        };
+        },
+        diagnostics: &diagnostics,
+        completed: completed_rx,
+        ready: ready_rx,
+        semantic_wake: semantic_wake_rx,
+    }
+    .run(&mut requests, &mut docs, &mut index_progress);
 
-        'session: loop {
-            crossbeam_channel::select! {
-            recv(connection.receiver) -> message => {
-                let Ok(message) = message else { break };
-                match message {
-                    Message::Request(request) => {
-                        if request_context.dispatch(&mut requests, &docs, request)? {
-                            break 'session;
-                        }
-                    }
-                    Message::Notification(note) => handle_notification(
-                        &connection,
-                        &diagnostics,
-                        &mut requests,
-                        &mut docs,
-                        &configuration,
-                        &bazel,
-                        note,
-                    )?,
-                    Message::Response(response) => {
-                        if let Some(Outgoing::IndexProgress) =
-                            requests.outgoing.complete(response.id.clone())
-                        {
-                            if response.response_result.is_ok() {
-                                if let Some(progress) = &mut index_progress {
-                                    progress.created(&connection)?;
-                                }
-                            } else {
-                                index_progress = None;
-                            }
-                        }
-                    }
-                }
-            }
-            recv(completed_rx) -> completed => {
-                let Ok(completed) = completed else { break };
-                handle_completed(&connection, &mut requests, &docs, completed)?;
-            }
-            recv(ready_rx) -> ready => {
-                if let Ok(ready) = ready
-                    && let Some(progress) = &mut index_progress
-                {
-                    progress.ready(&connection, ready)?;
-                }
-                ready_rx = crossbeam_channel::never();
-            }
-            }
-        }
-        Ok(())
-    })();
-
-    drop(completed_rx);
     drop(diagnostics);
     drop(workers);
     drop(connection);
@@ -587,11 +633,18 @@ fn run_server() -> Result<()> {
     Ok(())
 }
 
+fn worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map_or(2, std::num::NonZero::get)
+        .clamp(2, 8)
+}
+
 fn start_watch(
     root: Option<&Path>,
     index: &IndexHandle,
     configuration: &bazelrc::ConfigurationHandle,
     bazel: &std::sync::Arc<Bazel>,
+    semantic_wake: crossbeam_channel::Sender<()>,
 ) -> (
     Option<watch::Watch>,
     crossbeam_channel::Receiver<watch::Ready>,
@@ -607,6 +660,7 @@ fn start_watch(
             configuration.clone(),
             bazel.clone(),
             ready_tx,
+            semantic_wake,
         )),
         ready_rx,
     )
@@ -1141,7 +1195,7 @@ fn handle_notification(
     diagnostics: &worker::Latest<Uri, Completed>,
     requests: &mut ReqQueue<worker::Cancellation, Outgoing>,
     docs: &mut Documents,
-    configuration: &bazelrc::ConfigurationHandle,
+    bazelrc: &BazelrcState,
     bazel: &Bazel,
     note: lsp_server::Notification,
 ) -> Result<()> {
@@ -1173,7 +1227,7 @@ fn handle_notification(
 
     match apply(&note, docs) {
         Ok(Applied::Changed(uri)) => {
-            schedule_diagnostics(connection, diagnostics, docs, configuration, &uri)?;
+            schedule_diagnostics(connection, diagnostics, docs, bazelrc, &uri)?;
         }
         Ok(Applied::Closed { uri, version }) => {
             diagnostics.cancel(&uri);
@@ -1189,7 +1243,27 @@ fn schedule_diagnostics(
     connection: &Connection,
     diagnostics: &worker::Latest<Uri, Completed>,
     docs: &Documents,
-    configuration: &bazelrc::ConfigurationHandle,
+    bazelrc: &BazelrcState,
+    uri: &Uri,
+) -> Result<()> {
+    let configuration = bazelrc.configuration.load();
+    let catalog = bazelrc.catalog.load();
+    schedule_diagnostics_from(
+        connection,
+        diagnostics,
+        docs,
+        &configuration,
+        catalog.as_deref(),
+        uri,
+    )
+}
+
+fn schedule_diagnostics_from(
+    connection: &Connection,
+    diagnostics: &worker::Latest<Uri, Completed>,
+    docs: &Documents,
+    configuration: &bazelrc::ConfigurationSnapshot,
+    catalog: Option<&bazelrc::FlagCatalog>,
     uri: &Uri,
 ) -> Result<()> {
     let Some(document) = docs.get(uri) else {
@@ -1197,7 +1271,7 @@ fn schedule_diagnostics(
     };
     let version = document.version();
     let syntax = if document.is_bazelrc() {
-        bazelrc::diagnostics(document, &configuration.load())
+        bazelrc::diagnostics(document, docs, configuration, catalog)
     } else {
         handlers::syntax_diagnostics(document)
     };
@@ -1212,6 +1286,32 @@ fn schedule_diagnostics(
             diagnostics: format::lint_cancelled(document.text(), document.kind(), cancellation),
             document,
         });
+    }
+    Ok(())
+}
+
+fn schedule_bazelrc_diagnostics(
+    connection: &Connection,
+    diagnostics: &worker::Latest<Uri, Completed>,
+    docs: &Documents,
+    bazelrc: &BazelrcState,
+) -> Result<()> {
+    let configuration = bazelrc.configuration.load();
+    let catalog = bazelrc.catalog.load();
+    let uris: Vec<_> = docs
+        .iter()
+        .filter(|(_, document)| document.is_bazelrc())
+        .map(|(uri, _)| uri.clone())
+        .collect();
+    for uri in uris {
+        schedule_diagnostics_from(
+            connection,
+            diagnostics,
+            docs,
+            &configuration,
+            catalog.as_deref(),
+            &uri,
+        )?;
     }
     Ok(())
 }

@@ -344,7 +344,8 @@ pub struct ConfigReference {
     pub range: Span,
 }
 
-/// Named configuration references, including split option/value spelling.
+/// Named configuration references. Bazel accepts split option/value spelling
+/// only outside a named configuration body.
 #[must_use]
 pub fn config_references(line: &Line, source: &str) -> Vec<ConfigReference> {
     let mut found = Vec::new();
@@ -361,7 +362,8 @@ pub fn config_references(line: &Line, source: &str) -> Vec<ConfigReference> {
                 name: name.to_owned(),
                 range,
             });
-        } else if option.text == "--config"
+        } else if !line.key().is_some_and(|key| key.text.contains(':'))
+            && option.text == "--config"
             && let Some(value) = options.next()
         {
             found.push(ConfigReference {
@@ -628,6 +630,16 @@ mod tests {
     fn an_argless_entry_does_not_declare_an_empty_config() {
         let parsed = parse("common:empty\n");
         assert_eq!(parsed.lines[0].statement, None);
+    }
+
+    #[test]
+    fn split_config_references_are_only_top_level() {
+        let parsed = parse("build --config dev\nbuild:outer --config inner\n");
+        assert_eq!(
+            config_references(&parsed.lines[0], "build --config dev\n")[0].name,
+            "dev"
+        );
+        assert!(config_references(&parsed.lines[1], "build:outer --config inner\n").is_empty());
     }
 
     #[test]

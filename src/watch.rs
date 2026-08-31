@@ -188,6 +188,14 @@ pub struct Ready {
     pub elapsed: Duration,
 }
 
+struct Publishers {
+    root: PathBuf,
+    index: IndexHandle,
+    configuration: ConfigurationHandle,
+    bazel: Arc<Bazel>,
+    semantic_wake: crossbeam_channel::Sender<()>,
+}
+
 impl Watch {
     /// Queue a full rebuild.
     pub fn reindex(&self) {
@@ -215,9 +223,17 @@ pub fn spawn(
     configuration: ConfigurationHandle,
     bazel: Arc<Bazel>,
     ready: crossbeam_channel::Sender<Ready>,
+    semantic_wake: crossbeam_channel::Sender<()>,
 ) -> Watch {
     let (tx, rx) = channel();
-    let watching = root.to_path_buf();
+    let publishers = Publishers {
+        root: root.to_path_buf(),
+        index,
+        configuration,
+        bazel,
+        semantic_wake,
+    };
+    let watching = publishers.root.clone();
     let events = tx.clone();
     let event_queue = Arc::new(EventQueue::default());
     let callback_queue = Arc::clone(&event_queue);
@@ -234,15 +250,7 @@ pub fn spawn(
                     None
                 }
             };
-            settle(
-                &watching,
-                &index,
-                &configuration,
-                &bazel,
-                &rx,
-                &ready,
-                &event_queue,
-            );
+            settle(&publishers, &rx, &ready, &event_queue);
         })
         .expect("spawning the watch thread");
     Watch {
@@ -270,17 +278,14 @@ fn establish(
 
 /// Build once, then collapse each event burst into one update.
 fn settle(
-    root: &Path,
-    index: &IndexHandle,
-    configuration: &ConfigurationHandle,
-    bazel: &Bazel,
+    publishers: &Publishers,
     rx: &Receiver<Wake>,
     ready: &crossbeam_channel::Sender<Ready>,
     events: &EventQueue,
 ) {
     let started = std::time::Instant::now();
-    rebuild(root, index, configuration, bazel, Invalidates::INITIAL, 0);
-    let snapshot = index.load_disk();
+    rebuild(publishers, Invalidates::INITIAL, 0);
+    let snapshot = publishers.index.load_disk();
     drop(ready.send(Ready {
         files: snapshot.files.len(),
         targets: snapshot.len(),
@@ -308,7 +313,7 @@ fn settle(
             }
         }
         nth += 1;
-        rebuild(root, index, configuration, bazel, reaches, nth);
+        rebuild(publishers, reaches, nth);
     }
 }
 
@@ -364,19 +369,12 @@ fn changes_package_tree(event: &notify::Event) -> bool {
 }
 
 /// Refresh the affected tiers.
-fn rebuild(
-    root: &Path,
-    index: &IndexHandle,
-    configuration: &ConfigurationHandle,
-    bazel: &Bazel,
-    reaches: Invalidates,
-    nth: u64,
-) {
+fn rebuild(publishers: &Publishers, reaches: Invalidates, nth: u64) {
     if reaches.full_targets {
         let started = std::time::Instant::now();
-        let built = crate::index::build_static(root);
+        let built = crate::index::build_static(&publishers.root);
         let targets = built.len();
-        index.store_disk(built);
+        publishers.index.store_disk(built);
         tracing::info!(
             nth,
             targets,
@@ -388,9 +386,10 @@ fn rebuild(
         let mut changed = reaches.target_files;
         changed.sort_unstable();
         changed.dedup();
-        let built = crate::index::update_static(root, &index.load_disk(), &changed);
+        let built =
+            crate::index::update_static(&publishers.root, &publishers.index.load_disk(), &changed);
         let targets = built.len();
-        index.store_disk(built);
+        publishers.index.store_disk(built);
         tracing::info!(
             nth,
             files = changed.len(),
@@ -402,10 +401,15 @@ fn rebuild(
         tracing::info!(nth, "the target table is untouched by this change");
     }
     if reaches.configuration {
-        configuration.store(crate::bazelrc::ConfigurationSnapshot::build(root));
+        publishers
+            .configuration
+            .store(crate::bazelrc::ConfigurationSnapshot::build(
+                &publishers.root,
+            ));
+        let _ = publishers.semantic_wake.try_send(());
     }
     if reaches.graph {
-        bazel.refresh();
+        publishers.bazel.refresh();
     }
 }
 
