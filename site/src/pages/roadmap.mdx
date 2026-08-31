@@ -35,5 +35,7 @@ control of the move; the language server supplies the accompanying edits.
 
 ## Bazel configuration
 
-Add `.bazelrc` completion, hover, and unknown-flag diagnostics using the flags
-reported by the user's configured Bazel binary.
+Retain configuration-to-configuration expansion edges, then report expansion
+cycles and repeated expansion without reconstructing external rc layers. Value
+validation waits for a source of converter semantics exact enough to avoid
+guessing from display type names.

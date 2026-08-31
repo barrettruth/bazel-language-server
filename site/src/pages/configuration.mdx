@@ -51,6 +51,11 @@ Without a supported Bazel, local source navigation, symbols, references,
 rename, syntax diagnostics, and editor structure remain available. External
 repositories and targets whose names are computed by macros do not.
 
+Bazelrc structure and workspace configuration navigation also work without a
+Bazel process. Native Bazelrc flag completion, hover and diagnostics activate
+only when the configured binary reports numeric release 8.7; there is no
+nearest-version fallback. See [Bazelrc](/bazelrc.html) for the exact boundary.
+
 ## Command line
 
 Inspect a workspace without an editor:

@@ -1,0 +1,44 @@
+---
+layout: ../layouts/DocLayout.astro
+title: Supported versions and files
+description: Bazel versions and file types supported by bazel-language-server
+toc: true
+---
+
+# Supported versions and files
+
+## Bazel versions
+
+| Capability | Version contract |
+| --- | --- |
+| Source-backed Starlark features | Bazel is optional |
+| Evaluated targets and repository mapping | Bazel 8.0 or newer |
+| Bazelrc grammar and configuration semantics | Upstream Bazel 8.7.0 |
+| Bazelrc native flag completion, hover and diagnostics | Catalog reported by a configured numeric 8.7 binary |
+
+The Bazelrc compatibility line is Bazel 8.7. A vendor suffix on that numeric
+release does not add vendor grammar support. Structural Bazelrc answers remain
+available with another release, but the server neither selects a nearby flag
+catalog nor falls back to a bundled one.
+
+## Starlark files
+
+The server recognizes `BUILD`, `BUILD.bazel`, `*.bzl`, `MODULE.bazel`,
+`REPO.bazel`, `VENDOR.bazel`, `WORKSPACE*`, `*.scl`, and Bazel query files.
+Their exact dialect and role are derived from the path and workspace.
+
+## Bazelrc files
+
+The exact filename `.bazelrc` and every filename ending in `.bazelrc` use the
+Bazelrc parser. A differently named rc file must use that suffix for the server
+to classify it as Bazelrc.
+
+The workspace configuration graph starts at the root `.bazelrc` and follows
+its reachable imports. System, home and explicit command-line rc files are not
+reconstructed.
+
+## Optional tools
+
+Bazel-backed features use the executable in `bazel.path`. Formatting and lint
+diagnostics for Starlark files use `buildifier` when it is installed. Bazelrc
+formatting is not supported.

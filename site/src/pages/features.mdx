@@ -1,11 +1,11 @@
 ---
 layout: ../layouts/DocLayout.astro
-title: Features and support
-description: Language features and Bazel support in bazel-language-server
+title: Features
+description: Language features in bazel-language-server
 toc: true
 ---
 
-# Features and support
+# Features
 
 ## Editing
 
@@ -51,10 +51,20 @@ Bazel itself is optional. Without it, the source-backed features stay active;
 macro-generated targets and external-repository navigation do not. External
 repositories must be fetched before there are files to navigate to.
 
+## Bazelrc
+
+For `.bazelrc` and `*.bazelrc`, the server provides command, configuration and
+native-flag completion; native-flag hover; import and configuration navigation;
+semantic highlighting; folding and selection ranges; and conservative
+diagnostics. The syntax contract is upstream Bazel 8.7, and native flag
+intelligence requires an exact numeric 8.7 catalog from the configured binary.
+
+See [Bazelrc](/bazelrc.html) for the precise feature and compatibility boundary.
+
 ## Boundaries
 
-Completion, unresolved-label diagnostics, code actions, file-move edits, and
-`.bazelrc` support are not available yet. Their dependency order is tracked on
-the [Roadmap](/roadmap.html).
+Starlark completion, unresolved-label diagnostics, code actions, and file-move
+edits are not available yet. Their dependency order is tracked on the
+[Roadmap](/roadmap.html).
 
 Target patterns such as `//pkg:all` deliberately have no single definition.

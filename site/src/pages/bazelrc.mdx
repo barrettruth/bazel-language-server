@@ -1,0 +1,76 @@
+---
+layout: ../layouts/DocLayout.astro
+title: Bazelrc
+description: Exact Bazel 8.7 configuration support in bazel-language-server
+toc: true
+---
+
+# Bazelrc
+
+The Bazelrc language surface implements upstream Bazel 8.7.0. It is separate
+from Starlark: Bazelrc files are never parsed, formatted or linted by
+`buildifier`.
+
+## Files and imports
+
+The server recognizes `.bazelrc` and every `*.bazelrc` file. It indexes the
+workspace `.bazelrc`, expanding reachable imports depth-first at their textual
+position.
+
+Supported directives are `import`, `try-import`, and the Bazel 8.7
+`try-import-if-bazel-version`. Required imports report read failures; missing
+optional imports do not. `%workspace%/` is recognized exactly. Other relative
+paths resolve from the workspace root, matching the Bazel process working
+directory rather than the importing file's directory.
+
+Import paths receive document links and go-to-definition. Import-path
+completion is not supported.
+
+## Commands and configurations
+
+Completion covers the Bazel 8.7 commands and the `startup`, `common`, and
+`always` rc scopes. Configuration completion and go-to-definition follow all
+applicable declarations in the workspace import graph, with open buffers taking
+precedence over saved files.
+
+Nested configurations use `--config=name`. Bazel rejects split `--config name`
+inside a named configuration body, and the server reports it as an error.
+Configuration names absent from the published workspace graph are warnings,
+not invalid-name errors, because another rc layer may declare them.
+
+## Native flags
+
+When the configured executable reports numeric release 8.7, the server reads
+that binary's `help flags-as-proto` output with rc files disabled. The resulting
+catalog supplies:
+
+- command-filtered canonical, negative and abbreviated completion;
+- hover with documentation, type, default, enum values, alternate spellings,
+  commands, expansion, effect and metadata facts;
+- diagnostics for exact scope contradictions, missing required values,
+  negative booleans with values, old names, deprecation, and no-op or hidden
+  status.
+
+`common` completion is the union of flags known to any non-startup command.
+`always` completion is the safe intersection across the binary's reported
+non-startup commands.
+
+A native-looking spelling absent from the catalog is reported only as “not
+recognized by the Bazel 8.7 native flag catalog.” The catalog omits internal
+flags, and Starlark settings, aliases, vendor behavior or external rc layers may
+still explain a spelling. Recognizable Starlark setting forms are exempt from
+native lookup.
+
+## Structural features
+
+Semantic highlighting distinguishes directives, commands, configurations,
+options, values and comments. Continued lines and comment runs fold, and
+selection ranges expand through tokens and logical lines. These features do not
+require Bazel.
+
+## Boundaries
+
+The server does not provide Bazelrc formatting, rename, references,
+import-path completion, converter-specific value validation, configuration
+expansion-cycle diagnostics, or reconstruction of system, home and explicit rc
+files. It does not infer semantics from a newer, older or bundled flag catalog.

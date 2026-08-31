@@ -45,9 +45,14 @@ cargo install --path . --locked
 Using Neovim's built-in LSP client:
 
 ```lua
+vim.filetype.add({
+  filename = { ['.bazelrc'] = 'bazelrc' },
+  pattern = { ['.*%.bazelrc'] = 'bazelrc' },
+})
+
 vim.lsp.config('bazel_ls', {
   cmd = { 'bazel-language-server' },
-  filetypes = { 'bzl' },
+  filetypes = { 'bzl', 'bazelrc' },
   root_markers = {
     'MODULE.bazel',
     'REPO.bazel',
@@ -63,7 +68,8 @@ vim.lsp.enable('bazel_ls')
 ```
 
 For another editor, start `bazel-language-server` over stdio for its Bazel or
-Starlark file type. No command arguments are required.
+Starlark file type and use `bazelrc` for `.bazelrc` and `*.bazelrc`. No command
+arguments are required.
 
 See [Configuration](/configuration.html) for Bazel settings and
-[Features and support](/features.html) for the available capabilities.
+[Features](/features.html) for the available capabilities.
