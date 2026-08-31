@@ -167,22 +167,7 @@ fn imported<'a>(
         return None;
     }
     let target = resolve_import(root, &token.text);
-    let identity = configuration
-        .identity(document.path())
-        .unwrap_or_else(|| document.path());
-    if let Some(site) = configuration.imports.iter().find(|site| {
-        site.file.as_ref() == identity && site.range == token.range && site.target == target
-    }) && site.active
-        && let Some(loaded) = site.loaded.as_deref()
-    {
-        return Some(loaded);
-    }
-    configuration
-        .imports
-        .iter()
-        .find(|site| site.active && site.target == target)?
-        .loaded
-        .as_deref()
+    configuration.loaded_import(&target)
 }
 
 fn contains(span: Span, offset: usize) -> bool {
@@ -257,10 +242,10 @@ mod tests {
     #[test]
     fn an_unsaved_active_condition_can_reuse_another_loaded_edge() {
         let root = Path::new("/ws");
-        let text = "try-import-if-bazel-version >=8.7.0 child.bazelrc\nimport child.bazelrc\n";
+        let text = "try-import-if-bazel-version >=8.7.0 ./child.bazelrc\nimport child.bazelrc\n";
         let document = Document::versioned(root.join(".bazelrc"), 2, text.to_owned(), Some(root));
         let tokens: Vec<_> = import_tokens(&document).collect();
-        let target = resolve_import(root, &tokens[0].text);
+        let target = resolve_import(root, &tokens[1].text);
         let loaded: Arc<Path> = Arc::from(root.join("child.bazelrc"));
         let configuration = ConfigurationSnapshot {
             imports: vec![

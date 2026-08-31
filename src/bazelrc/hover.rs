@@ -184,27 +184,12 @@ fn import_hover(
             field(&mut text, "Published state", Some("inactive"));
             return Some(plain_hover(document, hovered.range, text));
         }
-        let identity = configuration
-            .identity(document.path())
-            .unwrap_or_else(|| document.path());
-        let published = configuration
-            .imports
-            .iter()
-            .filter(|site| site.file.as_ref() == identity && site.target == target)
-            .find(|site| site.range == path.range)
-            .or_else(|| {
-                configuration
-                    .imports
-                    .iter()
-                    .find(|site| site.active && site.target == target)
-            });
         field(
             &mut text,
             "Published state",
-            Some(match published {
-                Some(site) if !site.active => "inactive",
-                Some(site) if site.loaded.is_some() => "loaded",
-                Some(_) => "not loaded",
+            Some(match configuration.loaded_import(&target) {
+                Some(_) => "loaded",
+                None if configuration.imports_path(&target) => "not loaded",
                 None => "not present in the saved import graph",
             }),
         );

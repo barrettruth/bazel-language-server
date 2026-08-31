@@ -224,23 +224,7 @@ impl<'a> Collector<'a> {
                         &line.tokens[1]
                     };
                     let target = super::index::resolve_import(root, &path.text);
-                    let loaded = self
-                        .snapshot
-                        .imports
-                        .iter()
-                        .find_map(|site| {
-                            (site.file.as_ref() == identity && site.active && site.target == target)
-                                .then_some(site.loaded.as_deref())
-                                .flatten()
-                        })
-                        .or_else(|| {
-                            self.snapshot.imports.iter().find_map(|site| {
-                                (site.active && site.target == target)
-                                    .then_some(site.loaded.as_deref())
-                                    .flatten()
-                            })
-                        })
-                        .map(Path::to_path_buf);
+                    let loaded = self.snapshot.loaded_import(&target).map(Path::to_path_buf);
                     if let Some(loaded) = loaded {
                         if !self.visit(&loaded, None) {
                             self.active.pop();
@@ -549,7 +533,7 @@ mod tests {
             root_uri,
             workspace.0.join(".bazelrc"),
             2,
-            "import b\n".to_owned(),
+            "import ./b\n".to_owned(),
             true,
         );
 

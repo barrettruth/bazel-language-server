@@ -139,6 +139,16 @@ impl ConfigurationSnapshot {
     }
 
     #[must_use]
+    pub fn loaded_import(&self, target: &Path) -> Option<&Path> {
+        let target = lexical_identity(target);
+        self.imports.iter().find_map(|site| {
+            (site.active && lexical_identity(&site.target) == target)
+                .then_some(site.loaded.as_deref())
+                .flatten()
+        })
+    }
+
+    #[must_use]
     pub fn identity<'a>(&'a self, path: &Path) -> Option<&'a Path> {
         if let Some((stored, _)) = self.files.get_key_value(path) {
             return Some(stored);
@@ -150,9 +160,11 @@ impl ConfigurationSnapshot {
         {
             return self.root_file.as_deref();
         }
+        let identity = lexical_identity(path);
         self.imports.iter().find_map(|site| {
             let loaded = site.loaded.as_deref()?;
-            (site.target == path || loaded == path).then_some(loaded)
+            (lexical_identity(&site.target) == identity || lexical_identity(loaded) == identity)
+                .then_some(loaded)
         })
     }
 
