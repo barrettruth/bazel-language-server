@@ -82,8 +82,8 @@ pub fn completions(
     } else if let Some(catalog) = catalog {
         if let Some(context) = enum_value_context(line, catalog, command, offset) {
             enum_items(document, context).into()
-        } else if completing_native_flag(line, catalog, offset, document.text()) {
-            flag_items(catalog, command).into()
+        } else if let Some(context) = native_flag_context(line, catalog, offset, document.text()) {
+            flag_items(document, catalog, command, context).into()
         } else {
             Vec::new().into()
         }
@@ -260,25 +260,33 @@ fn enum_items(document: &Document, context: EnumValueContext<'_>) -> Vec<Complet
         .collect()
 }
 
-fn completing_native_flag(
-    line: &super::syntax::Line,
+struct FlagContext<'a> {
+    replacement: super::syntax::Span,
+    suffix: Option<&'a str>,
+}
+
+fn native_flag_context<'a>(
+    line: &'a super::syntax::Line,
     catalog: &FlagCatalog,
     offset: usize,
     source: &str,
-) -> bool {
+) -> Option<FlagContext<'a>> {
     let Some(current) = line
         .options()
         .iter()
         .find(|option| option.range.start <= offset && offset <= option.range.end)
     else {
-        return true;
+        return Some(FlagContext {
+            replacement: super::syntax::Span::new(offset, offset),
+            suffix: None,
+        });
     };
     if native_options::uses(line, catalog).iter().any(|option| {
         option
             .value
             .is_some_and(|value| std::ptr::eq(value, current))
     }) {
-        return false;
+        return None;
     }
     if !current.text.starts_with('-')
         || current.text.starts_with("--//")
@@ -286,30 +294,77 @@ fn completing_native_flag(
         || current.text.starts_with("--no//")
         || current.text.starts_with("--no@")
     {
-        return false;
+        return None;
     }
     let Some(equals) = current.text.find('=') else {
-        return true;
+        return Some(FlagContext {
+            replacement: current.range,
+            suffix: None,
+        });
     };
-    source.get(current.range.start..current.range.end) == Some(current.text.as_str())
-        && offset <= current.range.start + equals
+    (source.get(current.range.start..current.range.end) == Some(current.text.as_str())
+        && offset <= current.range.start + equals)
+        .then_some(FlagContext {
+            replacement: current.range,
+            suffix: Some(&current.text[equals..]),
+        })
 }
 
-fn flag_items(catalog: &FlagCatalog, command: &str) -> Vec<CompletionItem> {
+fn flag_items(
+    document: &Document,
+    catalog: &FlagCatalog,
+    command: &str,
+    context: FlagContext<'_>,
+) -> Vec<CompletionItem> {
+    let range = Range {
+        start: document
+            .line_index()
+            .position(document.text(), context.replacement.start),
+        end: document
+            .line_index()
+            .position(document.text(), context.replacement.end),
+    };
+    if range.start.line != range.end.line {
+        return Vec::new();
+    }
     let mut items = Vec::new();
     for flag in catalog
         .flags()
         .filter(|flag| catalog.supports_scope(flag, command))
         .filter(|flag| visible(flag))
     {
-        push_flag(&mut items, flag, &format!("--{}", flag.name));
+        push_flag(
+            &mut items,
+            flag,
+            &format!("--{}", flag.name),
+            range,
+            &context,
+        );
         if flag.has_negative_flag {
-            push_flag(&mut items, flag, &format!("--no{}", flag.name));
+            push_flag(
+                &mut items,
+                flag,
+                &format!("--no{}", flag.name),
+                range,
+                &context,
+            );
         }
         if let Some(abbreviation) = &flag.abbreviation {
-            push_flag(&mut items, flag, &format!("-{abbreviation}"));
+            push_flag(
+                &mut items,
+                flag,
+                &format!("-{abbreviation}"),
+                range,
+                &context,
+            );
             if flag.has_negative_flag {
-                push_flag(&mut items, flag, &format!("-{abbreviation}-"));
+                push_flag(
+                    &mut items,
+                    flag,
+                    &format!("-{abbreviation}-"),
+                    range,
+                    &context,
+                );
             }
         }
     }
@@ -326,10 +381,26 @@ fn visible(flag: &Flag) -> bool {
         && !flag.effect_tags.iter().any(|tag| tag.as_ref() == "NO_OP")
 }
 
-fn push_flag(items: &mut Vec<CompletionItem>, flag: &Flag, spelling: &str) {
+fn push_flag(
+    items: &mut Vec<CompletionItem>,
+    flag: &Flag,
+    spelling: &str,
+    range: Range,
+    context: &FlagContext<'_>,
+) {
     let detail = flag.type_converter.as_deref().map_or_else(
         || "Bazel 8.7 flag".to_owned(),
         |value| format!("Bazel 8.7 flag · {value}"),
+    );
+    let new_text = context.suffix.map_or_else(
+        || {
+            if flag.requires_value && spelling.starts_with("--") {
+                format!("{spelling}=")
+            } else {
+                spelling.to_owned()
+            }
+        },
+        |suffix| format!("{spelling}{suffix}"),
     );
     items.push(CompletionItem {
         label: spelling.to_owned(),
@@ -350,8 +421,7 @@ fn push_flag(items: &mut Vec<CompletionItem>, flag: &Flag, spelling: &str) {
             .documentation
             .as_ref()
             .map(|documentation| documentation.to_string().into()),
-        insert_text: (flag.requires_value && spelling.starts_with("--"))
-            .then(|| format!("{spelling}=")),
+        text_edit: Some(TextEdit { range, new_text }.into()),
         ..Default::default()
     });
 }
@@ -419,13 +489,22 @@ mod tests {
     }
 
     fn complete_items(text: &str, catalog: &FlagCatalog) -> Vec<CompletionItem> {
-        complete_items_with_configuration(text, catalog, &ConfigurationSnapshot::default())
+        complete_items_at(text, catalog, &ConfigurationSnapshot::default(), text.len())
     }
 
     fn complete_items_with_configuration(
         text: &str,
         catalog: &FlagCatalog,
         configuration: &ConfigurationSnapshot,
+    ) -> Vec<CompletionItem> {
+        complete_items_at(text, catalog, configuration, text.len())
+    }
+
+    fn complete_items_at(
+        text: &str,
+        catalog: &FlagCatalog,
+        configuration: &ConfigurationSnapshot,
+        offset: usize,
     ) -> Vec<CompletionItem> {
         let root = std::path::PathBuf::from("/ws");
         let mut documents = Documents::new(Some(root.clone()), IndexHandle::new());
@@ -437,7 +516,7 @@ mod tests {
             &documents,
             configuration,
             Some(catalog),
-            document.line_index().position(text, text.len()),
+            document.line_index().position(text, offset),
         );
         let CompletionResponse::CompletionItemList(items) = response else {
             panic!("array completion")
@@ -489,6 +568,30 @@ mod tests {
         let catalog = FlagCatalog::from_flags("bazel 8.7.0", vec![jobs]);
         assert!(complete("build --jobs=", &catalog).is_empty());
         assert!(complete("build --//settings:mode=", &catalog).is_empty());
+    }
+
+    #[test]
+    fn native_flags_replace_the_typed_token_and_preserve_a_joined_value() {
+        let mut jobs = flag("jobs", &["build"]);
+        jobs.requires_value = true;
+        let catalog = FlagCatalog::from_flags("bazel 8.7.0", vec![jobs]);
+
+        let items = complete_items("build --jo", &catalog);
+        let item = items.iter().find(|item| item.label == "--jobs").unwrap();
+        let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &item.text_edit else {
+            panic!("plain text edit")
+        };
+        assert_eq!(edit.range.start.character, 6);
+        assert_eq!(edit.range.end.character, 10);
+        assert_eq!(edit.new_text, "--jobs=");
+
+        let text = "build --jo=4";
+        let items = complete_items_at(text, &catalog, &ConfigurationSnapshot::default(), 9);
+        let item = items.iter().find(|item| item.label == "--jobs").unwrap();
+        let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &item.text_edit else {
+            panic!("plain text edit")
+        };
+        assert_eq!(edit.new_text, "--jobs=4");
     }
 
     #[test]
