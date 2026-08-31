@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use notify::{RecursiveMode, Watcher};
 
 use crate::actor::Bazel;
+use crate::bazelrc::ConfigurationHandle;
 use crate::index::IndexHandle;
 
 /// Debounce window for filesystem bursts.
@@ -22,6 +23,8 @@ struct Invalidates {
     target_files: Vec<PathBuf>,
     /// What Bazel would say, which every file Bazel loads can change.
     graph: bool,
+    /// The imported Bazelrc graph.
+    configuration: bool,
 }
 
 impl Invalidates {
@@ -29,21 +32,31 @@ impl Invalidates {
         full_targets: false,
         target_files: Vec::new(),
         graph: false,
+        configuration: false,
     };
     const GRAPH: Self = Self {
         full_targets: false,
         target_files: Vec::new(),
         graph: true,
-    };
-    const TARGETS: Self = Self {
-        full_targets: true,
-        target_files: Vec::new(),
-        graph: false,
+        configuration: false,
     };
     const BOTH: Self = Self {
         full_targets: true,
         target_files: Vec::new(),
         graph: true,
+        configuration: true,
+    };
+    const CONFIGURATION: Self = Self {
+        full_targets: false,
+        target_files: Vec::new(),
+        graph: true,
+        configuration: true,
+    };
+    const INITIAL: Self = Self {
+        full_targets: true,
+        target_files: Vec::new(),
+        graph: false,
+        configuration: true,
     };
 
     fn file(path: &Path) -> Self {
@@ -51,12 +64,14 @@ impl Invalidates {
             full_targets: false,
             target_files: vec![path.to_path_buf()],
             graph: true,
+            configuration: false,
         }
     }
 
     fn with(mut self, other: Self) -> Self {
         self.full_targets |= other.full_targets;
         self.graph |= other.graph;
+        self.configuration |= other.configuration;
         if self.full_targets {
             self.target_files.clear();
         } else {
@@ -66,7 +81,7 @@ impl Invalidates {
     }
 
     fn anything(&self) -> bool {
-        self.full_targets || !self.target_files.is_empty() || self.graph
+        self.full_targets || !self.target_files.is_empty() || self.graph || self.configuration
     }
 }
 
@@ -79,7 +94,8 @@ fn invalidated(path: &Path) -> Invalidates {
         "BUILD" | "BUILD.bazel" => Invalidates::file(path),
         ".bazelignore" => Invalidates::BOTH,
         "MODULE.bazel" | "MODULE.bazel.lock" | "WORKSPACE" | "WORKSPACE.bazel"
-        | "WORKSPACE.bzlmod" | "REPO.bazel" | ".bazelrc" => Invalidates::GRAPH,
+        | "WORKSPACE.bzlmod" | "REPO.bazel" => Invalidates::GRAPH,
+        _ if name == ".bazelrc" || name.ends_with(".bazelrc") => Invalidates::CONFIGURATION,
         _ if path.extension().is_some_and(|kind| kind == "bzl") => Invalidates::GRAPH,
         _ => Invalidates::NOTHING,
     }
@@ -196,6 +212,7 @@ impl Drop for Watch {
 pub fn spawn(
     root: &Path,
     index: IndexHandle,
+    configuration: ConfigurationHandle,
     bazel: Arc<Bazel>,
     ready: crossbeam_channel::Sender<Ready>,
 ) -> Watch {
@@ -217,7 +234,15 @@ pub fn spawn(
                     None
                 }
             };
-            settle(&watching, &index, &bazel, &rx, &ready, &event_queue);
+            settle(
+                &watching,
+                &index,
+                &configuration,
+                &bazel,
+                &rx,
+                &ready,
+                &event_queue,
+            );
         })
         .expect("spawning the watch thread");
     Watch {
@@ -247,13 +272,14 @@ fn establish(
 fn settle(
     root: &Path,
     index: &IndexHandle,
+    configuration: &ConfigurationHandle,
     bazel: &Bazel,
     rx: &Receiver<Wake>,
     ready: &crossbeam_channel::Sender<Ready>,
     events: &EventQueue,
 ) {
     let started = std::time::Instant::now();
-    rebuild(root, index, bazel, Invalidates::TARGETS, 0);
+    rebuild(root, index, configuration, bazel, Invalidates::INITIAL, 0);
     let snapshot = index.load_disk();
     drop(ready.send(Ready {
         files: snapshot.files.len(),
@@ -282,7 +308,7 @@ fn settle(
             }
         }
         nth += 1;
-        rebuild(root, index, bazel, reaches, nth);
+        rebuild(root, index, configuration, bazel, reaches, nth);
     }
 }
 
@@ -338,7 +364,14 @@ fn changes_package_tree(event: &notify::Event) -> bool {
 }
 
 /// Refresh the affected tiers.
-fn rebuild(root: &Path, index: &IndexHandle, bazel: &Bazel, reaches: Invalidates, nth: u64) {
+fn rebuild(
+    root: &Path,
+    index: &IndexHandle,
+    configuration: &ConfigurationHandle,
+    bazel: &Bazel,
+    reaches: Invalidates,
+    nth: u64,
+) {
     if reaches.full_targets {
         let started = std::time::Instant::now();
         let built = crate::index::build_static(root);
@@ -367,6 +400,9 @@ fn rebuild(root: &Path, index: &IndexHandle, bazel: &Bazel, reaches: Invalidates
         );
     } else {
         tracing::info!(nth, "the target table is untouched by this change");
+    }
+    if reaches.configuration {
+        configuration.store(crate::bazelrc::ConfigurationSnapshot::build(root));
     }
     if reaches.graph {
         bazel.refresh();
@@ -398,13 +434,22 @@ mod tests {
             "/ws/MODULE.bazel.lock",
             "/ws/WORKSPACE",
             "/ws/REPO.bazel",
-            "/ws/.bazelrc",
         ] {
             assert_eq!(
                 invalidated(Path::new(path)),
                 Invalidates::GRAPH,
                 "{path} is the graph tier's business alone"
             );
+        }
+    }
+
+    #[test]
+    fn every_bazelrc_refreshes_the_configuration_and_graph() {
+        for path in ["/ws/.bazelrc", "/ws/config/build.bazelrc"] {
+            let reaches = invalidated(Path::new(path));
+            assert!(reaches.graph, "{path}");
+            assert!(reaches.configuration, "{path}");
+            assert!(!reaches.full_targets, "{path}");
         }
     }
 

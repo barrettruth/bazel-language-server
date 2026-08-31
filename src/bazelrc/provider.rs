@@ -1,5 +1,6 @@
 //! LSP boundary for Bazelrc documents.
 
+use super::ConfigurationSnapshot;
 use crate::document::{Document, Documents};
 use lsp_server::{Request, Response};
 use lsp_types::{Diagnostic, DiagnosticSeverity, LspRequestMethod, Range, Uri};
@@ -10,7 +11,11 @@ use lsp_types::{Diagnostic, DiagnosticSeverity, LspRequestMethod, Range, Uri};
 /// typed empty results keeps an rc buffer out of the Starlark handlers while a
 /// capability has no rc implementation.
 #[must_use]
-pub fn respond(request: &Request, docs: &Documents) -> Option<Response> {
+pub fn respond(
+    request: &Request,
+    docs: &Documents,
+    _configuration: &ConfigurationSnapshot,
+) -> Option<Response> {
     let document = request_document(request, docs)?;
     if !document.is_bazelrc() {
         return None;
@@ -99,7 +104,10 @@ mod tests {
             params: serde_json::json!({"textDocument": {"uri": uri}}),
         };
         assert_eq!(
-            respond(&request, &docs).unwrap().response_result.unwrap(),
+            respond(&request, &docs, &ConfigurationSnapshot::default())
+                .unwrap()
+                .response_result
+                .unwrap(),
             serde_json::json!([])
         );
     }

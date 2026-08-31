@@ -115,6 +115,7 @@ struct RequestContext<'a> {
     connection: &'a Connection,
     workers: &'a worker::Pool<Completed>,
     index: &'a IndexHandle,
+    configuration: &'a bazelrc::ConfigurationHandle,
     root: Option<&'a Path>,
     bazel: &'a Bazel,
     watch: Option<&'a watch::Watch>,
@@ -149,6 +150,7 @@ impl RequestContext<'_> {
         let queued_id = request.id.clone();
         let snapshot = docs.clone();
         let index = self.index.load();
+        let configuration = self.configuration.load();
         let root = self.root.map(Path::to_path_buf);
         let link_support = self.link_support;
         let admitted = self.workers.execute(move || {
@@ -166,6 +168,7 @@ impl RequestContext<'_> {
                     &request,
                     &snapshot,
                     &index,
+                    &configuration,
                     root.as_deref(),
                     link_support,
                     &cancellation,
@@ -485,12 +488,19 @@ fn run_server() -> Result<()> {
     let mut index_progress =
         start_index_progress(&connection, &init, root.is_some(), &mut requests)?;
     let index = IndexHandle::new();
+    let configuration = bazelrc::ConfigurationHandle::new();
     let bazel = std::sync::Arc::new(Bazel::spawn(root.clone(), index.clone()));
     bazel.reconfigure(bazel_settings(init.initialization_options.as_ref()).unwrap_or_default());
     let (watch, mut ready_rx) = if let Some(root) = root.as_deref() {
         let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
         (
-            Some(watch::spawn(root, index.clone(), bazel.clone(), ready_tx)),
+            Some(watch::spawn(
+                root,
+                index.clone(),
+                configuration.clone(),
+                bazel.clone(),
+                ready_tx,
+            )),
             ready_rx,
         )
     } else {
@@ -510,6 +520,7 @@ fn run_server() -> Result<()> {
             connection: &connection,
             workers: &workers,
             index: &index,
+            configuration: &configuration,
             root: root.as_deref(),
             bazel: &bazel,
             watch: watch.as_ref(),
@@ -605,11 +616,12 @@ fn respond(
     request: &lsp_server::Request,
     docs: &Documents,
     index: &Index,
+    configuration: &bazelrc::ConfigurationSnapshot,
     root: Option<&Path>,
     link_support: bool,
     cancellation: &worker::Cancellation,
 ) -> Result<Response> {
-    if let Some(response) = bazelrc::respond(request, docs) {
+    if let Some(response) = bazelrc::respond(request, docs, configuration) {
         return Ok(response);
     }
     let id = request.id.clone();
