@@ -48,7 +48,16 @@ pub fn completions(
         return command_items(document, Span::new(offset, offset)).into();
     };
     if offset <= key.range.end {
-        return command_items(document, key.range).into();
+        let replacement = key
+            .text
+            .split_once(':')
+            .map_or(Some(key.range), |(command, _)| {
+                key.decoded_span(0..command.len())
+                    .filter(|range| offset <= range.end)
+            });
+        return replacement
+            .map_or_else(Vec::new, |range| command_items(document, range))
+            .into();
     }
     if let Some(context) = import_context(line, offset) {
         return import_items(document, configuration, context);
@@ -63,6 +72,9 @@ pub fn completions(
         .text
         .split_once(':')
         .map_or(key.text.as_str(), |(command, _)| command);
+    if key.text.contains(':') && !commands::accepts_config(command) {
+        return Vec::new().into();
+    }
     if let Some(context) = config_context(line, offset, document.text()) {
         if commands::accepts_config(command) {
             config_items(
@@ -144,7 +156,11 @@ fn import_items(
     let mut items = Vec::new();
     let mut is_incomplete = false;
     for candidate in &configuration.candidates {
-        let Some(relative) = candidate.strip_prefix(root).ok().and_then(|path| path.to_str()) else {
+        let Some(relative) = candidate
+            .strip_prefix(root)
+            .ok()
+            .and_then(|path| path.to_str())
+        else {
             continue;
         };
         let relative = if relative.contains('\\') {
@@ -472,18 +488,20 @@ fn command_items(document: &Document, replacement: Span) -> Vec<CompletionItem> 
             ..Default::default()
         })
         .collect();
-    items.extend(DIRECTIVES.iter().map(|(name, detail)| CompletionItem {
-        label: (*name).to_owned(),
-        kind: Some(CompletionItemKind::Keyword),
-        detail: Some((*detail).to_owned()),
-        text_edit: Some(
-            TextEdit {
-                range,
-                new_text: (*name).to_owned(),
-            }
-            .into(),
-        ),
-        ..Default::default()
+    items.extend(DIRECTIVES.iter().map(|(name, detail)| {
+        CompletionItem {
+            label: (*name).to_owned(),
+            kind: Some(CompletionItemKind::Keyword),
+            detail: Some((*detail).to_owned()),
+            text_edit: Some(
+                TextEdit {
+                    range,
+                    new_text: (*name).to_owned(),
+                }
+                .into(),
+            ),
+            ..Default::default()
+        }
     }));
     items
 }
@@ -500,13 +518,19 @@ struct ConfigContext {
     edit: ConfigEdit,
 }
 
-fn config_context(line: &super::syntax::Line, offset: usize, source: &str) -> Option<ConfigContext> {
+fn config_context(
+    line: &super::syntax::Line,
+    offset: usize,
+    source: &str,
+) -> Option<ConfigContext> {
     let named_body = line.key().is_some_and(|key| key.text.contains(':'));
     for (index, option) in line.options().iter().enumerate() {
-        if option.text.starts_with("--config=")
-            && option.range.start <= offset
-            && offset <= option.range.end
-        {
+        let joined = if named_body {
+            option.text.starts_with("--config") && option.text.contains('=')
+        } else {
+            option.text.starts_with("--config=")
+        };
+        if joined && option.range.start <= offset && offset <= option.range.end {
             return Some(ConfigContext {
                 replacement: option.range,
                 edit: ConfigEdit::Joined,
@@ -745,7 +769,8 @@ mod tests {
 
     #[test]
     fn config_completion_uses_only_effective_declarations() {
-        let catalog = FlagCatalog::from_flags("bazel 8.7.0", Vec::new());
+        let catalog =
+            FlagCatalog::from_flags("bazel 8.7.0", vec![flag("host_jvm_args", &["startup"])]);
         let labels = complete(
             "build:empty\nstartup:dev --host_jvm_args=-Xmx1g\n\
              future:dev --x\nbuild:present --define=x=1\nbuild --config=",
@@ -754,6 +779,8 @@ mod tests {
         assert_eq!(labels, vec!["present"]);
         assert!(complete("startup --config=", &catalog).is_empty());
         assert!(complete("build:outer --config ", &catalog).is_empty());
+        assert!(complete("startup:named --", &catalog).is_empty());
+        assert_eq!(complete("startup --", &catalog), vec!["--host_jvm_args"]);
     }
 
     #[test]
@@ -772,10 +799,7 @@ mod tests {
         assert_eq!(edit.range.end.character, 18);
         assert_eq!(edit.new_text, "--config=\"foo bar\"");
 
-        let separate = complete_items(
-            "build:\"foo bar\" --define=x=1\nbuild --config",
-            &catalog,
-        );
+        let separate = complete_items("build:\"foo bar\" --define=x=1\nbuild --config", &catalog);
         let item = separate
             .iter()
             .find(|item| item.label == "foo bar")
@@ -807,6 +831,21 @@ mod tests {
         assert_eq!(edit.range.start.character, 0);
         assert_eq!(edit.range.end.character, 6);
         assert_eq!(edit.new_text, "build");
+    }
+
+    #[test]
+    fn command_completion_preserves_a_named_configuration() {
+        let catalog = FlagCatalog::from_flags("bazel 8.7.0", Vec::new());
+        let items = complete_items_at("bu:dev --jobs=1", &catalog, &Default::default(), 1);
+        let item = items.iter().find(|item| item.label == "build").unwrap();
+        let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &item.text_edit else {
+            panic!("plain text edit")
+        };
+        assert_eq!(edit.range.end.character, 2);
+        assert_eq!(edit.new_text, "build");
+        assert!(
+            complete_items_at("build:dev --jobs=1", &catalog, &Default::default(), 8).is_empty()
+        );
     }
 
     #[test]
