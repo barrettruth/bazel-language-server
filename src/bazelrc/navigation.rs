@@ -7,7 +7,7 @@ use lsp_types::{DocumentLink, LocationLink, Position, Range};
 use super::ConfigurationSnapshot;
 use super::commands;
 use super::index::resolve_import;
-use super::syntax::{Directive, Span, Statement, Token, config_references};
+use super::syntax::{Directive, Span, Statement, Token, config_declaration, config_references};
 use crate::document::{Document, Documents};
 use crate::line_index::LineIndex;
 use crate::uri::file_uri;
@@ -128,13 +128,13 @@ fn open_declarations(
             continue;
         };
         for line in &parsed.lines {
-            let Some(key) = line.key() else {
+            let Some((key, defined_command, defined_name)) = config_declaration(line) else {
                 continue;
             };
-            let Some((defined_command, defined_name)) = key.text.split_once(':') else {
-                continue;
-            };
-            if defined_name != name || !commands::applies(command, defined_command) {
+            if !commands::accepts_config(defined_command)
+                || defined_name != name
+                || !commands::applies(command, defined_command)
+            {
                 continue;
             }
             let target = range(document, key.range);
@@ -159,6 +159,9 @@ fn config_reference_at(document: &Document, offset: usize) -> Option<(String, St
             .text
             .split_once(':')
             .map_or(key.text.as_str(), |(command, _)| command);
+        if !commands::accepts_config(command) {
+            continue;
+        }
         for reference in config_references(line, document.text()) {
             if contains(reference.range, offset) {
                 return Some((command.to_owned(), reference.name, reference.range));
@@ -187,21 +190,15 @@ fn imported<'a>(
     token: &Token,
 ) -> Option<&'a Path> {
     let target = resolve_import(root, &token.text);
+    if let Some(site) = configuration.imports.iter().find(|site| {
+        site.file.as_ref() == document.path() && site.range == token.range && site.target == target
+    }) {
+        return site.active.then_some(site.loaded.as_deref()).flatten();
+    }
     configuration
         .imports
         .iter()
-        .find(|site| {
-            site.active
-                && site.file.as_ref() == document.path()
-                && site.range == token.range
-                && site.target == target
-        })
-        .or_else(|| {
-            configuration
-                .imports
-                .iter()
-                .find(|site| site.active && site.target == target)
-        })?
+        .find(|site| site.active && site.target == target)?
         .loaded
         .as_deref()
 }
@@ -214,5 +211,44 @@ fn range(document: &Document, span: Span) -> Range {
     Range {
         start: document.line_index().position(document.text(), span.start),
         end: document.line_index().position(document.text(), span.end),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::bazelrc::ImportSite;
+
+    #[test]
+    fn an_inactive_exact_import_does_not_borrow_an_active_target() {
+        let root = Path::new("/ws");
+        let text = "try-import-if-bazel-version <8.7.0 imported.bazelrc\n";
+        let document = Document::versioned(root.join(".bazelrc"), 1, text.to_owned(), Some(root));
+        let token = import_tokens(&document).next().unwrap();
+        let target = resolve_import(root, &token.text);
+        let loaded: Arc<Path> = Arc::from(root.join("imported.bazelrc"));
+        let configuration = ConfigurationSnapshot {
+            imports: vec![
+                ImportSite {
+                    file: Arc::from(document.path()),
+                    range: token.range,
+                    target: target.clone(),
+                    loaded: None,
+                    active: false,
+                },
+                ImportSite {
+                    file: Arc::from(root.join("other.bazelrc")),
+                    range: Span::new(0, 1),
+                    target,
+                    loaded: Some(loaded),
+                    active: true,
+                },
+            ],
+            ..ConfigurationSnapshot::default()
+        };
+
+        assert!(imported(&configuration, &document, root, token).is_none());
     }
 }

@@ -30,6 +30,12 @@ pub const NAMES: &[&str] = &[
     "version",
 ];
 
+/// Whether an rc entry can select a named configuration.
+#[must_use]
+pub fn accepts_config(command: &str) -> bool {
+    command != "startup" && NAMES.contains(&command)
+}
+
 /// Whether a declaration scoped to `defined` participates in `requested`.
 #[must_use]
 pub fn applies(requested: &str, defined: &str) -> bool {
@@ -58,5 +64,13 @@ mod tests {
         assert!(applies("coverage", "build"));
         assert!(!applies("build", "test"));
         assert!(applies("query", "common"));
+    }
+
+    #[test]
+    fn startup_cannot_select_a_named_configuration() {
+        assert!(!accepts_config("startup"));
+        assert!(!accepts_config("future-command"));
+        assert!(accepts_config("build"));
+        assert!(accepts_config("common"));
     }
 }

@@ -344,6 +344,17 @@ pub struct ConfigReference {
     pub range: Span,
 }
 
+/// A named configuration body retained by Bazel 8.7's rc reader.
+#[must_use]
+pub fn config_declaration(line: &Line) -> Option<(&Token, &str, &str)> {
+    if !matches!(line.statement, Some(Statement::Entry)) {
+        return None;
+    }
+    let key = line.key()?;
+    let (command, name) = key.text.split_once(':')?;
+    Some((key, command, name))
+}
+
 /// Named configuration references. Bazel accepts split option/value spelling
 /// only outside a named configuration body.
 #[must_use]
@@ -630,6 +641,11 @@ mod tests {
     fn an_argless_entry_does_not_declare_an_empty_config() {
         let parsed = parse("common:empty\n");
         assert_eq!(parsed.lines[0].statement, None);
+        assert!(config_declaration(&parsed.lines[0]).is_none());
+
+        let parsed = parse("common:present --define=x=1\n");
+        let (_, command, name) = config_declaration(&parsed.lines[0]).unwrap();
+        assert_eq!((command, name), ("common", "present"));
     }
 
     #[test]

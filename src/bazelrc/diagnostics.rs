@@ -3,7 +3,7 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 
 use super::catalog::is_build_setting;
-use super::syntax::{Line, Span, Statement, config_references};
+use super::syntax::{Line, Span, Statement, config_declaration, config_references};
 use super::{
     ConfigurationSnapshot, Flag, FlagCatalog, FlagSpelling, ProblemSeverity, commands,
     native_options,
@@ -186,7 +186,7 @@ fn diagnose_config_references(
     command: &str,
     found: &mut Vec<Diagnostic>,
 ) {
-    if configuration.root.is_none() {
+    if configuration.root.is_none() || !commands::accepts_config(command) {
         return;
     }
     for reference in config_references(line, document.text()) {
@@ -221,15 +221,11 @@ fn declared(
         .any(|(_, document)| {
             document.bazelrc().is_some_and(|parsed| {
                 parsed.lines.iter().any(|line| {
-                    matches!(line.statement, Some(Statement::Entry))
-                        && line.key().is_some_and(|key| {
-                            key.text.split_once(':').is_some_and(
-                                |(defined_command, defined_name)| {
-                                    defined_name == name
-                                        && commands::applies(command, defined_command)
-                                },
-                            )
-                        })
+                    config_declaration(line).is_some_and(|(_, defined_command, defined_name)| {
+                        commands::accepts_config(defined_command)
+                            && defined_name == name
+                            && commands::applies(command, defined_command)
+                    })
                 })
             })
         })

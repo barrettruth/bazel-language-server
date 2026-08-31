@@ -6,7 +6,10 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use rustc_hash::FxHashMap;
 
-use super::syntax::{Directive, Parse, Span, Statement, config_references, parse};
+use super::commands;
+use super::syntax::{
+    Directive, Parse, Span, Statement, config_declaration, config_references, parse,
+};
 
 /// One rc file read from disk.
 #[derive(Debug)]
@@ -231,7 +234,9 @@ impl Builder<'_> {
     fn entry(&mut self, file: Arc<ConfigurationFile>, line_number: usize) {
         let line = &file.parsed.lines[line_number];
         let key = &line.tokens[0];
-        if let Some((command, name)) = key.text.split_once(':') {
+        if let Some((key, command, name)) = config_declaration(line)
+            && commands::accepts_config(command)
+        {
             self.snapshot.declarations.push(ConfigSite {
                 name: name.into(),
                 command: command.into(),
@@ -240,17 +245,19 @@ impl Builder<'_> {
             });
         }
 
-        for reference in config_references(line, &file.text) {
-            self.snapshot.references.push(ConfigSite {
-                name: reference.name.into(),
-                command: key
-                    .text
-                    .split_once(':')
-                    .map_or(key.text.as_str(), |(base, _)| base)
-                    .into(),
-                file: Arc::clone(&file.path),
-                range: reference.range,
-            });
+        let command = key
+            .text
+            .split_once(':')
+            .map_or(key.text.as_str(), |(base, _)| base);
+        if commands::accepts_config(command) {
+            for reference in config_references(line, &file.text) {
+                self.snapshot.references.push(ConfigSite {
+                    name: reference.name.into(),
+                    command: command.into(),
+                    file: Arc::clone(&file.path),
+                    range: reference.range,
+                });
+            }
         }
         self.snapshot.entries.push(Entry {
             file,
@@ -334,6 +341,21 @@ mod tests {
         assert_eq!(snapshot.entries[1].file.path.as_ref(), child.as_path());
         assert_eq!(snapshot.declarations("dev").count(), 1);
         assert_eq!(snapshot.references[0].name.as_ref(), "dev");
+    }
+
+    #[test]
+    fn only_effective_config_sections_enter_the_graph() {
+        let workspace = Workspace::new();
+        workspace.write(
+            ".bazelrc",
+            "build:empty\nstartup:dev --host_jvm_args=-Xmx1g\nfuture:dev --x\n\
+             build:dev --define=mode=dev\nbuild --config=dev\nstartup --config=dev\n",
+        );
+        let snapshot = ConfigurationSnapshot::build(&workspace.0);
+        assert_eq!(snapshot.declarations.len(), 1);
+        assert_eq!(snapshot.declarations[0].name.as_ref(), "dev");
+        assert_eq!(snapshot.references.len(), 1);
+        assert_eq!(snapshot.references[0].command.as_ref(), "build");
     }
 
     #[test]

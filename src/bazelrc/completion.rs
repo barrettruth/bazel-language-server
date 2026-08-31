@@ -6,7 +6,7 @@ use lsp_types::{CompletionItem, CompletionItemKind, CompletionResponse, Position
 
 use super::commands;
 use super::native_options;
-use super::syntax::{Statement, config_references};
+use super::syntax::{Statement, config_declaration, config_references};
 use super::{ConfigurationSnapshot, Flag, FlagCatalog};
 use crate::document::{Document, Documents};
 
@@ -55,15 +55,23 @@ pub fn completions(
         .text
         .split_once(':')
         .map_or(key.text.as_str(), |(command, _)| command);
+    let trailing_config = line
+        .options()
+        .last()
+        .filter(|option| option.text == "--config" && offset >= option.range.end);
+    if key.text.contains(':') && trailing_config.is_some_and(|option| offset > option.range.end) {
+        return Vec::new().into();
+    }
     let completing_config = config_references(line, document.text())
         .iter()
         .any(|reference| reference.range.start <= offset && offset <= reference.range.end)
-        || line
-            .options()
-            .last()
-            .is_some_and(|option| option.text == "--config" && offset >= option.range.end);
+        || (!key.text.contains(':') && trailing_config.is_some());
     if completing_config {
-        config_items(documents, configuration, command).into()
+        if commands::accepts_config(command) {
+            config_items(documents, configuration, command).into()
+        } else {
+            Vec::new().into()
+        }
     } else if !commands::NAMES.contains(&command) {
         Vec::new().into()
     } else if let Some(catalog) = catalog {
@@ -224,11 +232,13 @@ fn config_items(
         let Some(parsed) = document.bazelrc() else {
             continue;
         };
-        for key in parsed.lines.iter().filter_map(|line| line.key()) {
-            let Some((defined_command, name)) = key.text.split_once(':') else {
+        for line in &parsed.lines {
+            let Some((_, defined_command, name)) = config_declaration(line) else {
                 continue;
             };
-            if commands::applies(command, defined_command) {
+            if commands::accepts_config(defined_command)
+                && commands::applies(command, defined_command)
+            {
                 found
                     .entry(name.to_owned())
                     .or_default()
@@ -320,5 +330,18 @@ mod tests {
         let catalog = FlagCatalog::from_flags("bazel 8.7.0", vec![jobs]);
         assert!(complete("build --jobs=", &catalog).is_empty());
         assert!(complete("build --//settings:mode=", &catalog).is_empty());
+    }
+
+    #[test]
+    fn config_completion_uses_only_effective_declarations() {
+        let catalog = FlagCatalog::from_flags("bazel 8.7.0", Vec::new());
+        let labels = complete(
+            "build:empty\nstartup:dev --host_jvm_args=-Xmx1g\n\
+             future:dev --x\nbuild:present --define=x=1\nbuild --config=",
+            &catalog,
+        );
+        assert_eq!(labels, vec!["present"]);
+        assert!(complete("startup --config=", &catalog).is_empty());
+        assert!(complete("build:outer --config ", &catalog).is_empty());
     }
 }
