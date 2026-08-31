@@ -204,7 +204,7 @@ fn diagnose_entry(
             && !flag
                 .enum_values
                 .iter()
-                .any(|candidate| candidate.as_ref() == value.text)
+                .any(|candidate| candidate.eq_ignore_ascii_case(&value.text))
         {
             found.push(finding(
                 document,
@@ -445,6 +445,7 @@ mod tests {
     #[test]
     fn exact_enum_metadata_rejects_only_unknown_values() {
         let text = "build --compilation_mode=fastbuild\n\
+                    build --compilation_mode=DBG\n\
                     build --compilation_mode slow\n";
         let (documents, uri) = documents(text);
         let found = diagnostics(
@@ -456,7 +457,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].severity, Some(DiagnosticSeverity::Error));
         assert!(message_contains(&found[0], "expected one of"));
-        assert_eq!(found[0].range.start.line, 1);
+        assert_eq!(found[0].range.start.line, 2);
         assert_eq!(found[0].range.start.character, 25);
         assert_eq!(found[0].range.end.character, 29);
     }
