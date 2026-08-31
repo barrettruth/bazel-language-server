@@ -394,21 +394,34 @@ pub fn config_declaration(line: &Line) -> Option<ConfigDeclaration<'_>> {
 }
 
 /// Named configuration references. Bazel accepts split option/value spelling
-/// only outside a named configuration body.
+/// only outside a named configuration body. Its recursive expander treats any
+/// body token whose first eight bytes are `--config` as a joined reference.
 #[must_use]
 pub fn config_references(line: &Line) -> Vec<ConfigReference> {
     let mut found = Vec::new();
+    let named_body = line.key().is_some_and(|key| key.text.contains(':'));
     let mut options = line.options().iter().peekable();
     while let Some(option) = options.next() {
-        if let Some(name) = option.text.strip_prefix("--config=") {
+        let joined = if named_body && option.text.starts_with("--config") {
+            option
+                .text
+                .find('=')
+                .map(|equals| (equals, &option.text[equals + 1..]))
+        } else {
+            option
+                .text
+                .strip_prefix("--config=")
+                .map(|name| ("--config".len(), name))
+        };
+        if let Some((equals, name)) = joined {
             let range = option
-                .decoded_span("--config=".len()..option.text.len())
+                .decoded_span(equals + 1..option.text.len())
                 .unwrap_or(option.range);
             found.push(ConfigReference {
                 name: name.to_owned(),
                 range,
             });
-        } else if !line.key().is_some_and(|key| key.text.contains(':'))
+        } else if !named_body
             && option.text == "--config"
             && let Some(value) = options.next()
         {
@@ -782,6 +795,20 @@ mod tests {
         let parsed = parse("build --config dev\nbuild:outer --config inner\n");
         assert_eq!(config_references(&parsed.lines[0])[0].name, "dev");
         assert!(config_references(&parsed.lines[1]).is_empty());
+    }
+
+    #[test]
+    fn recursive_expansion_uses_bazels_eight_byte_prefix_test() {
+        let parsed =
+            parse("build:outer --configuration=inner --configurable=other --config separate\n");
+        let references = config_references(&parsed.lines[0]);
+        assert_eq!(
+            references
+                .iter()
+                .map(|reference| reference.name.as_str())
+                .collect::<Vec<_>>(),
+            ["inner", "other"]
+        );
     }
 
     #[test]
