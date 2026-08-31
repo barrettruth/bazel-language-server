@@ -16,6 +16,7 @@ mod index;
 mod label;
 mod line_index;
 mod repos;
+mod uri;
 mod watch;
 mod worker;
 
@@ -30,9 +31,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use lsp_server::{Connection, Message, ReqQueue, RequestId, Response};
 use lsp_types::{
-    CancelNotification, CancelParams, CodeLensRequest, Definition, DefinitionRequest,
-    DefinitionResponse, DidChangeConfigurationNotification, DidChangeConfigurationParams,
-    DidChangeTextDocumentNotification, DidChangeTextDocumentParams,
+    CancelNotification, CancelParams, CodeLensRequest, CompletionRequest, Definition,
+    DefinitionRequest, DefinitionResponse, DidChangeConfigurationNotification,
+    DidChangeConfigurationParams, DidChangeTextDocumentNotification, DidChangeTextDocumentParams,
     DidCloseTextDocumentNotification, DidCloseTextDocumentParams, DidOpenTextDocumentNotification,
     DidOpenTextDocumentParams, DocumentFormattingRequest, DocumentHighlightRequest,
     DocumentLinkRequest, DocumentSymbolRequest, ExecuteCommandRequest, FoldingRangeRequest,
@@ -404,6 +405,10 @@ fn capabilities() -> ServerCapabilities {
         references_provider: Some(lsp_types::ReferencesProvider::Bool(true)),
         document_highlight_provider: Some(lsp_types::DocumentHighlightProvider::Bool(true)),
         hover_provider: Some(lsp_types::HoverProvider::Bool(true)),
+        completion_provider: Some(lsp_types::CompletionOptions {
+            trigger_characters: Some(vec!["-".to_owned(), "=".to_owned()]),
+            ..Default::default()
+        }),
         // Advertised whether or not buildifier is installed, the way the rest
         // of the server is advertised without Bazel: a capability withdrawn at
         // startup is one the user cannot get back by installing the tool.
@@ -535,6 +540,7 @@ fn run_server() -> Result<()> {
                         &diagnostics,
                         &mut requests,
                         &mut docs,
+                        &configuration,
                         &bazel,
                         note,
                     )?,
@@ -647,9 +653,15 @@ fn respond(
     let docs = context.docs;
     let index = context.index;
     let root = context.root;
-    if let Some(response) = bazelrc::respond(request, docs, context.configuration, context.catalog)
-    {
-        return Ok(response);
+    if let Some(response) = bazelrc::respond(
+        request,
+        docs,
+        context.configuration,
+        context.catalog,
+        root,
+        context.link_support,
+    ) {
+        return response;
     }
     let id = request.id.clone();
     let method: LspRequestMethod<'_> = request.method.as_str().into();
@@ -688,6 +700,8 @@ fn respond(
         Response::new_ok(id, inlay_hints(request, docs, index, root)?)
     } else if method == WorkspaceSymbolRequest::METHOD {
         Response::new_ok(id, workspace_symbols(request, index)?)
+    } else if method == CompletionRequest::METHOD {
+        Response::new_ok(id, Vec::<lsp_types::CompletionItem>::new())
     } else {
         tracing::debug!(method = request.method, "unhandled request");
         Response::new_err(
@@ -1043,7 +1057,7 @@ fn apply(note: &lsp_server::Notification, docs: &mut Documents) -> Result<Applie
         let uri = params.text_document.uri;
         docs.set(
             uri.clone(),
-            uri_to_path(&uri).into(),
+            uri::to_path(&uri).into(),
             params.text_document.version,
             params.text_document.text,
         );
@@ -1127,6 +1141,7 @@ fn handle_notification(
     diagnostics: &worker::Latest<Uri, Completed>,
     requests: &mut ReqQueue<worker::Cancellation, Outgoing>,
     docs: &mut Documents,
+    configuration: &bazelrc::ConfigurationHandle,
     bazel: &Bazel,
     note: lsp_server::Notification,
 ) -> Result<()> {
@@ -1157,7 +1172,9 @@ fn handle_notification(
     }
 
     match apply(&note, docs) {
-        Ok(Applied::Changed(uri)) => schedule_diagnostics(connection, diagnostics, docs, &uri)?,
+        Ok(Applied::Changed(uri)) => {
+            schedule_diagnostics(connection, diagnostics, docs, configuration, &uri)?;
+        }
         Ok(Applied::Closed { uri, version }) => {
             diagnostics.cancel(&uri);
             publish_diagnostics(connection, uri, version, Vec::new())?;
@@ -1172,6 +1189,7 @@ fn schedule_diagnostics(
     connection: &Connection,
     diagnostics: &worker::Latest<Uri, Completed>,
     docs: &Documents,
+    configuration: &bazelrc::ConfigurationHandle,
     uri: &Uri,
 ) -> Result<()> {
     let Some(document) = docs.get(uri) else {
@@ -1179,7 +1197,7 @@ fn schedule_diagnostics(
     };
     let version = document.version();
     let syntax = if document.is_bazelrc() {
-        bazelrc::syntax_diagnostics(document)
+        bazelrc::diagnostics(document, &configuration.load())
     } else {
         handlers::syntax_diagnostics(document)
     };
@@ -1235,15 +1253,6 @@ fn request_error(request: &lsp_server::Request, err: &anyhow::Error) -> Response
     Response::new_err(request.id.clone(), code as i32, err.to_string())
 }
 
-/// The filesystem path of a `file://` URI.
-///
-/// `Uri::path()` yields a percent-encoded `EStr`, so decode rather than taking
-/// the raw bytes: a workspace under a path with a space would otherwise index
-/// nothing and say nothing.
-fn uri_to_path(uri: &Uri) -> String {
-    uri.path().decode().to_string_lossy().into_owned()
-}
-
 /// Resolve the workspace from modern fields, legacy fields, then cwd.
 #[allow(deprecated)]
 fn workspace_root(init: &InitializeParams) -> Option<PathBuf> {
@@ -1255,12 +1264,12 @@ fn workspace_root(init: &InitializeParams) -> Option<PathBuf> {
             lsp_types::WorkspaceFolders::WorkspaceFolderList(list) => list.first(),
             lsp_types::WorkspaceFolders::Null => None,
         })
-        .map(|folder| ("workspaceFolders", PathBuf::from(uri_to_path(&folder.uri))));
+        .map(|folder| ("workspaceFolders", PathBuf::from(uri::to_path(&folder.uri))));
 
     let from_root_uri = init
         .root_uri
         .as_ref()
-        .map(|uri| ("rootUri", PathBuf::from(uri_to_path(uri))));
+        .map(|uri| ("rootUri", PathBuf::from(uri::to_path(uri))));
 
     let from_root_path = init.root_path.as_ref().and_then(|root| match root {
         lsp_types::RootPath::String(path) => Some(("rootPath", PathBuf::from(path))),

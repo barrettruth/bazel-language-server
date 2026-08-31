@@ -61,6 +61,12 @@ impl Documents {
         self.texts.get(uri).map(Arc::as_ref)
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&Uri, &Document)> {
+        self.texts
+            .iter()
+            .map(|(uri, document)| (uri, document.as_ref()))
+    }
+
     #[must_use]
     pub fn shared(&self, uri: &Uri) -> Option<Arc<Document>> {
         self.texts.get(uri).cloned()

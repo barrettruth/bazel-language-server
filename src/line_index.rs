@@ -5,7 +5,7 @@
 //! after it, and emoji do appear in BUILD files, in `genrule` commands and in
 //! docstrings.
 
-use lsp_types::Position;
+use lsp_types::{Position, SemanticToken};
 
 /// The width of a string in UTF-16 code units.
 ///
@@ -77,6 +77,31 @@ impl LineIndex {
         }
         start + line.len()
     }
+}
+
+/// Encode sorted absolute semantic-token positions as protocol deltas.
+#[must_use]
+pub fn encode_semantic_tokens(absolute: &[(u32, u32, u32, u32)]) -> Vec<SemanticToken> {
+    let mut out = Vec::with_capacity(absolute.len());
+    let mut last_line = 0;
+    let mut last_start = 0;
+    for &(line, start, length, token_type) in absolute {
+        let delta_line = line - last_line;
+        out.push(SemanticToken {
+            delta_line,
+            delta_start: if delta_line == 0 {
+                start - last_start
+            } else {
+                start
+            },
+            length,
+            token_type,
+            token_modifiers_bitset: 0,
+        });
+        last_line = line;
+        last_start = start;
+    }
+    out
 }
 
 #[cfg(test)]

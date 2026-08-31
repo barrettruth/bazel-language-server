@@ -1,2 +1,6 @@
+import config/defaults.bazelrc
 common --enable_bzlmod
 common --noenable_workspace
+test --config=shared
+build:continued --define=one=1 \
+  --define=two=2

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use rustc_hash::FxHashMap;
 
-use super::syntax::{Directive, Parse, Span, Statement, parse};
+use super::syntax::{Directive, Parse, Span, Statement, config_references, parse};
 
 /// One rc file read from disk.
 #[derive(Debug)]
@@ -32,6 +32,16 @@ pub struct ConfigSite {
     pub range: Span,
 }
 
+/// One import after workspace-relative resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportSite {
+    pub file: Arc<Path>,
+    pub range: Span,
+    pub target: PathBuf,
+    pub loaded: Option<Arc<Path>>,
+    pub active: bool,
+}
+
 /// Severity of a graph-level import finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProblemSeverity {
@@ -55,6 +65,7 @@ pub struct ConfigurationSnapshot {
     pub entries: Vec<Entry>,
     pub declarations: Vec<ConfigSite>,
     pub references: Vec<ConfigSite>,
+    pub imports: Vec<ImportSite>,
     pub problems: Vec<Problem>,
 }
 
@@ -67,7 +78,7 @@ impl ConfigurationSnapshot {
             snapshot: Self::default(),
             active: Vec::new(),
         };
-        builder.visit(&root.join(".bazelrc"), None, false);
+        drop(builder.visit(&root.join(".bazelrc"), None, false));
         builder.snapshot
     }
 
@@ -113,7 +124,7 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-    fn visit(&mut self, path: &Path, origin: Option<Origin>, optional: bool) {
+    fn visit(&mut self, path: &Path, origin: Option<Origin>, optional: bool) -> Option<Arc<Path>> {
         let canonical = match std::fs::canonicalize(path) {
             Ok(path) => path,
             Err(err) => {
@@ -124,7 +135,7 @@ impl Builder<'_> {
                         format!("could not import {}: {err}", path.display()),
                     );
                 }
-                return;
+                return None;
             }
         };
         if self.active.contains(&canonical) {
@@ -135,7 +146,7 @@ impl Builder<'_> {
                     format!("configuration import cycle through {}", canonical.display()),
                 );
             }
-            return;
+            return Some(Arc::from(canonical));
         }
 
         let repeated = self.snapshot.files.contains_key(&canonical);
@@ -152,7 +163,7 @@ impl Builder<'_> {
                             format!("could not import {}: {err}", canonical.display()),
                         );
                     }
-                    return;
+                    return None;
                 }
             };
             let file = Arc::new(ConfigurationFile {
@@ -181,29 +192,36 @@ impl Builder<'_> {
             match &line.statement {
                 Some(Statement::Entry) => self.entry(Arc::clone(&file), line_number),
                 Some(Statement::Directive(directive)) => {
-                    if matches!(directive, Directive::ConditionalImport(condition) if !condition.matches("8.7.0"))
-                    {
-                        continue;
-                    }
+                    let active = !matches!(directive, Directive::ConditionalImport(condition) if !condition.matches("8.7.0"));
                     let path_token = if matches!(directive, Directive::ConditionalImport(_)) {
                         &line.tokens[2]
                     } else {
                         &line.tokens[1]
                     };
-                    let path = resolve(self.root, &path_token.text);
-                    self.visit(
-                        &path,
-                        Some(Origin {
-                            file: Arc::clone(&file.path),
-                            range: path_token.range,
-                        }),
-                        !matches!(directive, Directive::Import),
-                    );
+                    let target = resolve_import(self.root, &path_token.text);
+                    let loaded = active.then(|| {
+                        self.visit(
+                            &target,
+                            Some(Origin {
+                                file: Arc::clone(&file.path),
+                                range: path_token.range,
+                            }),
+                            !matches!(directive, Directive::Import),
+                        )
+                    });
+                    self.snapshot.imports.push(ImportSite {
+                        file: Arc::clone(&file.path),
+                        range: path_token.range,
+                        target,
+                        loaded: loaded.flatten(),
+                        active,
+                    });
                 }
                 Some(Statement::InvalidDirective) | None => {}
             }
         }
         self.active.pop();
+        Some(file.path.clone())
     }
 
     fn entry(&mut self, file: Arc<ConfigurationFile>, line_number: usize) {
@@ -218,29 +236,17 @@ impl Builder<'_> {
             });
         }
 
-        let mut options = line.options().iter().peekable();
-        while let Some(option) = options.next() {
-            let (name, range) = if let Some(name) = option.text.strip_prefix("--config=") {
-                (Some(name), option.range)
-            } else if option.text == "--config" {
-                options.peek().map_or((None, option.range), |value| {
-                    (Some(value.text.as_str()), value.range)
-                })
-            } else {
-                (None, option.range)
-            };
-            if let Some(name) = name {
-                self.snapshot.references.push(ConfigSite {
-                    name: name.into(),
-                    command: key
-                        .text
-                        .split_once(':')
-                        .map_or(key.text.as_str(), |(base, _)| base)
-                        .into(),
-                    file: Arc::clone(&file.path),
-                    range,
-                });
-            }
+        for reference in config_references(line, &file.text) {
+            self.snapshot.references.push(ConfigSite {
+                name: reference.name.into(),
+                command: key
+                    .text
+                    .split_once(':')
+                    .map_or(key.text.as_str(), |(base, _)| base)
+                    .into(),
+                file: Arc::clone(&file.path),
+                range: reference.range,
+            });
         }
         self.snapshot.entries.push(Entry {
             file,
@@ -263,7 +269,7 @@ struct Origin {
     range: Span,
 }
 
-fn resolve(root: &Path, raw: &str) -> PathBuf {
+pub(super) fn resolve_import(root: &Path, raw: &str) -> PathBuf {
     if let Some(relative) = raw.strip_prefix("%workspace%/") {
         root.join(relative)
     } else {

@@ -5,20 +5,29 @@
 //! tokens here are exactly the distinctions that need it; everything a grammar
 //! already gets right is left alone.
 
-use lsp_types::{SemanticToken, SemanticTokens};
+use lsp_types::SemanticTokens;
 use starlark_cst::SyntaxKind;
 use starlark_cst::ast::{Arg, AstNode, CallExpr, LiteralExpr, LoadStmt};
 
 use crate::document::Document;
 
-use crate::line_index::LineIndex;
+use crate::line_index::{LineIndex, encode_semantic_tokens};
 
 /// The token types this server emits, in the order the protocol indexes them.
 ///
 /// A client resolves a token's type by its position in this list, so the order
 /// is part of the wire format: appending is safe, reordering silently recolours
 /// every buffer.
-pub const LEGEND: [&str; 4] = ["function", "parameter", "namespace", "string"];
+pub const LEGEND: [&str; 8] = [
+    "function",
+    "parameter",
+    "namespace",
+    "string",
+    "keyword",
+    "property",
+    "comment",
+    "operator",
+];
 
 const FUNCTION: u32 = 0;
 const PARAMETER: u32 = 1;
@@ -101,7 +110,7 @@ pub fn semantic_tokens(document: &Document) -> SemanticTokens {
     absolute.sort_unstable();
     SemanticTokens {
         result_id: None,
-        data: encode(&absolute),
+        data: encode_semantic_tokens(&absolute),
     }
 }
 
@@ -120,34 +129,6 @@ fn span(
         u32::try_from(length).unwrap_or(u32::MAX)
     };
     (at.line, at.character, width, token_type)
-}
-
-/// Absolute positions to the protocol's deltas.
-///
-/// Each token is relative to the one before it, and the column resets whenever
-/// the line advances. Getting that reset wrong shifts every token after it, so
-/// the round trip is what the tests assert rather than the encoded numbers.
-fn encode(absolute: &[(u32, u32, u32, u32)]) -> Vec<SemanticToken> {
-    let mut out = Vec::with_capacity(absolute.len());
-    let mut last_line = 0;
-    let mut last_start = 0;
-    for &(line, start, length, token_type) in absolute {
-        let delta_line = line - last_line;
-        out.push(SemanticToken {
-            delta_line,
-            delta_start: if delta_line == 0 {
-                start - last_start
-            } else {
-                start
-            },
-            length,
-            token_type,
-            token_modifiers_bitset: 0,
-        });
-        last_line = line;
-        last_start = start;
-    }
-    out
 }
 
 #[cfg(test)]

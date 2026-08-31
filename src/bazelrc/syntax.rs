@@ -337,6 +337,42 @@ pub struct Parse {
     pub errors: Vec<Error>,
 }
 
+/// One `--config` value on an entry line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigReference {
+    pub name: String,
+    pub range: Span,
+}
+
+/// Named configuration references, including split option/value spelling.
+#[must_use]
+pub fn config_references(line: &Line, source: &str) -> Vec<ConfigReference> {
+    let mut found = Vec::new();
+    let mut options = line.options().iter().peekable();
+    while let Some(option) = options.next() {
+        if let Some(name) = option.text.strip_prefix("--config=") {
+            let raw = source.get(option.range.start..option.range.end);
+            let range = if raw == Some(option.text.as_str()) {
+                Span::new(option.range.start + "--config=".len(), option.range.end)
+            } else {
+                option.range
+            };
+            found.push(ConfigReference {
+                name: name.to_owned(),
+                range,
+            });
+        } else if option.text == "--config"
+            && let Some(value) = options.next()
+        {
+            found.push(ConfigReference {
+                name: value.text.clone(),
+                range: value.range,
+            });
+        }
+    }
+    found
+}
+
 /// Parse one Bazel 8.7 rc buffer.
 #[must_use]
 pub fn parse(text: &str) -> Parse {

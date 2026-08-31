@@ -7,36 +7,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::label::{Label, make_variable_labels, parse_label};
-use lsp_types::{Position, Range, Uri};
+pub(super) use crate::uri::file_uri;
+use lsp_types::{Position, Range};
 use starlark_cst::ast::{Arg, AstNode, LiteralExpr, LoadItem, LoadStmt};
 use starlark_cst::{FileKind, SyntaxKind, SyntaxNode, TextSize};
-
-pub(super) fn file_uri(path: &Path) -> Option<Uri> {
-    let mut uri = String::from("file://");
-    for byte in path.as_os_str().as_encoded_bytes() {
-        // RFC 3986 unreserved, plus the separators a path needs to keep. Bytes
-        // outside that set are escaped, so a workspace under a directory with a
-        // space in it produces a URI a client can parse. `uri_to_path` decodes
-        // the same way on the way back in.
-        match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'.'
-            | b'_'
-            | b'~'
-            | b'/'
-            | b':'
-            | b'@' => uri.push(*byte as char),
-            other => {
-                use std::fmt::Write as _;
-                let _ = write!(uri, "%{other:02X}");
-            }
-        }
-    }
-    uri.parse().ok()
-}
 
 /// What a string in a build file refers to, decided by where it sits.
 #[derive(Debug)]
