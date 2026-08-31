@@ -34,3 +34,9 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v22
       - name: Test
         run: nix develop .#ci --command just test
+
+  deploy:
+    needs: [format, lint, test]
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/deploy.yaml
+    secrets: inherit
