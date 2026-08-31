@@ -67,10 +67,13 @@ arguments so configuration changes cannot reuse stale flag semantics. There is
 no nearest-version or bundled fallback catalog.
 
 Syntax, import/config navigation, structural language features and exact-catalog
-flag intelligence are shipped. Converter-specific values remain outside the
-catalog contract. Configuration-cycle diagnostics require the configuration
-snapshot to retain owner-to-reference expansion edges; they should not be
-approximated from the current declaration/reference lists.
+flag intelligence are shipped. Configuration references, symbols, conservative
+rename, import and enum-value completion, structural hover, and expansion
+diagnostics use the same request-local configuration view. Converter-specific
+values, final effective option rendering, automatic platform configuration,
+and external rc discovery remain outside the shipped contract. Formatting is
+an intentional non-feature because Bazel defines no canonical semantics-safe
+layout.
 
 ## Dependency order
 
@@ -79,5 +82,5 @@ approximated from the current declaration/reference lists.
 2. Resolution states, then document diagnostics, workspace diagnostics, and
    diagnostic code actions.
 3. Refactoring planner, then file and package move edits.
-4. Bazelrc expansion edges, then configuration-cycle and repeated-expansion
-   diagnostics.
+4. External rc discovery, if concrete editor use cases justify exposing host-
+   specific configuration state.

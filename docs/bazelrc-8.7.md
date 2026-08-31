@@ -74,7 +74,10 @@ Relevant upstream tests are
 ## File classification and discovery
 
 The exact filename `.bazelrc` and any filename ending in `.bazelrc` are
-Bazelrc documents. A file such as `bazel.rc` is not classified as Bazelrc.
+Bazelrc documents without graph context. Any regular file reached by an import
+from the workspace graph is also a Bazelrc document, regardless of its name.
+An unrelated open file such as `bazel.rc` is not classified as Bazelrc until a
+published import graph identifies it.
 
 The configuration snapshot starts at the workspace root `.bazelrc`. If it is
 absent, the published graph is empty and ready. The snapshot follows only
@@ -184,11 +187,17 @@ published import graph. The server warns, rather than errors, when a referenced
 name is absent because system, home, explicit, and unsaved imported rc layers
 may define it.
 
-The server does not calculate an effective command line, diagnose active
-configuration expansion cycles, report repeated sibling expansion, warn on a
-deep expansion chain, or auto-select platform configurations. Those features
-require ordered owner-to-reference expansion edges not retained by the current
-snapshot.
+For every concrete Bazel command, the server builds the applicable named-
+configuration graph from `always`, `common`, inherited, and exact-command
+declarations. It reports active-chain cycles as errors, repeated expansion as
+a warning, and chains of ten or more configurations as a warning. Cycle state
+is branch-local, every repeated occurrence is traversed, and one physical
+finding is not duplicated merely because several command scopes expose it.
+
+The server does not calculate or display a final effective option sequence and
+does not auto-select a platform configuration from
+`--enable_platform_specific_config`. References absent from the workspace
+graph remain qualified warnings because omitted rc layers can define them.
 
 ## Native flag catalog
 
@@ -232,11 +241,15 @@ Errors:
 - an exact catalog says a native option is outside the current rc scope;
 - a catalogued required-value option has no joined or following value;
 - a catalogued negative boolean spelling has a value.
+- a value is absent from an exact catalog's nonempty enum-value set;
+- an active named-configuration expansion cycle.
 
 Warnings:
 
 - unknown Bazel 8.7 command or rc scope;
 - repeated imports;
+- repeated named-configuration expansion;
+- a named-configuration expansion chain of ten or more configurations;
 - a configuration name absent from the published workspace graph;
 - a native-looking spelling absent from the exact catalog;
 - old option names and catalogued deprecations.
@@ -250,37 +263,59 @@ its text still equals the indexed text. Syntax and catalog findings always use
 the current buffer. Configuration-absence warnings begin only after a
 workspace graph has been published.
 
-The server does not validate converter-specific values, enum membership,
-Starlark build-setting values, aliases, or vendor behavior.
+The server does not validate converter-specific non-enum values, Starlark
+build-setting values, aliases, or vendor behavior.
 
 ## LSP surface
 
 For Bazelrc documents the server provides:
 
 - completion for commands, directives, applicable configuration names, and
-  exact-catalog native flag spellings;
-- native flag hover, including all decoded catalog metadata and current-scope
-  status;
+  exact-catalog native flag spellings and enum values;
+- completion for arbitrary regular workspace import paths, using explicit
+  single-line edits and Bazel-safe token quoting;
+- hover for commands, rc scopes, configurations, imports, and native flags;
 - go-to-definition for active loaded imports and configuration references;
 - document links for active loaded imports;
+- references and document highlights for configuration names;
+- document and workspace symbols for configuration declarations;
+- conservative workspace rename for a declared configuration, provided the
+  replacement is a nonempty bare token fragment and does not collide with
+  another declared configuration;
 - semantic tokens for directives, version conditions, paths, keys, options,
   and comments;
 - folding for continued logical lines and consecutive comment-only lines;
 - token, logical-line, and file selection ranges;
 - current-buffer and published-graph diagnostics.
 
-The Bazelrc request router returns no results for document symbols, references,
-document highlights, implementation, code lenses, inlay hints, formatting,
-rename, and prepare-rename. It provides no import-path or flag-value
-completion.
+The Bazelrc request router returns no results for implementation, code lenses,
+inlay hints, and formatting. Completion and rename always provide explicit
+edits for text whose client-side word boundaries would otherwise be ambiguous.
+
+## Formatting contract
+
+Bazel 8.7 defines a byte tokenizer but no canonical Bazelrc layout. Global
+continuation deletion, quoted-fragment concatenation, mid-token comments,
+accepted unfinished quotes, CRLF, and whitespace adjacent to a backslash make
+ordinary whitespace normalization capable of changing the token stream. The
+server therefore treats whole-document formatting as an intentional
+non-feature and returns no edits; Bazelrc never reaches buildifier.
+
+Operations that must synthesize one complete token use a double-quoted form
+with backslash and double-quote bytes escaped. LF and NUL are not representable
+by that encoder. This local token contract supports completion without
+implying a whole-document style.
 
 ## Publication and invalidation
 
 The watch thread is the sole writer of the workspace configuration snapshot.
-The Bazel actor is the sole writer of the flag catalog. A saved `.bazelrc`
-change invalidates both the configuration graph and the Bazel graph. Each
-publisher writes an immutable snapshot and sends one bounded, coalesced wake
-to the protocol loop.
+The Bazel actor is the sole writer of the flag catalog. The watch snapshot
+contains a bounded, deterministic list of regular workspace files for import
+completion. A saved graph member, candidate path, `.bazelignore`, or package-
+tree change invalidates the relevant configuration state; imported files with
+arbitrary names are not sent through the BUILD-file index. Each publisher
+writes an immutable snapshot and sends one bounded, coalesced wake to the
+protocol loop.
 
 The protocol loop captures documents, static/evaluated index, configuration,
 and catalog together for a request. Publication reschedules diagnostics for
