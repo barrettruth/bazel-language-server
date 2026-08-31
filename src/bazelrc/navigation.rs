@@ -153,16 +153,17 @@ fn imported<'a>(
     root: &Path,
     token: &Token,
 ) -> Option<&'a Path> {
-    let current_active = document.bazelrc()?.lines.iter().any(|line| {
-        let current = match &line.statement {
+    let current_active = document
+        .bazelrc()?
+        .lines
+        .iter()
+        .any(|line| match &line.statement {
             Some(Statement::Directive(Directive::ConditionalImport(condition))) => {
                 condition.matches("8.7.0") && line.tokens.get(2) == Some(token)
             }
             Some(Statement::Directive(_)) => line.tokens.get(1) == Some(token),
             Some(Statement::Entry | Statement::InvalidDirective) | None => false,
-        };
-        current
-    });
+        });
     if !current_active {
         return None;
     }

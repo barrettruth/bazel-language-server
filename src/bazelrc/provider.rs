@@ -48,6 +48,7 @@ pub fn respond(
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn answer(
     request: &Request,
     document: &Document,

@@ -102,6 +102,7 @@ pub fn completions(
     }
 }
 
+#[derive(Clone, Copy)]
 struct ImportContext<'a> {
     token: Option<&'a Token>,
     offset: usize,
@@ -204,6 +205,7 @@ fn import_items(
     .into()
 }
 
+#[derive(Clone, Copy)]
 struct EnumValueContext<'a> {
     flag: &'a Flag,
     replacement: super::syntax::Span,
@@ -290,6 +292,7 @@ fn enum_items(document: &Document, context: EnumValueContext<'_>) -> Vec<Complet
         .collect()
 }
 
+#[derive(Clone, Copy)]
 struct FlagContext<'a> {
     replacement: super::syntax::Span,
     suffix: Option<&'a str>,
@@ -522,6 +525,7 @@ enum ConfigEdit {
     AfterOption { needs_space: bool },
 }
 
+#[derive(Clone, Copy)]
 struct ConfigContext {
     replacement: Span,
     edit: ConfigEdit,
@@ -602,9 +606,10 @@ fn config_items(
             let encoded = super::syntax::quote_token(&name)?;
             let new_text = match context.edit {
                 ConfigEdit::Joined => format!("--config={encoded}"),
-                ConfigEdit::Separate if name.is_empty() => return None,
+                ConfigEdit::Separate | ConfigEdit::AfterOption { .. } if name.is_empty() => {
+                    return None;
+                }
                 ConfigEdit::Separate => encoded,
-                ConfigEdit::AfterOption { .. } if name.is_empty() => return None,
                 ConfigEdit::AfterOption { needs_space } => {
                     format!("{}{encoded}", if needs_space { " " } else { "" })
                 }
@@ -844,7 +849,15 @@ mod tests {
 
         let text = "build:\"foo bar\" --define=x=1\nbuild --config foo";
         let after_option = text.rfind("--config").unwrap() + "--config".len();
-        assert!(complete_items_at(text, &catalog, &Default::default(), after_option).is_empty());
+        assert!(
+            complete_items_at(
+                text,
+                &catalog,
+                &ConfigurationSnapshot::default(),
+                after_option,
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -873,7 +886,12 @@ mod tests {
     #[test]
     fn command_completion_preserves_a_named_configuration() {
         let catalog = FlagCatalog::from_flags("bazel 8.7.0", Vec::new());
-        let items = complete_items_at("bu:dev --jobs=1", &catalog, &Default::default(), 1);
+        let items = complete_items_at(
+            "bu:dev --jobs=1",
+            &catalog,
+            &ConfigurationSnapshot::default(),
+            1,
+        );
         let item = items.iter().find(|item| item.label == "build").unwrap();
         let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &item.text_edit else {
             panic!("plain text edit")
@@ -881,7 +899,13 @@ mod tests {
         assert_eq!(edit.range.end.character, 2);
         assert_eq!(edit.new_text, "build");
         assert!(
-            complete_items_at("build:dev --jobs=1", &catalog, &Default::default(), 8).is_empty()
+            complete_items_at(
+                "build:dev --jobs=1",
+                &catalog,
+                &ConfigurationSnapshot::default(),
+                8,
+            )
+            .is_empty()
         );
     }
 
@@ -924,7 +948,7 @@ mod tests {
         let catalog = FlagCatalog::from_flags("bazel 8.7.0", Vec::new());
         let configuration = ConfigurationSnapshot {
             root: Some(std::sync::Arc::from(std::path::Path::new("/ws"))),
-            candidates: (0..MAX_IMPORT_COMPLETIONS + 1)
+            candidates: (0..=MAX_IMPORT_COMPLETIONS)
                 .map(|index| {
                     std::sync::Arc::from(
                         std::path::PathBuf::from(format!("/ws/config/{index:04}"))

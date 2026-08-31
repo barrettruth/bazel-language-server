@@ -270,6 +270,7 @@ fn display_chain(names: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::sync::Arc;
 
     use lsp_types::Uri;
@@ -319,7 +320,8 @@ mod tests {
     fn ten_configs_is_the_deep_chain_boundary() {
         let mut text = String::new();
         for number in 0..9 {
-            text.push_str(&format!("build:c{number} --config=c{}\n", number + 1));
+            writeln!(&mut text, "build:c{number} --config=c{}", number + 1)
+                .expect("writing to a String cannot fail");
         }
         text.push_str("build:c9 --jobs=1\nbuild --config=c0\n");
         let found = analyze(&text);

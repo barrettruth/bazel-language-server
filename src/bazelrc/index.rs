@@ -107,14 +107,13 @@ impl ConfigurationSnapshot {
             },
             active: Vec::new(),
         };
-        let root_file = match builder.visit(&root.join(".bazelrc"), None, false) {
-            Ok(root_file) => root_file,
-            Err(_) => {
-                builder.snapshot.entries.clear();
-                builder.snapshot.declarations.clear();
-                builder.snapshot.references.clear();
-                None
-            }
+        let root_file = if let Ok(root_file) = builder.visit(&root.join(".bazelrc"), None, false) {
+            root_file
+        } else {
+            builder.snapshot.entries.clear();
+            builder.snapshot.declarations.clear();
+            builder.snapshot.references.clear();
+            None
         };
         builder.snapshot.root_file = root_file;
         builder.snapshot
@@ -232,6 +231,7 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
+    #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
     fn visit(
         &mut self,
         path: &Path,

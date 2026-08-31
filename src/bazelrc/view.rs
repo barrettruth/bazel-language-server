@@ -30,10 +30,9 @@ impl<'a> ConfigurationView<'a> {
             }
         } else if snapshot.problems.is_empty()
             && let Some(document) = workspace_root_document(documents, snapshot)
+            && !collector.visit(document.path(), Some(document))
         {
-            if !collector.visit(document.path(), Some(document)) {
-                collector.valid = false;
-            }
+            collector.valid = false;
         }
         collector.finish()
     }
@@ -52,9 +51,10 @@ impl<'a> ConfigurationView<'a> {
         }
         let mut declarations = Vec::new();
         let mut references = Vec::new();
+        let file = Arc::from(document.path());
         collect(
             document.bazelrc(),
-            Arc::from(document.path()),
+            &file,
             &mut declarations,
             &mut references,
         );
@@ -98,6 +98,7 @@ impl<'a> ConfigurationView<'a> {
         self.references.iter()
     }
 
+    #[must_use]
     pub fn occurrence_at(&self, path: &Path, offset: usize) -> Option<(bool, &ConfigSite)> {
         self.declarations
             .iter()
@@ -111,14 +112,17 @@ impl<'a> ConfigurationView<'a> {
             })
     }
 
+    #[must_use]
     pub fn range(&self, site: &ConfigSite) -> Option<Range> {
         self.span_range(&site.file, site.range)
     }
 
+    #[must_use]
     pub fn line_range(&self, site: &ConfigSite) -> Option<Range> {
         self.span_range(&site.file, site.line)
     }
 
+    #[must_use]
     pub fn location(&self, site: &ConfigSite) -> Option<Location> {
         Some(Location {
             uri: file_uri(&site.file)?,
@@ -292,7 +296,7 @@ const fn contains(span: super::syntax::Span, offset: usize) -> bool {
 
 fn collect(
     parsed: Option<&Parse>,
-    file: Arc<Path>,
+    file: &Arc<Path>,
     declarations: &mut Vec<ConfigSite>,
     references: &mut Vec<ConfigSite>,
 ) {
@@ -302,7 +306,7 @@ fn collect(
         .iter()
         .filter(|line| matches!(line.statement, Some(Statement::Entry)))
     {
-        collect_line(line, &file, declarations, references);
+        collect_line(line, file, declarations, references);
     }
 }
 

@@ -309,8 +309,8 @@ impl Session<'_> {
                     self.request_context.connection,
                     self.diagnostics,
                     docs,
-                    Arc::clone(&self.configuration),
-                    self.catalog.clone(),
+                    &self.configuration,
+                    self.catalog.as_ref(),
                     reclassified,
                 )?;
             }
@@ -719,7 +719,6 @@ fn handle_completed(
         } if docs.is_current(&uri, &document) => {
             publish_diagnostics(connection, uri, document.version(), diagnostics)?;
         }
-        Completed::Diagnostics { .. } => {}
         Completed::BazelrcDiagnostics {
             uri,
             document,
@@ -732,7 +731,7 @@ fn handle_completed(
         {
             publish_diagnostics(connection, uri, document.version(), diagnostics)?;
         }
-        Completed::BazelrcDiagnostics { .. } => {}
+        Completed::Diagnostics { .. } | Completed::BazelrcDiagnostics { .. } => {}
     }
     Ok(())
 }
@@ -1277,6 +1276,7 @@ fn definition_response(links: Vec<LocationLink>, link_support: bool) -> Option<D
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_notification(
     connection: &Connection,
     diagnostics: &worker::Latest<Uri, Completed>,
@@ -1389,8 +1389,8 @@ fn schedule_bazelrc_diagnostics(
     connection: &Connection,
     diagnostics: &worker::Latest<Uri, Completed>,
     docs: &Documents,
-    configuration: Arc<bazelrc::ConfigurationSnapshot>,
-    catalog: Option<Arc<bazelrc::FlagCatalog>>,
+    configuration: &Arc<bazelrc::ConfigurationSnapshot>,
+    catalog: Option<&Arc<bazelrc::FlagCatalog>>,
     reclassified: Vec<Uri>,
 ) -> Result<()> {
     let mut uris: Vec<_> = docs
@@ -1406,8 +1406,8 @@ fn schedule_bazelrc_diagnostics(
             connection,
             diagnostics,
             docs,
-            Arc::clone(&configuration),
-            catalog.clone(),
+            Arc::clone(configuration),
+            catalog.cloned(),
             &uri,
         )?;
     }

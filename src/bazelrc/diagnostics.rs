@@ -93,6 +93,7 @@ pub fn diagnostics(
     found
 }
 
+#[allow(clippy::too_many_lines)]
 fn diagnose_entry(
     document: &Document,
     configuration: &ConfigurationView,
@@ -204,7 +205,7 @@ fn diagnose_entry(
             && !flag
                 .enum_values
                 .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(&value.text))
+                .any(|candidate| candidate.eq_ignore_ascii_case(value.text))
         {
             found.push(finding(
                 document,

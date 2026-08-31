@@ -19,6 +19,7 @@ const MAX_TARGET_FILES: usize = 1_024;
 
 /// Which tiers a changed file can possibly affect.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 struct Invalidates {
     full_targets: bool,
     target_files: Vec<PathBuf>,

@@ -279,7 +279,7 @@ pub(crate) fn workspace_files(root: &Path) -> Vec<std::path::PathBuf> {
         .filter_entry(|entry| !is_excluded(entry) && !is_ignored(root, entry.path(), &ignored))
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
+        .map(walkdir::DirEntry::into_path)
         .collect()
 }
 

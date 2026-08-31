@@ -25,7 +25,7 @@ pub fn hover(
     let offset = document.line_index().offset(document.text(), position);
     let view = ConfigurationView::for_document(document, documents, configuration);
     if let Some((declaration, occurrence)) = view.occurrence_at(document.path(), offset) {
-        return config_hover(document, &view, declaration, occurrence);
+        return Some(config_hover(document, &view, declaration, occurrence));
     }
     for line in &document.bazelrc()?.lines {
         let Some(key) = line.key() else {
@@ -91,7 +91,7 @@ fn config_hover(
     view: &ConfigurationView<'_>,
     declaration: bool,
     occurrence: &super::index::ConfigSite,
-) -> Option<Hover> {
+) -> Hover {
     let declarations: BTreeSet<_> = view
         .applicable_declarations(&occurrence.command, &occurrence.name)
         .map(|site| site.command.as_ref())
@@ -128,7 +128,7 @@ fn config_hover(
         (!expansions.is_empty()).then_some(expansions.as_str()),
     );
     text.push_str("View: current buffer and applicable published graph members");
-    Some(plain_hover(document, occurrence.range, text))
+    plain_hover(document, occurrence.range, text)
 }
 
 fn import_hover(
