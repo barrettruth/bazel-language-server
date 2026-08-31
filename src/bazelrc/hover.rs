@@ -180,10 +180,6 @@ fn import_hover(
     if let Some(root) = root {
         let target = super::index::resolve_import(root, &path.text);
         field(&mut text, "Resolved path", target.to_str());
-        if condition.is_some_and(|condition| !condition.matches("8.7.0")) {
-            field(&mut text, "Published state", Some("inactive"));
-            return Some(plain_hover(document, hovered.range, text));
-        }
         field(
             &mut text,
             "Published state",
@@ -459,6 +455,38 @@ mod tests {
         let Contents::MarkupContent(contents) = card.contents else {
             panic!("plain hover")
         };
+        assert!(contents.value.contains("Published state: loaded"));
+    }
+
+    #[test]
+    fn current_condition_and_published_import_state_are_distinct() {
+        let text = "try-import-if-bazel-version <8.7.0 child\n";
+        let (documents, uri, mut configuration) = documents(text);
+        let document = documents.get(&uri).unwrap();
+        let path = &document.bazelrc().unwrap().lines[0].tokens[2];
+        configuration.imports.push(super::super::ImportSite {
+            file: Arc::from(document.path()),
+            range: path.range,
+            target: Path::new("/ws/child").to_path_buf(),
+            loaded: Some(Arc::from(Path::new("/ws/child"))),
+            active: true,
+        });
+        let position = document
+            .line_index()
+            .position(text, text.find("child").unwrap());
+        let card = hover(
+            document,
+            &documents,
+            &configuration,
+            None,
+            Some(Path::new("/ws")),
+            position,
+        )
+        .unwrap();
+        let Contents::MarkupContent(contents) = card.contents else {
+            panic!("plain hover")
+        };
+        assert!(contents.value.contains("Bazel 8.7.0: inactive"));
         assert!(contents.value.contains("Published state: loaded"));
     }
 }
