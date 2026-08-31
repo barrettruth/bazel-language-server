@@ -8,7 +8,7 @@ use lsp_types::{
 
 use super::commands;
 use super::native_options;
-use super::syntax::{Statement, config_references};
+use super::syntax::{Statement, Token, config_references};
 use super::{ConfigurationSnapshot, ConfigurationView, Flag, FlagCatalog};
 use crate::document::{Document, Documents};
 
@@ -46,6 +46,9 @@ pub fn completions(
     };
     if offset <= key.range.end {
         return command_items().into();
+    }
+    if let Some(context) = import_context(line, offset) {
+        return import_items(document, configuration, context).into();
     }
     if matches!(
         line.statement,
@@ -87,6 +90,88 @@ pub fn completions(
     } else {
         Vec::new().into()
     }
+}
+
+struct ImportContext<'a> {
+    token: Option<&'a Token>,
+    offset: usize,
+}
+
+fn import_context(line: &super::syntax::Line, offset: usize) -> Option<ImportContext<'_>> {
+    let key = line.key()?;
+    let (path_index, predecessor) = match key.text.as_str() {
+        "import" | "try-import" => (1, key),
+        "try-import-if-bazel-version" => (2, line.tokens.get(1)?),
+        _ => return None,
+    };
+    let token = line.tokens.get(path_index);
+    if token.is_some_and(|token| token.range.start <= offset && offset <= token.range.end) {
+        return Some(ImportContext { token, offset });
+    }
+    (token.is_none() && offset > predecessor.range.end && offset <= line.range.end).then_some(
+        ImportContext {
+            token: None,
+            offset,
+        },
+    )
+}
+
+fn import_items(
+    document: &Document,
+    configuration: &ConfigurationSnapshot,
+    context: ImportContext<'_>,
+) -> Vec<CompletionItem> {
+    let Some(root) = configuration.root.as_deref() else {
+        return Vec::new();
+    };
+    let prefix = context.token.map_or("", |token| token.text.as_str());
+    let workspace_prefix = prefix.starts_with("%workspace%/");
+    let absolute = std::path::Path::new(prefix).is_absolute();
+    let replacement = context.token.map_or(
+        super::syntax::Span::new(context.offset, context.offset),
+        |token| token.range,
+    );
+    let range = Range {
+        start: document
+            .line_index()
+            .position(document.text(), replacement.start),
+        end: document
+            .line_index()
+            .position(document.text(), replacement.end),
+    };
+    if range.start.line != range.end.line {
+        return Vec::new();
+    }
+
+    configuration
+        .candidates
+        .iter()
+        .filter_map(|candidate| {
+            let relative = candidate
+                .strip_prefix(root)
+                .ok()?
+                .to_str()?
+                .replace('\\', "/");
+            let decoded = if workspace_prefix {
+                format!("%workspace%/{relative}")
+            } else if absolute {
+                candidate.to_str()?.to_owned()
+            } else {
+                relative
+            };
+            if !decoded.starts_with(prefix) {
+                return None;
+            }
+            let new_text = super::syntax::quote_token(&decoded)?;
+            Some(CompletionItem {
+                label: decoded,
+                kind: Some(CompletionItemKind::File),
+                detail: Some("Workspace Bazelrc import".to_owned()),
+                text_edit: Some(TextEdit { range, new_text }.into()),
+                ..Default::default()
+            })
+        })
+        .collect()
 }
 
 struct EnumValueContext<'a> {
@@ -334,6 +419,14 @@ mod tests {
     }
 
     fn complete_items(text: &str, catalog: &FlagCatalog) -> Vec<CompletionItem> {
+        complete_items_with_configuration(text, catalog, &ConfigurationSnapshot::default())
+    }
+
+    fn complete_items_with_configuration(
+        text: &str,
+        catalog: &FlagCatalog,
+        configuration: &ConfigurationSnapshot,
+    ) -> Vec<CompletionItem> {
         let root = std::path::PathBuf::from("/ws");
         let mut documents = Documents::new(Some(root.clone()), IndexHandle::new());
         let uri: Uri = "file:///ws/.bazelrc".parse().unwrap();
@@ -342,7 +435,7 @@ mod tests {
         let response = completions(
             document,
             &documents,
-            &ConfigurationSnapshot::default(),
+            configuration,
             Some(catalog),
             document.line_index().position(text, text.len()),
         );
@@ -442,5 +535,39 @@ mod tests {
         assert_eq!(labels, vec!["present"]);
         assert!(complete("startup --config=", &catalog).is_empty());
         assert!(complete("build:outer --config ", &catalog).is_empty());
+    }
+
+    #[test]
+    fn import_completion_uses_published_arbitrary_workspace_paths() {
+        let catalog = FlagCatalog::from_flags("bazel 8.7.0", Vec::new());
+        let configuration = ConfigurationSnapshot {
+            root: Some(std::sync::Arc::from(std::path::Path::new("/ws"))),
+            candidates: vec![
+                std::sync::Arc::from(std::path::Path::new("/ws/config/plain")),
+                std::sync::Arc::from(std::path::Path::new("/ws/hash#name")),
+            ],
+            ..ConfigurationSnapshot::default()
+        };
+
+        let items = complete_items_with_configuration("import hash", &catalog, &configuration);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "hash#name");
+        let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &items[0].text_edit else {
+            panic!("plain text edit")
+        };
+        assert_eq!(edit.new_text, "\"hash#name\"");
+        assert_eq!(edit.range.start.character, 7);
+        assert_eq!(edit.range.end.character, 11);
+
+        let items = complete_items_with_configuration(
+            "try-import-if-bazel-version >=8.7.0 %workspace%/config/p",
+            &catalog,
+            &configuration,
+        );
+        assert_eq!(items[0].label, "%workspace%/config/plain");
+        let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &items[0].text_edit else {
+            panic!("plain text edit")
+        };
+        assert_eq!(edit.new_text, "\"%workspace%/config/plain\"");
     }
 }
