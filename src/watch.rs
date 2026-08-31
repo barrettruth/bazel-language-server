@@ -15,6 +15,7 @@ use crate::index::IndexHandle;
 
 /// Debounce window for filesystem bursts.
 const SETTLE: Duration = Duration::from_millis(250);
+const MAX_TARGET_FILES: usize = 1_024;
 
 /// Which tiers a changed file can possibly affect.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -89,6 +90,11 @@ impl Invalidates {
         self.configuration |= other.configuration;
         self.configuration_candidates |= other.configuration_candidates;
         if self.full_targets {
+            self.target_files.clear();
+        } else if other.target_files.len()
+            > MAX_TARGET_FILES.saturating_sub(self.target_files.len())
+        {
+            self.full_targets = true;
             self.target_files.clear();
         } else {
             self.target_files.extend(other.target_files);
@@ -166,8 +172,6 @@ struct EventState {
 }
 
 impl EventQueue {
-    const MAX_FILES: usize = 1_024;
-
     fn send(
         &self,
         root: &Path,
@@ -184,10 +188,6 @@ impl EventQueue {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.pending = std::mem::take(&mut state.pending).with(reaches);
-        if state.pending.target_files.len() > Self::MAX_FILES {
-            state.pending.full_targets = true;
-            state.pending.target_files.clear();
-        }
         if state.queued {
             return;
         }
@@ -615,6 +615,19 @@ mod tests {
         assert!(!reaches.full_targets);
         assert_eq!(reaches.target_files.len(), 2);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn settled_batches_preserve_the_target_file_bound() {
+        let first = Invalidates {
+            target_files: (0..MAX_TARGET_FILES)
+                .map(|index| PathBuf::from(format!("/ws/{index}/BUILD")))
+                .collect(),
+            ..Invalidates::NOTHING
+        };
+        let overflow = first.with(Invalidates::file(Path::new("/ws/overflow/BUILD")));
+        assert!(overflow.full_targets);
+        assert!(overflow.target_files.is_empty());
     }
 
     #[test]
