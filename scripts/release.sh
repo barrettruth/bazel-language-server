@@ -6,6 +6,8 @@ usage() {
 Usage: scripts/release.sh <version> [--dry-run|--tag]
 
 Prepares a numbered release pull request from a clean, up-to-date main branch.
+In a colocated jj checkout, --tag also accepts detached Git HEAD when it points
+at the local main bookmark.
 
 After the release PR is merged, run the script again with --tag to tag the
 merged main commit and trigger the release workflow.
@@ -66,7 +68,13 @@ trap cleanup_dry_run EXIT
 [ -f Cargo.toml ] || die "run from the repository root"
 
 branch="$(git branch --show-current)"
-[ "$branch" = "main" ] || die "release must run from main, currently on $branch"
+if [ "$branch" != "main" ]; then
+  main_head="$(git rev-parse -q --verify refs/heads/main 2>/dev/null || true)"
+  if [ "$tag_only" != true ] || [ "$start_head" != "$main_head" ]; then
+    [ -n "$branch" ] || branch="detached HEAD"
+    die "release must run from main, currently on $branch"
+  fi
+fi
 
 [ -z "$(git status --porcelain)" ] || die "working tree must be clean"
 
