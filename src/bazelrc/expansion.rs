@@ -167,7 +167,6 @@ impl<'a> Graph<'a> {
                     edge.name
                 ),
             );
-            return;
         }
         active.push(edge.name.clone());
         for child in self.edges.get(edge.name.as_ref()).into_iter().flatten() {
@@ -296,7 +295,8 @@ mod tests {
     fn cycles_are_branch_local_and_repetition_is_not_a_cycle() {
         let found = analyze(
             "build:a --config=b\nbuild:b --config=a\n\
-             build:reuse --jobs=1\nbuild:left --config=reuse\nbuild:right --config=reuse\n\
+             build:reuse --config=leaf\nbuild:leaf --jobs=1\n\
+             build:left --config=reuse\nbuild:right --config=reuse\n\
              build --config=left --config=right\n",
         );
         assert_eq!(
@@ -311,7 +311,7 @@ mod tests {
                 .iter()
                 .filter(|finding| finding.message.contains("more than once"))
                 .count(),
-            1
+            2
         );
     }
 
