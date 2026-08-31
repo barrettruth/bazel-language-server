@@ -127,7 +127,7 @@ fn config_hover(
         "Known expansions",
         (!expansions.is_empty()).then_some(expansions.as_str()),
     );
-    text.push_str("Graph: workspace imports and open Bazelrc buffers");
+    text.push_str("View: current buffer and applicable published graph members");
     Some(plain_hover(document, occurrence.range, text))
 }
 
@@ -180,6 +180,10 @@ fn import_hover(
     if let Some(root) = root {
         let target = super::index::resolve_import(root, &path.text);
         field(&mut text, "Resolved path", target.to_str());
+        if condition.is_some_and(|condition| !condition.matches("8.7.0")) {
+            field(&mut text, "Published state", Some("inactive"));
+            return Some(plain_hover(document, hovered.range, text));
+        }
         let identity = configuration
             .identity(document.path())
             .unwrap_or_else(|| document.path());
@@ -192,7 +196,7 @@ fn import_hover(
                 configuration
                     .imports
                     .iter()
-                    .find(|site| site.file.as_ref() == identity && site.target == target)
+                    .find(|site| site.active && site.target == target)
             });
         field(
             &mut text,
@@ -425,6 +429,11 @@ mod tests {
             panic!("plain hover")
         };
         assert!(contents.value.contains("Known expansions: nested"));
+        assert!(
+            contents
+                .value
+                .contains("current buffer and applicable published graph members")
+        );
 
         let command_position = document.line_index().position(text, 1);
         let card = hover(
