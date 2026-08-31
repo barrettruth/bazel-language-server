@@ -49,10 +49,18 @@ The planner is a boundary around existing reference data, not a second index.
 startup options, commands, configurations, imports, and continuations without
 adding conditional paths to the Starlark handlers.
 
+The parser implements upstream Bazel 8.7.0. The advertised compatibility line
+is Bazel 8.7; a vendor suffix on that numeric release does not add vendor
+semantics. Other releases may still receive structural answers, but absence
+from an 8.7 catalog never proves one of their flags invalid.
+
+The watch thread publishes the workspace `.bazelrc` import graph. Requests use
+that immutable snapshot and the current buffer without reading the filesystem.
 The Bazel actor supplies a flag catalog from the configured binary's
-`help flags-as-proto` output. Catalog identity derives from the binary,
-reported Bazel version, and startup arguments so configuration changes cannot
-reuse stale flag semantics.
+`help flags-as-proto` output only when the reported numeric release is 8.7.
+Catalog identity derives from the binary, reported Bazel version, and startup
+arguments so configuration changes cannot reuse stale flag semantics. There is
+no nearest-version or bundled fallback catalog.
 
 ## Dependency order
 
