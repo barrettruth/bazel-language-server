@@ -49,6 +49,10 @@ The planner is a boundary around existing reference data, not a second index.
 startup options, commands, configurations, imports, and continuations without
 adding conditional paths to the Starlark handlers.
 
+The tracked [Bazelrc 8.7 specification](docs/bazelrc-8.7.md) is the normative
+implementation boundary. The site renders the dated public support matrix;
+research notes retain source evidence and corpus measurements.
+
 The parser implements upstream Bazel 8.7.0. The advertised compatibility line
 is Bazel 8.7; a vendor suffix on that numeric release does not add vendor
 semantics. Other releases may still receive structural answers, but absence
