@@ -485,8 +485,16 @@ impl Logical {
 }
 
 fn parse_line(logical: &Logical, start: usize, end: usize, errors: &mut Vec<Error>) -> Line {
-    let (tokens, comment) = tokenize(logical, start, end);
-    let statement = statement(&tokens, logical.span(start, end), errors);
+    let mut content_start = start;
+    let mut content_end = end;
+    while content_start < content_end && strip_whitespace(logical.bytes[content_start]) {
+        content_start += 1;
+    }
+    while content_end > content_start && strip_whitespace(logical.bytes[content_end - 1]) {
+        content_end -= 1;
+    }
+    let (tokens, comment) = tokenize(logical, content_start, content_end);
+    let statement = statement(&tokens, logical.span(content_start, content_end), errors);
     Line {
         range: logical.span(start, end),
         tokens,
@@ -636,6 +644,10 @@ const fn delimiter(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
+const fn strip_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,6 +706,14 @@ mod tests {
         for text in ["build '--define=x=1\n", "build --define=x=1\\\n"] {
             assert!(parse(text).errors.is_empty(), "{text:?}");
         }
+    }
+
+    #[test]
+    fn line_edges_are_stripped_before_tokenization() {
+        let parsed = parse("\x0bimport child\\ \x0c\nbuild 'value \t\n");
+        assert_eq!(parsed.lines[0].tokens[0].text, "import");
+        assert_eq!(parsed.lines[0].tokens[1].text, "child");
+        assert_eq!(parsed.lines[1].tokens[1].text, "value");
     }
 
     #[test]
