@@ -540,7 +540,7 @@ fn config_context(
             continue;
         }
         if let Some(value) = line.options().get(index + 1) {
-            if option.range.end <= offset && offset <= value.range.end {
+            if value.range.start <= offset && offset <= value.range.end {
                 return Some(ConfigContext {
                     replacement: value.range,
                     edit: ConfigEdit::Separate,
@@ -808,6 +808,10 @@ mod tests {
             panic!("plain text edit")
         };
         assert_eq!(edit.new_text, " \"foo bar\"");
+
+        let text = "build:\"foo bar\" --define=x=1\nbuild --config foo";
+        let after_option = text.rfind("--config").unwrap() + "--config".len();
+        assert!(complete_items_at(text, &catalog, &Default::default(), after_option).is_empty());
     }
 
     #[test]
