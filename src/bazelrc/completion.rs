@@ -1,14 +1,16 @@
 //! Structural completion plus exact-catalog native flags.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionResponse, Position, Range, TextEdit,
+    CompletionItem, CompletionItemKind, CompletionList, CompletionResponse, Position, Range,
+    TextEdit,
 };
 
 use super::commands;
 use super::native_options;
-use super::syntax::{Statement, Token, config_references};
+use super::syntax::{Span, Statement, Token};
 use super::{ConfigurationSnapshot, ConfigurationView, Flag, FlagCatalog};
 use crate::document::{Document, Documents};
 
@@ -20,6 +22,7 @@ const DIRECTIVES: &[(&str, &str)] = &[
         "Version-gated optional Bazelrc import",
     ),
 ];
+const MAX_IMPORT_COMPLETIONS: usize = 512;
 
 #[must_use]
 pub fn completions(
@@ -42,13 +45,13 @@ pub fn completions(
         return Vec::new().into();
     }
     let Some(key) = line.key() else {
-        return command_items().into();
+        return command_items(document, Span::new(offset, offset)).into();
     };
     if offset <= key.range.end {
-        return command_items().into();
+        return command_items(document, key.range).into();
     }
     if let Some(context) = import_context(line, offset) {
-        return import_items(document, configuration, context).into();
+        return import_items(document, configuration, context);
     }
     if matches!(
         line.statement,
@@ -60,22 +63,13 @@ pub fn completions(
         .text
         .split_once(':')
         .map_or(key.text.as_str(), |(command, _)| command);
-    let trailing_config = line
-        .options()
-        .last()
-        .filter(|option| option.text == "--config" && offset >= option.range.end);
-    if key.text.contains(':') && trailing_config.is_some_and(|option| offset > option.range.end) {
-        return Vec::new().into();
-    }
-    let completing_config = config_references(line)
-        .iter()
-        .any(|reference| reference.range.start <= offset && offset <= reference.range.end)
-        || (!key.text.contains(':') && trailing_config.is_some());
-    if completing_config {
+    if let Some(context) = config_context(line, offset, document.text()) {
         if commands::accepts_config(command) {
             config_items(
+                document,
                 &ConfigurationView::for_document(document, documents, configuration),
                 command,
+                context,
             )
             .into()
         } else {
@@ -124,9 +118,9 @@ fn import_items(
     document: &Document,
     configuration: &ConfigurationSnapshot,
     context: ImportContext<'_>,
-) -> Vec<CompletionItem> {
+) -> CompletionResponse {
     let Some(root) = configuration.root.as_deref() else {
-        return Vec::new();
+        return Vec::new().into();
     };
     let prefix = context.token.map_or("", |token| token.text.as_str());
     let workspace_prefix = prefix.starts_with("%workspace%/");
@@ -144,38 +138,54 @@ fn import_items(
             .position(document.text(), replacement.end),
     };
     if range.start.line != range.end.line {
-        return Vec::new();
+        return Vec::new().into();
     }
 
-    configuration
-        .candidates
-        .iter()
-        .filter_map(|candidate| {
-            let relative = candidate
-                .strip_prefix(root)
-                .ok()?
-                .to_str()?
-                .replace('\\', "/");
-            let decoded = if workspace_prefix {
-                format!("%workspace%/{relative}")
-            } else if absolute {
-                candidate.to_str()?.to_owned()
-            } else {
-                relative
+    let mut items = Vec::new();
+    let mut is_incomplete = false;
+    for candidate in &configuration.candidates {
+        let Some(relative) = candidate.strip_prefix(root).ok().and_then(|path| path.to_str()) else {
+            continue;
+        };
+        let relative = if relative.contains('\\') {
+            Cow::Owned(relative.replace('\\', "/"))
+        } else {
+            Cow::Borrowed(relative)
+        };
+        let decoded = if workspace_prefix {
+            format!("%workspace%/{relative}")
+        } else if absolute {
+            let Some(path) = candidate.to_str() else {
+                continue;
             };
-            if !decoded.starts_with(prefix) {
-                return None;
-            }
-            let new_text = super::syntax::quote_token(&decoded)?;
-            Some(CompletionItem {
-                label: decoded,
-                kind: Some(CompletionItemKind::File),
-                detail: Some("Workspace Bazelrc import".to_owned()),
-                text_edit: Some(TextEdit { range, new_text }.into()),
-                ..Default::default()
-            })
-        })
-        .collect()
+            path.to_owned()
+        } else {
+            relative.into_owned()
+        };
+        if !decoded.starts_with(prefix) {
+            continue;
+        }
+        let Some(new_text) = super::syntax::quote_token(&decoded) else {
+            continue;
+        };
+        if items.len() == MAX_IMPORT_COMPLETIONS {
+            is_incomplete = true;
+            break;
+        }
+        items.push(CompletionItem {
+            label: decoded,
+            kind: Some(CompletionItemKind::File),
+            detail: Some("Workspace Bazelrc import".to_owned()),
+            text_edit: Some(TextEdit { range, new_text }.into()),
+            ..Default::default()
+        });
+    }
+    CompletionList {
+        is_incomplete,
+        items,
+        ..Default::default()
+    }
+    .into()
 }
 
 struct EnumValueContext<'a> {
@@ -430,7 +440,18 @@ fn push_flag(
     });
 }
 
-fn command_items() -> Vec<CompletionItem> {
+fn command_items(document: &Document, replacement: Span) -> Vec<CompletionItem> {
+    let range = Range {
+        start: document
+            .line_index()
+            .position(document.text(), replacement.start),
+        end: document
+            .line_index()
+            .position(document.text(), replacement.end),
+    };
+    if range.start.line != range.end.line {
+        return Vec::new();
+    }
     let mut items: Vec<_> = commands::NAMES
         .iter()
         .map(|name| CompletionItem {
@@ -441,6 +462,13 @@ fn command_items() -> Vec<CompletionItem> {
             } else {
                 "Bazel 8.7 command".to_owned()
             }),
+            text_edit: Some(
+                TextEdit {
+                    range,
+                    new_text: (*name).to_owned(),
+                }
+                .into(),
+            ),
             ..Default::default()
         })
         .collect();
@@ -448,12 +476,83 @@ fn command_items() -> Vec<CompletionItem> {
         label: (*name).to_owned(),
         kind: Some(CompletionItemKind::Keyword),
         detail: Some((*detail).to_owned()),
+        text_edit: Some(
+            TextEdit {
+                range,
+                new_text: (*name).to_owned(),
+            }
+            .into(),
+        ),
         ..Default::default()
     }));
     items
 }
 
-fn config_items(configuration: &ConfigurationView, command: &str) -> Vec<CompletionItem> {
+#[derive(Clone, Copy)]
+enum ConfigEdit {
+    Joined,
+    Separate,
+    AfterOption { needs_space: bool },
+}
+
+struct ConfigContext {
+    replacement: Span,
+    edit: ConfigEdit,
+}
+
+fn config_context(line: &super::syntax::Line, offset: usize, source: &str) -> Option<ConfigContext> {
+    let named_body = line.key().is_some_and(|key| key.text.contains(':'));
+    for (index, option) in line.options().iter().enumerate() {
+        if option.text.starts_with("--config=")
+            && option.range.start <= offset
+            && offset <= option.range.end
+        {
+            return Some(ConfigContext {
+                replacement: option.range,
+                edit: ConfigEdit::Joined,
+            });
+        }
+        if named_body || option.text != "--config" {
+            continue;
+        }
+        if let Some(value) = line.options().get(index + 1) {
+            if option.range.end <= offset && offset <= value.range.end {
+                return Some(ConfigContext {
+                    replacement: value.range,
+                    edit: ConfigEdit::Separate,
+                });
+            }
+        } else if option.range.end <= offset && offset <= line.range.end {
+            return Some(ConfigContext {
+                replacement: Span::new(offset, offset),
+                edit: ConfigEdit::AfterOption {
+                    needs_space: source
+                        .get(option.range.end..offset)
+                        .is_some_and(str::is_empty),
+                },
+            });
+        }
+    }
+    None
+}
+
+fn config_items(
+    document: &Document,
+    configuration: &ConfigurationView,
+    command: &str,
+    context: ConfigContext,
+) -> Vec<CompletionItem> {
+    let range = Range {
+        start: document
+            .line_index()
+            .position(document.text(), context.replacement.start),
+        end: document
+            .line_index()
+            .position(document.text(), context.replacement.end),
+    };
+    if range.start.line != range.end.line {
+        return Vec::new();
+    }
     let mut found: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for site in configuration
         .declarations()
@@ -466,14 +565,27 @@ fn config_items(configuration: &ConfigurationView, command: &str) -> Vec<Complet
     }
     found
         .into_iter()
-        .map(|(name, commands)| CompletionItem {
-            label: name,
-            kind: Some(CompletionItemKind::Reference),
-            detail: Some(format!(
-                "Bazelrc config ({})",
-                commands.into_iter().collect::<Vec<_>>().join(", ")
-            )),
-            ..Default::default()
+        .filter_map(|(name, commands)| {
+            let encoded = super::syntax::quote_token(&name)?;
+            let new_text = match context.edit {
+                ConfigEdit::Joined => format!("--config={encoded}"),
+                ConfigEdit::Separate if name.is_empty() => return None,
+                ConfigEdit::Separate => encoded,
+                ConfigEdit::AfterOption { .. } if name.is_empty() => return None,
+                ConfigEdit::AfterOption { needs_space } => {
+                    format!("{}{encoded}", if needs_space { " " } else { "" })
+                }
+            };
+            Some(CompletionItem {
+                label: name,
+                kind: Some(CompletionItemKind::Reference),
+                detail: Some(format!(
+                    "Bazelrc config ({})",
+                    commands.into_iter().collect::<Vec<_>>().join(", ")
+                )),
+                text_edit: Some(TextEdit { range, new_text }.into()),
+                ..Default::default()
+            })
         })
         .collect()
 }
@@ -522,10 +634,10 @@ mod tests {
             Some(catalog),
             document.line_index().position(text, offset),
         );
-        let CompletionResponse::CompletionItemList(items) = response else {
-            panic!("array completion")
-        };
-        items
+        match response {
+            CompletionResponse::CompletionItemList(items) => items,
+            CompletionResponse::CompletionList(list) => list.items,
+        }
     }
 
     fn complete(text: &str, catalog: &FlagCatalog) -> Vec<String> {
@@ -645,6 +757,59 @@ mod tests {
     }
 
     #[test]
+    fn config_completion_encodes_and_replaces_each_supported_spelling() {
+        let catalog = FlagCatalog::from_flags("bazel 8.7.0", Vec::new());
+
+        let joined = complete_items(
+            "build:\"foo bar\" --define=x=1\nbuild --config=f\\o",
+            &catalog,
+        );
+        let item = joined.iter().find(|item| item.label == "foo bar").unwrap();
+        let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &item.text_edit else {
+            panic!("plain text edit")
+        };
+        assert_eq!(edit.range.start.character, 6);
+        assert_eq!(edit.range.end.character, 18);
+        assert_eq!(edit.new_text, "--config=\"foo bar\"");
+
+        let separate = complete_items(
+            "build:\"foo bar\" --define=x=1\nbuild --config",
+            &catalog,
+        );
+        let item = separate
+            .iter()
+            .find(|item| item.label == "foo bar")
+            .unwrap();
+        let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &item.text_edit else {
+            panic!("plain text edit")
+        };
+        assert_eq!(edit.new_text, " \"foo bar\"");
+    }
+
+    #[test]
+    fn empty_config_completion_requires_joined_spelling() {
+        let catalog = FlagCatalog::from_flags("bazel 8.7.0", Vec::new());
+        assert_eq!(
+            complete("build: --define=x=1\nbuild --config=", &catalog),
+            vec![""]
+        );
+        assert!(complete("build: --define=x=1\nbuild --config", &catalog).is_empty());
+    }
+
+    #[test]
+    fn command_completion_replaces_the_physical_token() {
+        let catalog = FlagCatalog::from_flags("bazel 8.7.0", Vec::new());
+        let items = complete_items("b\\uild", &catalog);
+        let item = items.iter().find(|item| item.label == "build").unwrap();
+        let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &item.text_edit else {
+            panic!("plain text edit")
+        };
+        assert_eq!(edit.range.start.character, 0);
+        assert_eq!(edit.range.end.character, 6);
+        assert_eq!(edit.new_text, "build");
+    }
+
+    #[test]
     fn import_completion_uses_published_arbitrary_workspace_paths() {
         let catalog = FlagCatalog::from_flags("bazel 8.7.0", Vec::new());
         let configuration = ConfigurationSnapshot {
@@ -676,5 +841,39 @@ mod tests {
             panic!("plain text edit")
         };
         assert_eq!(edit.new_text, "\"%workspace%/config/plain\"");
+    }
+
+    #[test]
+    fn import_completion_bounds_large_candidate_sets() {
+        let catalog = FlagCatalog::from_flags("bazel 8.7.0", Vec::new());
+        let configuration = ConfigurationSnapshot {
+            root: Some(std::sync::Arc::from(std::path::Path::new("/ws"))),
+            candidates: (0..MAX_IMPORT_COMPLETIONS + 1)
+                .map(|index| {
+                    std::sync::Arc::from(
+                        std::path::PathBuf::from(format!("/ws/config/{index:04}"))
+                            .into_boxed_path(),
+                    )
+                })
+                .collect(),
+            ..ConfigurationSnapshot::default()
+        };
+        let root = std::path::PathBuf::from("/ws");
+        let mut documents = Documents::new(Some(root.clone()), IndexHandle::new());
+        let uri: Uri = "file:///ws/.bazelrc".parse().unwrap();
+        documents.set(uri.clone(), root.join(".bazelrc"), 1, "import ".to_owned());
+        let document = documents.get(&uri).unwrap();
+        let response = completions(
+            document,
+            &documents,
+            &configuration,
+            Some(&catalog),
+            Position::new(0, 7),
+        );
+        let CompletionResponse::CompletionList(list) = response else {
+            panic!("bounded completion list")
+        };
+        assert!(list.is_incomplete);
+        assert_eq!(list.items.len(), MAX_IMPORT_COMPLETIONS);
     }
 }
