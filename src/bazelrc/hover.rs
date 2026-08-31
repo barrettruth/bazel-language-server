@@ -23,7 +23,7 @@ pub fn hover(
     position: Position,
 ) -> Option<Hover> {
     let offset = document.line_index().offset(document.text(), position);
-    let view = ConfigurationView::new(documents, configuration);
+    let view = ConfigurationView::for_document(document, documents, configuration);
     if let Some((declaration, occurrence)) = view.occurrence_at(document.path(), offset) {
         return config_hover(document, &view, declaration, occurrence);
     }

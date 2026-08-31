@@ -73,6 +73,14 @@ impl Documents {
     }
 
     #[must_use]
+    pub fn shared_at(&self, path: &Path) -> Option<Arc<Document>> {
+        self.texts
+            .values()
+            .find(|document| document.path() == path)
+            .cloned()
+    }
+
+    #[must_use]
     pub fn is_current(&self, uri: &Uri, document: &Arc<Document>) -> bool {
         self.texts
             .get(uri)

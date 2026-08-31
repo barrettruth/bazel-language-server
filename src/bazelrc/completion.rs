@@ -73,7 +73,11 @@ pub fn completions(
         || (!key.text.contains(':') && trailing_config.is_some());
     if completing_config {
         if commands::accepts_config(command) {
-            config_items(&ConfigurationView::new(documents, configuration), command).into()
+            config_items(
+                &ConfigurationView::for_document(document, documents, configuration),
+                command,
+            )
+            .into()
         } else {
             Vec::new().into()
         }

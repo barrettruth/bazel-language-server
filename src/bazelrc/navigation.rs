@@ -62,7 +62,7 @@ pub fn definitions(
         return Vec::new();
     };
     let origin = range(document, origin);
-    let view = ConfigurationView::new(documents, configuration);
+    let view = ConfigurationView::for_document(document, documents, configuration);
     let mut links = Vec::new();
     for site in view.applicable_declarations(&command, &name) {
         let Some(uri) = file_uri(&site.file) else {
@@ -153,6 +153,19 @@ fn imported<'a>(
     root: &Path,
     token: &Token,
 ) -> Option<&'a Path> {
+    let current_active = document.bazelrc()?.lines.iter().any(|line| {
+        let current = match &line.statement {
+            Some(Statement::Directive(Directive::ConditionalImport(condition))) => {
+                condition.matches("8.7.0") && line.tokens.get(2) == Some(token)
+            }
+            Some(Statement::Directive(_)) => line.tokens.get(1) == Some(token),
+            Some(Statement::Entry | Statement::InvalidDirective) | None => false,
+        };
+        current
+    });
+    if !current_active {
+        return None;
+    }
     let target = resolve_import(root, &token.text);
     if let Some(site) = configuration.imports.iter().find(|site| {
         site.file.as_ref() == document.path() && site.range == token.range && site.target == target
@@ -213,6 +226,26 @@ mod tests {
             ..ConfigurationSnapshot::default()
         };
 
+        assert!(imported(&configuration, &document, root, token).is_none());
+    }
+
+    #[test]
+    fn an_unsaved_inactive_condition_does_not_use_the_saved_active_site() {
+        let root = Path::new("/ws");
+        let text = "try-import-if-bazel-version <8.7.0 child.bazelrc\n";
+        let document = Document::versioned(root.join(".bazelrc"), 2, text.to_owned(), Some(root));
+        let token = import_tokens(&document).next().unwrap();
+        let target = resolve_import(root, &token.text);
+        let configuration = ConfigurationSnapshot {
+            imports: vec![ImportSite {
+                file: Arc::from(document.path()),
+                range: token.range,
+                target,
+                loaded: Some(Arc::from(root.join("child.bazelrc"))),
+                active: true,
+            }],
+            ..ConfigurationSnapshot::default()
+        };
         assert!(imported(&configuration, &document, root, token).is_none());
     }
 }

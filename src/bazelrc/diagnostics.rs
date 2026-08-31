@@ -58,7 +58,7 @@ pub fn diagnostics(
                 }),
         );
     }
-    let configuration = ConfigurationView::new(documents, configuration);
+    let configuration = ConfigurationView::for_document(document, documents, configuration);
 
     for line in parsed
         .lines

@@ -16,7 +16,7 @@ pub fn prepare(
     configuration: &ConfigurationSnapshot,
     position: Position,
 ) -> Option<Range> {
-    let view = ConfigurationView::new(documents, configuration);
+    let view = ConfigurationView::for_document(document, documents, configuration);
     let offset = document.line_index().offset(document.text(), position);
     let (_, occurrence) = view.occurrence_at(document.path(), offset)?;
     view.declarations_named(&occurrence.name).next()?;
@@ -37,7 +37,7 @@ pub fn rename(
     new_name: &str,
 ) -> Result<Option<WorkspaceEdit>> {
     validate(new_name)?;
-    let view = ConfigurationView::new(documents, configuration);
+    let view = ConfigurationView::for_document(document, documents, configuration);
     let offset = document.line_index().offset(document.text(), position);
     let Some((_, occurrence)) = view.occurrence_at(document.path(), offset) else {
         return Ok(None);

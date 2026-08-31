@@ -18,7 +18,7 @@ pub fn references(
     position: Position,
     include_declarations: bool,
 ) -> Vec<Location> {
-    let view = ConfigurationView::new(documents, configuration);
+    let view = ConfigurationView::for_document(document, documents, configuration);
     let offset = document.line_index().offset(document.text(), position);
     let Some((_, occurrence)) = view.occurrence_at(document.path(), offset) else {
         return Vec::new();
@@ -49,7 +49,7 @@ pub fn highlights(
     configuration: &ConfigurationSnapshot,
     position: Position,
 ) -> Vec<DocumentHighlight> {
-    let view = ConfigurationView::new(documents, configuration);
+    let view = ConfigurationView::for_document(document, documents, configuration);
     let offset = document.line_index().offset(document.text(), position);
     let Some((_, occurrence)) = view.occurrence_at(document.path(), offset) else {
         return Vec::new();
@@ -87,7 +87,7 @@ pub fn document_symbols(
     documents: &Documents,
     configuration: &ConfigurationSnapshot,
 ) -> Vec<DocumentSymbol> {
-    let view = ConfigurationView::new(documents, configuration);
+    let view = ConfigurationView::for_document(document, documents, configuration);
     let mut symbols: Vec<_> = view
         .declarations()
         .filter(|site| site.file.as_ref() == document.path())

@@ -107,10 +107,15 @@ impl ConfigurationSnapshot {
             },
             active: Vec::new(),
         };
-        let root_file = builder
-            .visit(&root.join(".bazelrc"), None, false)
-            .ok()
-            .flatten();
+        let root_file = match builder.visit(&root.join(".bazelrc"), None, false) {
+            Ok(root_file) => root_file,
+            Err(_) => {
+                builder.snapshot.entries.clear();
+                builder.snapshot.declarations.clear();
+                builder.snapshot.references.clear();
+                None
+            }
+        };
         builder.snapshot.root_file = root_file;
         builder.snapshot
     }
