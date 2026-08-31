@@ -607,6 +607,24 @@ fn token(value: Vec<u8>, origins: Vec<Span>, range: Span) -> Token {
     }
 }
 
+/// A token spelling that round-trips through Bazel 8.7's rc tokenizer.
+#[must_use]
+pub fn quote_token(value: &str) -> Option<String> {
+    if value.contains(['\0', '\n']) {
+        return None;
+    }
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        if matches!(character, '\\' | '"') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    Some(quoted)
+}
+
 const fn delimiter(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
@@ -651,6 +669,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             &["common", "--define=x=1"]
         );
+    }
+
+    #[test]
+    fn quoted_tokens_preserve_every_representable_value() {
+        for value in ["plain", "with space", "hash#name", "both'\"", "back\\slash"] {
+            let spelling = quote_token(value).unwrap();
+            let parsed = parse(&format!("import {spelling}\n"));
+            assert_eq!(parsed.lines[0].tokens[1].text, value);
+        }
+        assert!(quote_token("line\nfeed").is_none());
+        assert!(quote_token("nul\0byte").is_none());
     }
 
     #[test]

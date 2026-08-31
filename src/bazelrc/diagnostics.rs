@@ -161,6 +161,32 @@ fn diagnose_entry(
                 &format!("`--{}` requires a value", flag.name),
             ));
         }
+        if !matches!(
+            resolved.spelling,
+            FlagSpelling::Negative | FlagSpelling::NegativeOldName
+        ) && !flag.enum_values.is_empty()
+            && let Some(value) = option.value_site()
+            && !flag
+                .enum_values
+                .iter()
+                .any(|candidate| candidate.as_ref() == value.text)
+        {
+            found.push(finding(
+                document,
+                value.range,
+                DiagnosticSeverity::Error,
+                &format!(
+                    "`{}` is not a Bazel 8.7 value for `--{}`; expected one of {}",
+                    value.text,
+                    flag.name,
+                    flag.enum_values
+                        .iter()
+                        .map(|value| format!("`{value}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
         diagnose_catalog_metadata(
             document,
             option.option.range,
@@ -327,6 +353,13 @@ mod tests {
                     deprecation_warning: Some("use another flag".into()),
                     ..Default::default()
                 },
+                Flag {
+                    name: "compilation_mode".into(),
+                    commands: vec!["build".into()],
+                    requires_value: true,
+                    enum_values: vec!["fastbuild".into(), "dbg".into()],
+                    ..Default::default()
+                },
             ],
         )
     }
@@ -372,6 +405,25 @@ mod tests {
                 .iter()
                 .any(|finding| message_contains(finding, "use another flag"))
         );
+    }
+
+    #[test]
+    fn exact_enum_metadata_rejects_only_unknown_values() {
+        let text = "build --compilation_mode=fastbuild\n\
+                    build --compilation_mode slow\n";
+        let (documents, uri) = documents(text);
+        let found = diagnostics(
+            documents.get(&uri).unwrap(),
+            &documents,
+            &ConfigurationSnapshot::default(),
+            Some(&catalog()),
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].severity, Some(DiagnosticSeverity::Error));
+        assert!(message_contains(&found[0], "expected one of"));
+        assert_eq!(found[0].range.start.line, 1);
+        assert_eq!(found[0].range.start.character, 25);
+        assert_eq!(found[0].range.end.character, 29);
     }
 
     #[test]

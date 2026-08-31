@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lsp_types::{CompletionItem, CompletionItemKind, CompletionResponse, Position};
+use lsp_types::{
+    CompletionItem, CompletionItemKind, CompletionResponse, Position, Range, TextEdit,
+};
 
 use super::commands;
 use super::native_options;
@@ -75,7 +77,9 @@ pub fn completions(
     } else if !commands::NAMES.contains(&command) {
         Vec::new().into()
     } else if let Some(catalog) = catalog {
-        if completing_native_flag(line, catalog, offset, document.text()) {
+        if let Some(context) = enum_value_context(line, catalog, command, offset) {
+            enum_items(document, context).into()
+        } else if completing_native_flag(line, catalog, offset, document.text()) {
             flag_items(catalog, command).into()
         } else {
             Vec::new().into()
@@ -83,6 +87,92 @@ pub fn completions(
     } else {
         Vec::new().into()
     }
+}
+
+struct EnumValueContext<'a> {
+    flag: &'a Flag,
+    replacement: super::syntax::Span,
+    option: Option<&'a str>,
+}
+
+fn enum_value_context<'a>(
+    line: &'a super::syntax::Line,
+    catalog: &'a FlagCatalog,
+    command: &str,
+    offset: usize,
+) -> Option<EnumValueContext<'a>> {
+    for usage in native_options::uses(line, catalog) {
+        let Some(resolved) = usage.resolved else {
+            continue;
+        };
+        if resolved.flag.enum_values.is_empty()
+            || !catalog.supports_scope(resolved.flag, command)
+            || matches!(
+                resolved.spelling,
+                super::FlagSpelling::Negative | super::FlagSpelling::NegativeOldName
+            )
+        {
+            continue;
+        }
+        if let Some((option, _)) = usage.option.text.split_once('=') {
+            let equals = usage.option.text.find('=')?;
+            let equals = usage.option.decoded_span(equals..equals + 1)?;
+            if equals.end <= offset && offset <= usage.option.range.end {
+                return Some(EnumValueContext {
+                    flag: resolved.flag,
+                    replacement: usage.option.range,
+                    option: Some(option),
+                });
+            }
+        } else if let Some(value) = usage.value {
+            if value.range.start <= offset && offset <= value.range.end {
+                return Some(EnumValueContext {
+                    flag: resolved.flag,
+                    replacement: value.range,
+                    option: None,
+                });
+            }
+        } else if offset > usage.option.range.end && offset <= line.range.end {
+            return Some(EnumValueContext {
+                flag: resolved.flag,
+                replacement: super::syntax::Span::new(offset, offset),
+                option: None,
+            });
+        }
+    }
+    None
+}
+
+fn enum_items(document: &Document, context: EnumValueContext<'_>) -> Vec<CompletionItem> {
+    let range = Range {
+        start: document
+            .line_index()
+            .position(document.text(), context.replacement.start),
+        end: document
+            .line_index()
+            .position(document.text(), context.replacement.end),
+    };
+    if range.start.line != range.end.line {
+        return Vec::new();
+    }
+    context
+        .flag
+        .enum_values
+        .iter()
+        .filter_map(|raw| {
+            let value = super::syntax::quote_token(raw)?;
+            let new_text = context
+                .option
+                .map_or(value.clone(), |option| format!("{option}={value}"));
+            Some(CompletionItem {
+                label: raw.to_string(),
+                kind: Some(CompletionItemKind::EnumMember),
+                detail: Some(format!("Value for `--{}`", context.flag.name)),
+                text_edit: Some(TextEdit { range, new_text }.into()),
+                ..Default::default()
+            })
+        })
+        .collect()
 }
 
 fn completing_native_flag(
@@ -243,7 +333,7 @@ mod tests {
         }
     }
 
-    fn complete(text: &str, catalog: &FlagCatalog) -> Vec<String> {
+    fn complete_items(text: &str, catalog: &FlagCatalog) -> Vec<CompletionItem> {
         let root = std::path::PathBuf::from("/ws");
         let mut documents = Documents::new(Some(root.clone()), IndexHandle::new());
         let uri: Uri = "file:///ws/.bazelrc".parse().unwrap();
@@ -259,7 +349,14 @@ mod tests {
         let CompletionResponse::CompletionItemList(items) = response else {
             panic!("array completion")
         };
-        items.into_iter().map(|item| item.label).collect()
+        items
+    }
+
+    fn complete(text: &str, catalog: &FlagCatalog) -> Vec<String> {
+        complete_items(text, catalog)
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
     }
 
     #[test]
@@ -299,6 +396,39 @@ mod tests {
         let catalog = FlagCatalog::from_flags("bazel 8.7.0", vec![jobs]);
         assert!(complete("build --jobs=", &catalog).is_empty());
         assert!(complete("build --//settings:mode=", &catalog).is_empty());
+    }
+
+    #[test]
+    fn enum_values_replace_joined_and_separate_spellings_exactly() {
+        let mut mode = flag("compilation_mode", &["build"]);
+        mode.requires_value = true;
+        mode.old_name = Some("cpu_mode".into());
+        mode.enum_values = vec!["fastbuild".into(), "dbg".into()];
+        let catalog = FlagCatalog::from_flags("bazel 8.7.0", vec![mode]);
+
+        let joined = complete_items("build --cpu_mode=fa", &catalog);
+        assert_eq!(
+            joined
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            ["fastbuild", "dbg"]
+        );
+        let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &joined[0].text_edit else {
+            panic!("plain text edit")
+        };
+        assert_eq!(edit.new_text, "--cpu_mode=\"fastbuild\"");
+        assert_eq!(edit.range.start.character, 6);
+        assert_eq!(edit.range.end.character, 19);
+
+        let separate = complete_items("build --compilation_mode fa", &catalog);
+        let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &separate[1].text_edit else {
+            panic!("plain text edit")
+        };
+        assert_eq!(edit.new_text, "\"dbg\"");
+        assert_eq!(edit.range.start.character, 25);
+        assert_eq!(edit.range.end.character, 27);
+        assert!(complete("startup --compilation_mode=", &catalog).is_empty());
     }
 
     #[test]
