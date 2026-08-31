@@ -31,7 +31,7 @@ pub fn respond(
     link_support: bool,
 ) -> Option<Result<Response>> {
     let document = request_document(request, docs)?;
-    if !document.is_bazelrc() {
+    if !document.is_bazelrc() || !supports(request.method.as_str().into()) {
         return None;
     }
     Some(
@@ -172,8 +172,30 @@ fn answer(
         | LspRequestMethod::TextDocumentImplementation
         | LspRequestMethod::TextDocumentCodeLens
         | LspRequestMethod::TextDocumentInlayHint => serde_json::json!([]),
-        _ => serde_json::Value::Null,
+        _ => unreachable!("unsupported methods are rejected before dispatch"),
     })
+}
+
+fn supports(method: LspRequestMethod<'_>) -> bool {
+    method == CompletionRequest::METHOD
+        || method == DefinitionRequest::METHOD
+        || method == HoverRequest::METHOD
+        || method == ReferencesRequest::METHOD
+        || method == DocumentHighlightRequest::METHOD
+        || method == DocumentSymbolRequest::METHOD
+        || method == PrepareRenameRequest::METHOD
+        || method == RenameRequest::METHOD
+        || method == FoldingRangeRequest::METHOD
+        || method == SelectionRangeRequest::METHOD
+        || method == DocumentLinkRequest::METHOD
+        || method == SemanticTokensRequest::METHOD
+        || matches!(
+            method,
+            LspRequestMethod::TextDocumentFormatting
+                | LspRequestMethod::TextDocumentImplementation
+                | LspRequestMethod::TextDocumentCodeLens
+                | LspRequestMethod::TextDocumentInlayHint
+        )
 }
 
 fn request_document<'a>(request: &Request, docs: &'a Documents) -> Option<&'a Document> {
@@ -239,5 +261,26 @@ mod tests {
             &diagnostics[0].message,
             lsp_types::Message::String(message) if message.contains("expects 1 argument")
         ));
+    }
+
+    #[test]
+    fn unknown_methods_are_left_for_the_main_dispatcher() {
+        let (docs, uri) = documents("build --jobs=1\n");
+        let request = Request {
+            id: RequestId::from(1),
+            method: "textDocument/notARealMethod".to_owned(),
+            params: serde_json::json!({"textDocument": {"uri": uri}}),
+        };
+        assert!(
+            respond(
+                &request,
+                &docs,
+                &ConfigurationSnapshot::default(),
+                None,
+                Some(Path::new("/ws")),
+                true,
+            )
+            .is_none()
+        );
     }
 }
