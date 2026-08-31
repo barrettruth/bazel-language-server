@@ -10,6 +10,7 @@ use lsp_types::{Position, Uri};
 use rustc_hash::FxHashMap;
 use starlark_cst::{Dialect, FileKind, Parse, classify, parse};
 
+use crate::bazelrc;
 use crate::index::{IndexHandle, Tier, collect_file};
 use crate::line_index::LineIndex;
 
@@ -128,10 +129,14 @@ impl Documents {
 pub struct Document {
     text: String,
     path: PathBuf,
-    kind: FileKind,
     version: i32,
-    parsed: Parse,
+    syntax: Syntax,
     lines: LineIndex,
+}
+
+enum Syntax {
+    Starlark { kind: FileKind, parsed: Parse },
+    Bazelrc(bazelrc::syntax::Parse),
 }
 
 impl Document {
@@ -144,15 +149,22 @@ impl Document {
 
     #[must_use]
     pub fn versioned(path: PathBuf, version: i32, text: String, root: Option<&Path>) -> Self {
-        let (dialect, kind) = classify(&path, root).unwrap_or((Dialect::Standard, FileKind::Bzl));
-        let parsed = parse(&text, dialect);
+        let syntax = if is_bazelrc(&path) {
+            Syntax::Bazelrc(bazelrc::syntax::parse(&text))
+        } else {
+            let (dialect, kind) =
+                classify(&path, root).unwrap_or((Dialect::Standard, FileKind::Bzl));
+            Syntax::Starlark {
+                kind,
+                parsed: parse(&text, dialect),
+            }
+        };
         let lines = LineIndex::new(&text);
         Self {
             text,
             path,
-            kind,
             version,
-            parsed,
+            syntax,
             lines,
         }
     }
@@ -169,7 +181,10 @@ impl Document {
 
     #[must_use]
     pub fn kind(&self) -> FileKind {
-        self.kind
+        match &self.syntax {
+            Syntax::Starlark { kind, .. } => *kind,
+            Syntax::Bazelrc(_) => unreachable!("Bazelrc is routed to its own provider"),
+        }
     }
 
     #[must_use]
@@ -186,27 +201,46 @@ impl Document {
     /// The syntax tree, in the dialect the path implies.
     #[must_use]
     pub fn parse(&self) -> &Parse {
-        &self.parsed
+        match &self.syntax {
+            Syntax::Starlark { parsed, .. } => parsed,
+            Syntax::Bazelrc(_) => unreachable!("Bazelrc is routed to its own provider"),
+        }
+    }
+
+    #[must_use]
+    pub const fn is_bazelrc(&self) -> bool {
+        matches!(self.syntax, Syntax::Bazelrc(_))
+    }
+
+    #[must_use]
+    pub fn bazelrc(&self) -> Option<&bazelrc::syntax::Parse> {
+        match &self.syntax {
+            Syntax::Starlark { .. } => None,
+            Syntax::Bazelrc(parsed) => Some(parsed),
+        }
     }
 
     /// Add declarations to `tier`. Only a clean parse supersedes disk facts;
     /// recovered syntax cannot distinguish deletion from an unfinished edit.
     fn contribute(&self, root: &Path, tier: &mut Tier) {
-        if !matches!(self.kind, FileKind::Build) {
+        let Syntax::Starlark { kind, parsed } = &self.syntax else {
+            return;
+        };
+        if !matches!(kind, FileKind::Build) {
             return;
         }
         let path: Arc<Path> = Arc::from(self.path.as_path());
         if !collect_file(
             root,
             &path,
-            &self.parsed,
+            parsed,
             &self.text,
             &mut tier.targets,
             &mut tier.references,
         ) {
             return;
         }
-        if self.parsed.errors().is_empty() {
+        if parsed.errors().is_empty() {
             tier.speaks_for.insert(path);
         }
     }
@@ -222,6 +256,12 @@ impl Document {
     pub fn offset(&self, position: Position) -> usize {
         self.lines.offset(&self.text, position)
     }
+}
+
+fn is_bazelrc(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == ".bazelrc" || name.ends_with(".bazelrc"))
 }
 
 fn apply_changes(
@@ -306,6 +346,17 @@ mod tests {
             assert!(tier.targets.is_empty(), "{name} declared something");
             assert!(!tier.speaks_for.contains(path.as_path()), "{name} claimed");
         }
+    }
+
+    #[test]
+    fn bazelrc_uses_its_own_syntax_and_contributes_no_targets() {
+        let (path, document) = buffer("config/build.bazelrc", "build --config=dev\n");
+        assert!(document.is_bazelrc());
+        assert!(document.bazelrc().is_some());
+        let mut tier = Tier::default();
+        document.contribute(Path::new("/ws"), &mut tier);
+        assert!(tier.targets.is_empty());
+        assert!(!tier.speaks_for.contains(path.as_path()));
     }
 
     #[test]

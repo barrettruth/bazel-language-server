@@ -609,6 +609,9 @@ fn respond(
     link_support: bool,
     cancellation: &worker::Cancellation,
 ) -> Result<Response> {
+    if let Some(response) = bazelrc::respond(request, docs) {
+        return Ok(response);
+    }
     let id = request.id.clone();
     let method: LspRequestMethod<'_> = request.method.as_str().into();
     Ok(if method == DocumentSymbolRequest::METHOD {
@@ -1133,11 +1136,15 @@ fn schedule_diagnostics(
         return Ok(());
     };
     let version = document.version();
-    let syntax = handlers::syntax_diagnostics(document);
+    let syntax = if document.is_bazelrc() {
+        bazelrc::syntax_diagnostics(document)
+    } else {
+        handlers::syntax_diagnostics(document)
+    };
     let clean = syntax.is_empty();
     diagnostics.cancel(uri);
     publish_diagnostics(connection, uri.clone(), version, syntax)?;
-    if clean {
+    if clean && !document.is_bazelrc() {
         let uri = uri.clone();
         let document = docs.shared(&uri).expect("the document scheduled above");
         diagnostics.execute(uri.clone(), move |cancellation| Completed::Diagnostics {
