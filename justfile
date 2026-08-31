@@ -12,10 +12,6 @@ lint:
 test:
     cargo test --all
 
-validate-workspace workspace="/Users/bruth/dev/imc/roadrunner":
-    BLS_WORKSPACE={{workspace}} cargo test --release --test workspace_probe -- --ignored --nocapture --test-threads=1
-    BLS_WORKSPACE={{workspace}} cargo test --release index::tests::probe_workspace_file_update -- --ignored --nocapture --test-threads=1
-
 build:
     cargo build --release
 

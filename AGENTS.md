@@ -38,10 +38,20 @@
 
 ## Workspace probes
 
-- `nix develop -c just validate-workspace /path/to/workspace` runs the large
-  static/LSP probe and the single-file replacement measurement. Its defaults
-  target `/Users/bruth/dev/imc/roadrunner`; use the documented `BLS_*` variables
-  for other workspaces.
+- Run the large static/LSP probe and the single-file replacement measurement
+  directly. Their defaults target `/Users/bruth/dev/imc/roadrunner`; use the
+  documented `BLS_*` variables for other workspaces.
+
+  ```sh
+  env BLS_WORKSPACE=/Users/bruth/dev/imc/roadrunner \
+    nix develop -c cargo test --release --test workspace_probe -- \
+    --ignored --nocapture --test-threads=1
+  env BLS_WORKSPACE=/Users/bruth/dev/imc/roadrunner \
+    nix develop -c cargo test --release \
+    index::tests::probe_workspace_file_update -- \
+    --ignored --nocapture --test-threads=1
+  ```
+
 - Exercise the evaluated graph separately with the checked-in fixture:
 
   ```sh
