@@ -50,8 +50,9 @@ behavior that depends on that suffix is outside this contract.
    Bazel 8.7 native catalog; it never proves that the spelling is invalid.
 9. Native completion and hard semantic errors require an exact numeric-8.7
    catalog; structural answers remain available without one.
-10. Open buffers replace saved configuration declarations, while unsaved
-    imports do not mutate the published filesystem graph.
+10. Open buffers replace saved graph-member contents for request answers;
+    unsaved imports can reuse only targets present in the published filesystem
+    graph and never mutate that graph.
 
 ## Source authorities
 
@@ -99,7 +100,10 @@ Before splitting lines, the parser deletes every `\\\r\n` sequence and then
 every `\\\n` sequence from the complete file. Quotes and comments do not stop
 this deletion. Whitespace after a backslash prevents continuation.
 
-The tokenizer then applies these rules:
+Each resulting logical line first loses leading and trailing space, TAB, LF,
+vertical TAB, form feed, and CR bytes. This happens before quote and backslash
+processing, so escaped edge whitespace is stripped with its preceding
+backslash left dangling. The tokenizer then applies these rules:
 
 - space, TAB, CR, and LF delimit tokens;
 - an unquoted, unescaped `#` begins a comment, including in the middle of a
@@ -137,7 +141,7 @@ failure; either optional form suppresses read failure, but not malformed
 imported contents or an active-stack cycle.
 
 Imports expand depth-first where written. Reaching the same canonical file by
-two inactive paths replays its entries and produces a warning. Re-entering a
+two independent active paths replays its entries and produces a warning. Re-entering a
 file on the active stack is an error. Bazel 8.7 has no import-depth cap.
 
 Only the exact `%workspace%/` prefix is substituted. Absolute paths remain
@@ -177,8 +181,11 @@ option. `startup:name`, unknown-command sections, and argless sections do not
 declare configurations.
 
 At top level both `--config=name` and `--config name` create references. Inside
-a named configuration body only `--config=name` creates a reference; split
-spelling is an error.
+a named configuration body Bazel's recursive expander treats any token whose
+first eight bytes are `--config` and which contains `=` as a reference using
+the bytes after the first `=`. Thus `--configuration=name` is expanded before
+native option parsing later rejects that spelling. Any such prefix without an
+`=` is a recursive joined-form error; split spelling is not accepted.
 
 Configuration completion and go-to-definition include declarations applicable
 through command inheritance. Every open Bazelrc document replaces the saved
@@ -237,7 +244,7 @@ Errors:
 
 - malformed directive arity or version conditions;
 - required-import read failures and active import cycles;
-- split `--config name` in a named configuration body;
+- a `--config`-prefixed token without `=` in a named configuration body;
 - an exact catalog says a native option is outside the current rc scope;
 - a catalogued required-value option has no joined or following value;
 - a catalogued negative boolean spelling has a value.
@@ -272,8 +279,8 @@ For Bazelrc documents the server provides:
 
 - completion for commands, directives, applicable configuration names, and
   exact-catalog native flag spellings and enum values;
-- completion for arbitrary regular workspace import paths, using explicit
-  single-line edits and Bazel-safe token quoting;
+- completion for eligible regular workspace import paths, using at most 512
+  matching items, explicit single-line edits, and Bazel-safe token quoting;
 - hover for commands, rc scopes, configurations, imports, and native flags;
 - go-to-definition for active loaded imports and configuration references;
 - document links for active loaded imports;
@@ -313,7 +320,9 @@ The Bazel actor is the sole writer of the flag catalog. The watch snapshot
 contains a bounded, deterministic list of regular workspace files for import
 completion. A saved graph member, candidate path, `.bazelignore`, or package-
 tree change invalidates the relevant configuration state; imported files with
-arbitrary names are not sent through the BUILD-file index. Each publisher
+arbitrary names are not sent through the BUILD-file index. Imported files
+outside the workspace are loaded into a snapshot but are outside the recursive
+watch and therefore require a manual reindex after an external edit. Each publisher
 writes an immutable snapshot and sends one bounded, coalesced wake to the
 protocol loop.
 

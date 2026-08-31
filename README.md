@@ -52,8 +52,8 @@ mapping Bazel alone can produce; an unfetched repository explains which
 
 Bazelrc parsing follows upstream Bazel 8.7.0 and the advertised compatibility
 line is Bazel 8.7. Vendor suffixes on a numeric 8.7 release do not imply vendor
-grammar support. Other Bazel versions still receive structural answers, but
-the server does not select a nearby flag catalog or silently fall back to one.
+grammar support. Other Bazel versions are outside the support contract; the
+server does not select a nearby flag catalog or silently fall back to one.
 
 <details>
 <summary>Bazelrc feature coverage</summary>

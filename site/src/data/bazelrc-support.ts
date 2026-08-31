@@ -29,8 +29,9 @@ export const bazelrcSupport: BazelrcSupportSection[] = [
       },
       {
         feature: "Structural editing with another Bazel version",
-        supported: true,
-        boundary: "Still uses the upstream 8.7.0 grammar; no flag catalog.",
+        supported: false,
+        boundary:
+          "The parser remains pinned to 8.7.0; no compatibility claim is made for another release.",
       },
       {
         feature: "Nearest-version or bundled catalog fallback",
@@ -79,7 +80,8 @@ export const bazelrcSupport: BazelrcSupportSection[] = [
       {
         feature: "Native whitespace delimiters",
         supported: true,
-        boundary: "Space, TAB, CR, and LF delimit tokens.",
+        boundary:
+          "Space, TAB, CR, and LF delimit; logical-line edges also strip vertical TAB and form feed.",
       },
       {
         feature: "Mid-token comments",
@@ -169,6 +171,12 @@ export const bazelrcSupport: BazelrcSupportSection[] = [
         boundary: "Relative paths use Bazel's workspace process directory.",
       },
       {
+        feature: "Live refresh for imports outside the workspace",
+        supported: false,
+        boundary:
+          "They load into snapshots, but external edits require manual reindexing.",
+      },
+      {
         feature: "Containing-file-relative imports",
         supported: false,
         boundary: "That common editor convention does not match Bazel 8.7.",
@@ -194,10 +202,10 @@ export const bazelrcSupport: BazelrcSupportSection[] = [
         boundary: "Outside the 8.7 contract.",
       },
       {
-        feature: "Unsaved import graph traversal",
+        feature: "New unsaved import targets",
         supported: false,
         boundary:
-          "Import topology updates after the file is saved and watched.",
+          "Open graph members may reuse published targets; a new target loads after save and refresh.",
       },
     ],
   },
@@ -241,6 +249,12 @@ export const bazelrcSupport: BazelrcSupportSection[] = [
         supported: true,
         boundary:
           "Included in completion, navigation, and absence diagnostics.",
+      },
+      {
+        feature: "Bazel's recursive --config prefix quirk",
+        supported: true,
+        boundary:
+          "Named bodies expand any token beginning --config through its first =, before native parsing.",
       },
       {
         feature: "Nested split --config name",
@@ -394,7 +408,7 @@ export const bazelrcSupport: BazelrcSupportSection[] = [
         feature: "Import-path completion",
         supported: true,
         boundary:
-          "Uses a bounded published workspace-file snapshot; request handlers do not scan.",
+          "At most 512 eligible matches from a 131,072-path snapshot; ignored, metadata, output, symlink, non-regular, and non-UTF-8 paths are excluded.",
       },
       {
         feature: "Import document links",

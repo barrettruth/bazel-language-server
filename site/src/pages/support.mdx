@@ -17,9 +17,9 @@ toc: true
 | Bazelrc native flag completion, hover and diagnostics | Catalog reported by a configured numeric 8.7 binary |
 
 The Bazelrc compatibility line is Bazel 8.7. A vendor suffix on that numeric
-release does not add vendor grammar support. Structural Bazelrc answers remain
-available with another release, but the server neither selects a nearby flag
-catalog nor falls back to a bundled one.
+release does not add vendor grammar support. Other Bazel releases are outside
+the support contract; the server neither selects a nearby flag catalog nor
+falls back to a bundled one.
 
 ## Starlark files
 
@@ -30,8 +30,8 @@ Their exact dialect and role are derived from the path and workspace.
 ## Bazelrc files
 
 The exact filename `.bazelrc` and every filename ending in `.bazelrc` use the
-Bazelrc parser. A differently named rc file must use that suffix for the server
-to classify it as Bazelrc.
+Bazelrc parser. A differently named regular file also becomes Bazelrc when it
+is reached from the published workspace import graph.
 
 The workspace configuration graph starts at the root `.bazelrc` and follows
 its reachable imports. System, home and explicit command-line rc files are not

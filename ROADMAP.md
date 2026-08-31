@@ -55,8 +55,8 @@ research notes retain source evidence and corpus measurements.
 
 The parser implements upstream Bazel 8.7.0. The advertised compatibility line
 is Bazel 8.7; a vendor suffix on that numeric release does not add vendor
-semantics. Other releases may still receive structural answers, but absence
-from an 8.7 catalog never proves one of their flags invalid.
+semantics. Other releases are outside the support contract, and absence from
+an 8.7 catalog never proves a flag invalid.
 
 The watch thread publishes the workspace `.bazelrc` import graph. Requests use
 that immutable snapshot and the current buffer without reading the filesystem.
@@ -71,9 +71,9 @@ flag intelligence are shipped. Configuration references, symbols, conservative
 rename, import and enum-value completion, structural hover, and expansion
 diagnostics use the same request-local configuration view. Converter-specific
 values, final effective option rendering, automatic platform configuration,
-and external rc discovery remain outside the shipped contract. Formatting is
-an intentional non-feature because Bazel defines no canonical semantics-safe
-layout.
+external rc discovery, and live watching of imported files outside the
+workspace remain outside the shipped contract. Formatting is an intentional
+non-feature because Bazel defines no canonical semantics-safe layout.
 
 ## Dependency order
 

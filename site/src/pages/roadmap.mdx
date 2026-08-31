@@ -35,7 +35,7 @@ control of the move; the language server supplies the accompanying edits.
 
 ## Bazel configuration
 
-Retain configuration-to-configuration expansion edges, then report expansion
-cycles and repeated expansion without reconstructing external rc layers. Value
-validation waits for a source of converter semantics exact enough to avoid
-guessing from display type names.
+External system, home, and explicit rc discovery remains separate from the
+workspace graph. Converter-specific value validation waits for a source of
+semantics exact enough to avoid guessing from display type names; rendering a
+final effective option sequence likewise waits for a concrete editor use case.

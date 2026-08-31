@@ -34,8 +34,10 @@ paths resolve from the workspace root, matching the Bazel process working
 directory rather than the importing file's directory.
 
 Import paths receive workspace-file completion, document links, structural
-hover, and go-to-definition. Completion quotes paths whose bytes would
-otherwise be tokenized differently.
+hover, and go-to-definition. Completion returns at most 512 eligible matches
+from the bounded workspace snapshot and quotes paths whose bytes would
+otherwise be tokenized differently. Imports outside the workspace load, but
+changes to those external files require a manual reindex.
 
 ## Commands and configurations
 
@@ -45,7 +47,10 @@ applicable declarations in the workspace import graph, with open buffers taking
 precedence over saved files.
 
 Nested configurations use `--config=name`. Bazel rejects split `--config name`
-inside a named configuration body, and the server reports it as an error.
+inside a named configuration body, and the server reports it as an error. The
+server also models Bazel 8.7's source-level quirk that any nested token whose
+first eight bytes are `--config` is expanded through its first `=` before
+native option parsing.
 Configuration names absent from the published workspace graph are warnings,
 not invalid-name errors, because another rc layer may declare them.
 
