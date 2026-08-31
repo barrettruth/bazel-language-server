@@ -125,7 +125,7 @@ fn invalidated(path: &Path, configuration: &ConfigurationSnapshot) -> Invalidate
         _ if path.extension().is_some_and(|kind| kind == "bzl") => Invalidates::GRAPH,
         _ => Invalidates::NOTHING,
     };
-    if configuration.includes(path) {
+    if configuration.imports_path(path) {
         reaches.with(Invalidates::CONFIGURATION)
     } else {
         reaches

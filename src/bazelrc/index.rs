@@ -126,6 +126,15 @@ impl ConfigurationSnapshot {
     }
 
     #[must_use]
+    pub fn imports_path(&self, path: &Path) -> bool {
+        self.imports.iter().any(|site| {
+            site.active
+                && (site.target == path
+                    || site.loaded.as_deref().is_some_and(|loaded| loaded == path))
+        })
+    }
+
+    #[must_use]
     pub fn identity<'a>(&'a self, path: &Path) -> Option<&'a Path> {
         if let Some((stored, _)) = self.files.get_key_value(path) {
             return Some(stored);
