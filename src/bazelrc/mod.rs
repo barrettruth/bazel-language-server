@@ -4,6 +4,7 @@ mod catalog;
 mod commands;
 mod completion;
 mod diagnostics;
+mod expansion;
 mod hover;
 mod index;
 mod native_options;

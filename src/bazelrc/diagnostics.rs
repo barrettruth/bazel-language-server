@@ -67,6 +67,22 @@ pub fn diagnostics(
     {
         diagnose_entry(document, &configuration, catalog, line, &mut found);
     }
+    found.extend(
+        super::expansion::findings(&configuration)
+            .into_iter()
+            .filter(|finding| finding.site.file.as_ref() == document.path())
+            .map(|problem| {
+                finding(
+                    document,
+                    problem.site.range,
+                    match problem.severity {
+                        super::expansion::Severity::Error => DiagnosticSeverity::Error,
+                        super::expansion::Severity::Warning => DiagnosticSeverity::Warning,
+                    },
+                    &problem.message,
+                )
+            }),
+    );
     found
 }
 
