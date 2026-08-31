@@ -29,11 +29,18 @@ pub struct Token {
 }
 
 impl Token {
-    /// The physical source covering a nonempty range of decoded token bytes.
+    /// The physical source covering a range of decoded token bytes.
     #[must_use]
     pub fn decoded_span(&self, range: Range<usize>) -> Option<Span> {
-        if range.is_empty() || range.end > self.origins.len() {
+        if range.start > range.end || range.end > self.origins.len() {
             return None;
+        }
+        if range.is_empty() {
+            let boundary = self.origins.get(range.start).map_or_else(
+                || self.origins.last().map(|origin| origin.end),
+                |origin| Some(origin.start),
+            )?;
+            return Some(Span::new(boundary, boundary));
         }
         Some(Span::new(
             self.origins.get(range.start)?.start,
@@ -736,6 +743,18 @@ mod tests {
         let reference = &config_references(&parsed.lines[0])[0];
         assert_eq!(reference.name, "child");
         assert_eq!(&text[reference.range.start..reference.range.end], "ch\\ild");
+    }
+
+    #[test]
+    fn an_empty_config_name_has_an_insertion_point_after_its_prefix() {
+        let text = "build: --define=empty=yes\nbuild --config=\n";
+        let parsed = parse(text);
+        let declaration = config_declaration(&parsed.lines[0]).unwrap();
+        assert_eq!(declaration.name, "");
+        assert_eq!(declaration.range, Span::new(6, 6));
+        let reference = &config_references(&parsed.lines[1])[0];
+        assert_eq!(reference.name, "");
+        assert_eq!(reference.range, Span::new(text.len() - 1, text.len() - 1));
     }
 
     #[test]

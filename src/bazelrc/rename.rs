@@ -160,4 +160,18 @@ mod tests {
         let position = document.line_index().position(text, 16);
         assert!(prepare(document, &documents, &configuration, position).is_none());
     }
+
+    #[test]
+    fn an_empty_declared_name_renames_at_zero_width_ranges() {
+        let text = "build: --jobs=1\nbuild --config=\n";
+        let (documents, uri, configuration) = fixture(text);
+        let document = documents.get(&uri).unwrap();
+        let position = document.line_index().position(text, 6);
+        let edit = rename(document, &documents, &configuration, position, "default")
+            .unwrap()
+            .unwrap();
+        let edits = edit.changes.unwrap().remove(&uri).unwrap();
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().all(|edit| edit.range.start == edit.range.end));
+    }
 }
