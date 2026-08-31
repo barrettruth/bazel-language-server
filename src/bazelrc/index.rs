@@ -127,10 +127,14 @@ impl ConfigurationSnapshot {
 
     #[must_use]
     pub fn imports_path(&self, path: &Path) -> bool {
+        let path = lexical_identity(path);
         self.imports.iter().any(|site| {
             site.active
-                && (site.target == path
-                    || site.loaded.as_deref().is_some_and(|loaded| loaded == path))
+                && (lexical_identity(&site.target) == path
+                    || site
+                        .loaded
+                        .as_deref()
+                        .is_some_and(|loaded| lexical_identity(loaded) == path))
         })
     }
 
@@ -157,6 +161,27 @@ impl ConfigurationSnapshot {
             .iter()
             .filter(move |site| site.name.as_ref() == name)
     }
+}
+
+fn lexical_identity(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(std::path::Component::Normal(_))
+                ) {
+                    normalized.pop();
+                } else if !path.is_absolute() {
+                    normalized.push(component);
+                }
+            }
+            _ => normalized.push(component),
+        }
+    }
+    normalized
 }
 
 /// Independently published configuration snapshots.

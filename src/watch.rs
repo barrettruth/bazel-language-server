@@ -556,6 +556,23 @@ mod tests {
     }
 
     #[test]
+    fn missing_import_targets_are_matched_after_lexical_normalization() {
+        let configuration = ConfigurationSnapshot {
+            imports: vec![crate::bazelrc::ImportSite {
+                file: Arc::from(Path::new("/ws/.bazelrc")),
+                range: crate::bazelrc::syntax::Span::new(0, 1),
+                target: PathBuf::from("/ws/config/../plain"),
+                loaded: None,
+                active: true,
+            }],
+            ..ConfigurationSnapshot::default()
+        };
+        let reaches = invalidated(Path::new("/ws/plain"), &configuration);
+        assert!(reaches.configuration);
+        assert!(reaches.graph);
+    }
+
+    #[test]
     fn file_creation_refreshes_candidates_without_refreshing_bazel() {
         let root = Path::new("/ws");
         let event = notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))
