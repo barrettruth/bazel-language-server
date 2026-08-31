@@ -4,6 +4,7 @@
 //! grammar is consequently the C++ tokenizer's, not Starlark's or a shell's.
 
 use std::cmp::Ordering;
+use std::ops::Range;
 
 /// A contiguous range in the physical UTF-8 source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +25,21 @@ impl Span {
 pub struct Token {
     pub text: String,
     pub range: Span,
+    origins: Vec<Span>,
+}
+
+impl Token {
+    /// The physical source covering a nonempty range of decoded token bytes.
+    #[must_use]
+    pub fn decoded_span(&self, range: Range<usize>) -> Option<Span> {
+        if range.is_empty() || range.end > self.origins.len() {
+            return None;
+        }
+        Some(Span::new(
+            self.origins.get(range.start)?.start,
+            self.origins.get(range.end - 1)?.end,
+        ))
+    }
 }
 
 /// A comparison in `try-import-if-bazel-version`.
@@ -344,31 +360,43 @@ pub struct ConfigReference {
     pub range: Span,
 }
 
+/// One named configuration declaration and the physical range of its name.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigDeclaration<'a> {
+    pub command: &'a str,
+    pub name: &'a str,
+    pub range: Span,
+}
+
 /// A named configuration body retained by Bazel 8.7's rc reader.
 #[must_use]
-pub fn config_declaration(line: &Line) -> Option<(&Token, &str, &str)> {
+pub fn config_declaration(line: &Line) -> Option<ConfigDeclaration<'_>> {
     if !matches!(line.statement, Some(Statement::Entry)) {
         return None;
     }
     let key = line.key()?;
     let (command, name) = key.text.split_once(':')?;
-    Some((key, command, name))
+    let range = key
+        .decoded_span(command.len() + 1..key.text.len())
+        .unwrap_or(key.range);
+    Some(ConfigDeclaration {
+        command,
+        name,
+        range,
+    })
 }
 
 /// Named configuration references. Bazel accepts split option/value spelling
 /// only outside a named configuration body.
 #[must_use]
-pub fn config_references(line: &Line, source: &str) -> Vec<ConfigReference> {
+pub fn config_references(line: &Line) -> Vec<ConfigReference> {
     let mut found = Vec::new();
     let mut options = line.options().iter().peekable();
     while let Some(option) = options.next() {
         if let Some(name) = option.text.strip_prefix("--config=") {
-            let raw = source.get(option.range.start..option.range.end);
-            let range = if raw == Some(option.text.as_str()) {
-                Span::new(option.range.start + "--config=".len(), option.range.end)
-            } else {
-                option.range
-            };
+            let range = option
+                .decoded_span("--config=".len()..option.text.len())
+                .unwrap_or(option.range);
             found.push(ConfigReference {
                 name: name.to_owned(),
                 range,
@@ -379,7 +407,9 @@ pub fn config_references(line: &Line, source: &str) -> Vec<ConfigReference> {
         {
             found.push(ConfigReference {
                 name: value.text.clone(),
-                range: value.range,
+                range: value
+                    .decoded_span(0..value.text.len())
+                    .unwrap_or(value.range),
             });
         }
     }
@@ -512,6 +542,7 @@ fn tokenize(logical: &Logical, start: usize, end: usize) -> (Vec<Token>, Option<
 
         let token_start = at;
         let mut value = Vec::new();
+        let mut origins = Vec::new();
         let mut quote = None;
         let mut has_value = false;
         while at < end {
@@ -521,51 +552,58 @@ fn tokenize(logical: &Logical, start: usize, end: usize) -> (Vec<Token>, Option<
                     quote = None;
                     at += 1;
                 } else if byte == b'\\' {
+                    let origin = at;
                     at += 1;
                     if at < end {
                         value.push(logical.bytes[at]);
                         has_value = true;
                         at += 1;
+                        origins.push(logical.span(origin, at));
                     }
                 } else {
                     value.push(byte);
                     has_value = true;
+                    origins.push(logical.span(at, at + 1));
                     at += 1;
                 }
             } else if delimiter(byte) {
                 break;
             } else if byte == b'#' {
                 if has_value {
-                    tokens.push(token(value, logical.span(token_start, at)));
+                    tokens.push(token(value, origins, logical.span(token_start, at)));
                 }
                 return (tokens, Some(logical.span(at, end)));
             } else if matches!(byte, b'\'' | b'"') {
                 quote = Some(byte);
                 at += 1;
             } else if byte == b'\\' {
+                let origin = at;
                 at += 1;
                 if at < end {
                     value.push(logical.bytes[at]);
                     has_value = true;
                     at += 1;
+                    origins.push(logical.span(origin, at));
                 }
             } else {
                 value.push(byte);
                 has_value = true;
+                origins.push(logical.span(at, at + 1));
                 at += 1;
             }
         }
         if has_value {
-            tokens.push(token(value, logical.span(token_start, at)));
+            tokens.push(token(value, origins, logical.span(token_start, at)));
         }
     }
     (tokens, None)
 }
 
-fn token(value: Vec<u8>, range: Span) -> Token {
+fn token(value: Vec<u8>, origins: Vec<Span>, range: Span) -> Token {
     Token {
         text: String::from_utf8(value).expect("removing ASCII syntax preserves UTF-8"),
         range,
+        origins,
     }
 }
 
@@ -643,19 +681,39 @@ mod tests {
         assert_eq!(parsed.lines[0].statement, None);
         assert!(config_declaration(&parsed.lines[0]).is_none());
 
-        let parsed = parse("common:present --define=x=1\n");
-        let (_, command, name) = config_declaration(&parsed.lines[0]).unwrap();
-        assert_eq!((command, name), ("common", "present"));
+        let text = "common:present --define=x=1\n";
+        let parsed = parse(text);
+        let declaration = config_declaration(&parsed.lines[0]).unwrap();
+        assert_eq!(
+            (declaration.command, declaration.name),
+            ("common", "present")
+        );
+        assert_eq!(
+            &text[declaration.range.start..declaration.range.end],
+            "present"
+        );
+    }
+
+    #[test]
+    fn config_names_map_decoded_bytes_to_exact_physical_spans() {
+        let text = "'build:de\\v' --config=\"ch\\ild\"\n";
+        let parsed = parse(text);
+        let declaration = config_declaration(&parsed.lines[0]).unwrap();
+        assert_eq!(declaration.name, "dev");
+        assert_eq!(
+            &text[declaration.range.start..declaration.range.end],
+            "de\\v"
+        );
+        let reference = &config_references(&parsed.lines[0])[0];
+        assert_eq!(reference.name, "child");
+        assert_eq!(&text[reference.range.start..reference.range.end], "ch\\ild");
     }
 
     #[test]
     fn split_config_references_are_only_top_level() {
         let parsed = parse("build --config dev\nbuild:outer --config inner\n");
-        assert_eq!(
-            config_references(&parsed.lines[0], "build --config dev\n")[0].name,
-            "dev"
-        );
-        assert!(config_references(&parsed.lines[1], "build:outer --config inner\n").is_empty());
+        assert_eq!(config_references(&parsed.lines[0])[0].name, "dev");
+        assert!(config_references(&parsed.lines[1]).is_empty());
     }
 
     #[test]

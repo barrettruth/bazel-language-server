@@ -4,10 +4,10 @@ use std::path::Path;
 
 use lsp_types::{DocumentLink, LocationLink, Position, Range};
 
-use super::ConfigurationSnapshot;
 use super::commands;
 use super::index::resolve_import;
-use super::syntax::{Directive, Span, Statement, Token, config_declaration, config_references};
+use super::syntax::{Directive, Span, Statement, Token, config_references};
+use super::{ConfigurationSnapshot, ConfigurationView};
 use crate::document::{Document, Documents};
 use crate::line_index::LineIndex;
 use crate::uri::file_uri;
@@ -62,26 +62,26 @@ pub fn definitions(
         return Vec::new();
     };
     let origin = range(document, origin);
-    let mut links = open_declarations(documents, &command, &name, origin);
-    for site in configuration
-        .declarations(&name)
-        .filter(|site| commands::applies(&command, &site.command))
-        .filter(|site| {
-            documents
-                .iter()
-                .all(|(_, open)| open.path() != site.file.as_ref())
-        })
-    {
-        let Some(file) = configuration.files.get(site.file.as_ref()) else {
-            continue;
-        };
+    let view = ConfigurationView::new(documents, configuration);
+    let mut links = Vec::new();
+    for site in view.applicable_declarations(&command, &name) {
         let Some(uri) = file_uri(&site.file) else {
             continue;
         };
-        let line_index = LineIndex::new(&file.text);
-        let target = Range {
-            start: line_index.position(&file.text, site.range.start),
-            end: line_index.position(&file.text, site.range.end),
+        let target = if let Some((_, open)) = documents
+            .iter()
+            .find(|(_, open)| open.path() == site.file.as_ref())
+        {
+            range(open, site.range)
+        } else {
+            let Some(file) = configuration.files.get(site.file.as_ref()) else {
+                continue;
+            };
+            let line_index = LineIndex::new(&file.text);
+            Range {
+                start: line_index.position(&file.text, site.range.start),
+                end: line_index.position(&file.text, site.range.end),
+            }
         };
         links.push(LocationLink {
             origin_selection_range: Some(origin),
@@ -113,42 +113,6 @@ pub fn definitions(
     links
 }
 
-fn open_declarations(
-    documents: &Documents,
-    command: &str,
-    name: &str,
-    origin: Range,
-) -> Vec<LocationLink> {
-    let mut links = Vec::new();
-    for (uri, document) in documents
-        .iter()
-        .filter(|(_, document)| document.is_bazelrc())
-    {
-        let Some(parsed) = document.bazelrc() else {
-            continue;
-        };
-        for line in &parsed.lines {
-            let Some((key, defined_command, defined_name)) = config_declaration(line) else {
-                continue;
-            };
-            if !commands::accepts_config(defined_command)
-                || defined_name != name
-                || !commands::applies(command, defined_command)
-            {
-                continue;
-            }
-            let target = range(document, key.range);
-            links.push(LocationLink {
-                origin_selection_range: Some(origin),
-                target_uri: uri.clone(),
-                target_range: target,
-                target_selection_range: target,
-            });
-        }
-    }
-    links
-}
-
 fn config_reference_at(document: &Document, offset: usize) -> Option<(String, String, Span)> {
     let parsed = document.bazelrc()?;
     for line in &parsed.lines {
@@ -162,7 +126,7 @@ fn config_reference_at(document: &Document, offset: usize) -> Option<(String, St
         if !commands::accepts_config(command) {
             continue;
         }
-        for reference in config_references(line, document.text()) {
+        for reference in config_references(line) {
             if contains(reference.range, offset) {
                 return Some((command.to_owned(), reference.name, reference.range));
             }

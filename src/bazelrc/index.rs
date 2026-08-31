@@ -33,6 +33,8 @@ pub struct ConfigSite {
     pub command: Box<str>,
     pub file: Arc<Path>,
     pub range: Span,
+    pub line: Span,
+    pub owner: Option<Box<str>>,
 }
 
 /// One import after workspace-relative resolution.
@@ -234,14 +236,16 @@ impl Builder<'_> {
     fn entry(&mut self, file: Arc<ConfigurationFile>, line_number: usize) {
         let line = &file.parsed.lines[line_number];
         let key = &line.tokens[0];
-        if let Some((key, command, name)) = config_declaration(line)
-            && commands::accepts_config(command)
-        {
+        let declaration = config_declaration(line)
+            .filter(|declaration| commands::accepts_config(declaration.command));
+        if let Some(declaration) = declaration {
             self.snapshot.declarations.push(ConfigSite {
-                name: name.into(),
-                command: command.into(),
+                name: declaration.name.into(),
+                command: declaration.command.into(),
                 file: Arc::clone(&file.path),
-                range: key.range,
+                range: declaration.range,
+                line: line.range,
+                owner: None,
             });
         }
 
@@ -250,12 +254,14 @@ impl Builder<'_> {
             .split_once(':')
             .map_or(key.text.as_str(), |(base, _)| base);
         if commands::accepts_config(command) {
-            for reference in config_references(line, &file.text) {
+            for reference in config_references(line) {
                 self.snapshot.references.push(ConfigSite {
                     name: reference.name.into(),
                     command: command.into(),
                     file: Arc::clone(&file.path),
                     range: reference.range,
+                    line: line.range,
+                    owner: declaration.map(|declaration| declaration.name.into()),
                 });
             }
         }

@@ -6,8 +6,8 @@ use lsp_types::{CompletionItem, CompletionItemKind, CompletionResponse, Position
 
 use super::commands;
 use super::native_options;
-use super::syntax::{Statement, config_declaration, config_references};
-use super::{ConfigurationSnapshot, Flag, FlagCatalog};
+use super::syntax::{Statement, config_references};
+use super::{ConfigurationSnapshot, ConfigurationView, Flag, FlagCatalog};
 use crate::document::{Document, Documents};
 
 const DIRECTIVES: &[(&str, &str)] = &[
@@ -62,13 +62,13 @@ pub fn completions(
     if key.text.contains(':') && trailing_config.is_some_and(|option| offset > option.range.end) {
         return Vec::new().into();
     }
-    let completing_config = config_references(line, document.text())
+    let completing_config = config_references(line)
         .iter()
         .any(|reference| reference.range.start <= offset && offset <= reference.range.end)
         || (!key.text.contains(':') && trailing_config.is_some());
     if completing_config {
         if commands::accepts_config(command) {
-            config_items(documents, configuration, command).into()
+            config_items(&ConfigurationView::new(documents, configuration), command).into()
         } else {
             Vec::new().into()
         }
@@ -204,47 +204,16 @@ fn command_items() -> Vec<CompletionItem> {
     items
 }
 
-fn config_items(
-    documents: &Documents,
-    configuration: &ConfigurationSnapshot,
-    command: &str,
-) -> Vec<CompletionItem> {
+fn config_items(configuration: &ConfigurationView, command: &str) -> Vec<CompletionItem> {
     let mut found: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for site in configuration
-        .declarations
-        .iter()
+        .declarations()
         .filter(|site| commands::applies(command, &site.command))
-        .filter(|site| {
-            documents
-                .iter()
-                .all(|(_, open)| open.path() != site.file.as_ref())
-        })
     {
         found
             .entry(site.name.to_string())
             .or_default()
             .insert(site.command.to_string());
-    }
-    for (_, document) in documents
-        .iter()
-        .filter(|(_, document)| document.is_bazelrc())
-    {
-        let Some(parsed) = document.bazelrc() else {
-            continue;
-        };
-        for line in &parsed.lines {
-            let Some((_, defined_command, name)) = config_declaration(line) else {
-                continue;
-            };
-            if commands::accepts_config(defined_command)
-                && commands::applies(command, defined_command)
-            {
-                found
-                    .entry(name.to_owned())
-                    .or_default()
-                    .insert(defined_command.to_owned());
-            }
-        }
     }
     found
         .into_iter()

@@ -3,10 +3,10 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 
 use super::catalog::is_build_setting;
-use super::syntax::{Line, Span, Statement, config_declaration, config_references};
+use super::syntax::{Line, Span, Statement, config_references};
 use super::{
-    ConfigurationSnapshot, Flag, FlagCatalog, FlagSpelling, ProblemSeverity, commands,
-    native_options,
+    ConfigurationSnapshot, ConfigurationView, Flag, FlagCatalog, FlagSpelling, ProblemSeverity,
+    commands, native_options,
 };
 use crate::document::{Document, Documents};
 
@@ -58,28 +58,21 @@ pub fn diagnostics(
                 }),
         );
     }
+    let configuration = ConfigurationView::new(documents, configuration);
 
     for line in parsed
         .lines
         .iter()
         .filter(|line| matches!(line.statement, Some(Statement::Entry)))
     {
-        diagnose_entry(
-            document,
-            documents,
-            configuration,
-            catalog,
-            line,
-            &mut found,
-        );
+        diagnose_entry(document, &configuration, catalog, line, &mut found);
     }
     found
 }
 
 fn diagnose_entry(
     document: &Document,
-    documents: &Documents,
-    configuration: &ConfigurationSnapshot,
+    configuration: &ConfigurationView,
     catalog: Option<&FlagCatalog>,
     line: &Line,
     found: &mut Vec<Diagnostic>,
@@ -99,7 +92,7 @@ fn diagnose_entry(
         return;
     }
 
-    diagnose_config_references(document, documents, configuration, line, command, found);
+    diagnose_config_references(document, configuration, line, command, found);
     if key.text.contains(':') {
         for option in line
             .options()
@@ -180,17 +173,20 @@ fn diagnose_entry(
 
 fn diagnose_config_references(
     document: &Document,
-    documents: &Documents,
-    configuration: &ConfigurationSnapshot,
+    configuration: &ConfigurationView,
     line: &Line,
     command: &str,
     found: &mut Vec<Diagnostic>,
 ) {
-    if configuration.root.is_none() || !commands::accepts_config(command) {
+    if !configuration.ready() || !commands::accepts_config(command) {
         return;
     }
-    for reference in config_references(line, document.text()) {
-        if !declared(documents, configuration, command, &reference.name) {
+    for reference in config_references(line) {
+        if configuration
+            .applicable_declarations(command, &reference.name)
+            .next()
+            .is_none()
+        {
             found.push(finding(
                 document,
                 reference.range,
@@ -202,33 +198,6 @@ fn diagnose_config_references(
             ));
         }
     }
-}
-
-fn declared(
-    documents: &Documents,
-    configuration: &ConfigurationSnapshot,
-    command: &str,
-    name: &str,
-) -> bool {
-    configuration.declarations(name).any(|site| {
-        commands::applies(command, &site.command)
-            && documents
-                .iter()
-                .all(|(_, open)| open.path() != site.file.as_ref())
-    }) || documents
-        .iter()
-        .filter(|(_, document)| document.is_bazelrc())
-        .any(|(_, document)| {
-            document.bazelrc().is_some_and(|parsed| {
-                parsed.lines.iter().any(|line| {
-                    config_declaration(line).is_some_and(|(_, defined_command, defined_name)| {
-                        commands::accepts_config(defined_command)
-                            && defined_name == name
-                            && commands::applies(command, defined_command)
-                    })
-                })
-            })
-        })
 }
 
 fn diagnose_catalog_metadata(
