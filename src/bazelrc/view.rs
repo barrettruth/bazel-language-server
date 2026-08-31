@@ -233,6 +233,13 @@ impl<'a> Collector<'a> {
                                 .then_some(site.loaded.as_deref())
                                 .flatten()
                         })
+                        .or_else(|| {
+                            self.snapshot.imports.iter().find_map(|site| {
+                                (site.active && site.target == target)
+                                    .then_some(site.loaded.as_deref())
+                                    .flatten()
+                            })
+                        })
                         .map(Path::to_path_buf);
                     if let Some(loaded) = loaded {
                         if !self.visit(&loaded, None) {
@@ -527,5 +534,26 @@ mod tests {
         assert!(!view.ready());
         assert_eq!(view.declarations().count(), 0);
         assert_eq!(view.references().count(), 0);
+    }
+
+    #[test]
+    fn unsaved_imports_can_reuse_a_loaded_graph_target() {
+        let workspace = Workspace::new();
+        workspace.write(".bazelrc", "import a\n");
+        workspace.write("a", "import b\n");
+        workspace.write("b", "build:inside --jobs=1\n");
+        let snapshot = ConfigurationSnapshot::build(&workspace.0);
+        let mut documents = Documents::new(Some(workspace.0.clone()), IndexHandle::new());
+        let root_uri: Uri = "file:///tmp/root.bazelrc".parse().unwrap();
+        documents.set_classified(
+            root_uri,
+            workspace.0.join(".bazelrc"),
+            2,
+            "import b\n".to_owned(),
+            true,
+        );
+
+        let view = ConfigurationView::new(&documents, &snapshot);
+        assert_eq!(view.declarations_named("inside").count(), 1);
     }
 }
