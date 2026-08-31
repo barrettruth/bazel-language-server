@@ -755,7 +755,10 @@ fn respond(
     } else if method == InlayHintRequest::METHOD {
         Response::new_ok(id, inlay_hints(request, docs, index, root)?)
     } else if method == WorkspaceSymbolRequest::METHOD {
-        Response::new_ok(id, workspace_symbols(request, index)?)
+        Response::new_ok(
+            id,
+            workspace_symbols(request, docs, index, context.configuration)?,
+        )
     } else if method == CompletionRequest::METHOD {
         Response::new_ok(id, Vec::<lsp_types::CompletionItem>::new())
     } else {
@@ -895,10 +898,29 @@ fn references(
 /// Every target in the workspace matching a query.
 fn workspace_symbols(
     request: &lsp_server::Request,
+    docs: &Documents,
     index: &Index,
+    configuration: &bazelrc::ConfigurationSnapshot,
 ) -> Result<Vec<lsp_types::WorkspaceSymbol>> {
     let params: lsp_types::WorkspaceSymbolParams = serde_json::from_value(request.params.clone())?;
-    let symbols = handlers::workspace_symbols(index, &params.query);
+    let mut symbols = handlers::workspace_symbols(index, &params.query);
+    symbols.extend(bazelrc::workspace_symbols(
+        docs,
+        configuration,
+        &params.query,
+    ));
+    symbols.sort_unstable_by(|left, right| {
+        left.base_symbol_information
+            .name
+            .cmp(&right.base_symbol_information.name)
+            .then_with(|| {
+                left.base_symbol_information
+                    .container_name
+                    .cmp(&right.base_symbol_information.container_name)
+            })
+    });
+    symbols.dedup();
+    symbols.truncate(512);
     tracing::debug!(
         query = params.query,
         count = symbols.len(),

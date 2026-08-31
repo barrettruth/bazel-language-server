@@ -111,13 +111,16 @@ fn symbol_kind(rule: &str) -> SymbolKind {
     }
 }
 
-/// Matching targets from the current snapshot, capped for picker usability.
+/// Matching targets from the current snapshot in deterministic order.
 #[must_use]
 pub fn workspace_symbols(index: &crate::index::Index, query: &str) -> Vec<WorkspaceSymbol> {
-    index
+    let mut targets: Vec<_> = index
         .targets()
         .filter(|(label, _)| contains_case_insensitive(label, query))
-        .take(512)
+        .collect();
+    targets.sort_unstable_by_key(|(label, _)| *label);
+    targets
+        .into_iter()
         .filter_map(|(label, target)| {
             let uri = file_uri(&target.file)?;
             let at = Position {

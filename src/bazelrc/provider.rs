@@ -5,13 +5,16 @@ use std::path::Path;
 use anyhow::Result;
 use lsp_server::{Request, Response};
 use lsp_types::{
-    CompletionParams, CompletionRequest, DefinitionParams, DefinitionRequest, DocumentLinkParams,
-    DocumentLinkRequest, FoldingRangeParams, FoldingRangeRequest, HoverParams, HoverRequest,
-    LspRequestMethod, Request as _, SelectionRangeParams, SelectionRangeRequest,
-    SemanticTokensParams, SemanticTokensRequest, Uri,
+    CompletionParams, CompletionRequest, DefinitionParams, DefinitionRequest,
+    DocumentHighlightParams, DocumentHighlightRequest, DocumentLinkParams, DocumentLinkRequest,
+    DocumentSymbolParams, DocumentSymbolRequest, FoldingRangeParams, FoldingRangeRequest,
+    HoverParams, HoverRequest, LspRequestMethod, ReferenceParams, ReferencesRequest, Request as _,
+    SelectionRangeParams, SelectionRangeRequest, SemanticTokensParams, SemanticTokensRequest, Uri,
 };
 
-use super::{ConfigurationSnapshot, FlagCatalog, completion, hover, navigation, structural};
+use super::{
+    ConfigurationSnapshot, FlagCatalog, completion, hover, navigation, occurrences, structural,
+};
 use crate::document::{Document, Documents};
 
 /// Route a text-document request here when its buffer is Bazelrc.
@@ -87,6 +90,33 @@ fn answer(
         });
         return Ok(serde_json::to_value(value)?);
     }
+    if method == ReferencesRequest::METHOD {
+        let params: ReferenceParams = serde_json::from_value(request.params.clone())?;
+        return Ok(serde_json::to_value(occurrences::references(
+            document,
+            docs,
+            configuration,
+            params.text_document_position_params.position,
+            params.context.include_declaration,
+        ))?);
+    }
+    if method == DocumentHighlightRequest::METHOD {
+        let params: DocumentHighlightParams = serde_json::from_value(request.params.clone())?;
+        return Ok(serde_json::to_value(occurrences::highlights(
+            document,
+            docs,
+            configuration,
+            params.text_document_position_params.position,
+        ))?);
+    }
+    if method == DocumentSymbolRequest::METHOD {
+        let _: DocumentSymbolParams = serde_json::from_value(request.params.clone())?;
+        return Ok(serde_json::to_value(occurrences::document_symbols(
+            document,
+            docs,
+            configuration,
+        ))?);
+    }
     if method == FoldingRangeRequest::METHOD {
         let _: FoldingRangeParams = serde_json::from_value(request.params.clone())?;
         return Ok(serde_json::to_value(structural::folding_ranges(document))?);
@@ -112,10 +142,7 @@ fn answer(
     }
 
     Ok(match method {
-        LspRequestMethod::TextDocumentDocumentSymbol
-        | LspRequestMethod::TextDocumentReferences
-        | LspRequestMethod::TextDocumentDocumentHighlight
-        | LspRequestMethod::TextDocumentFormatting
+        LspRequestMethod::TextDocumentFormatting
         | LspRequestMethod::TextDocumentImplementation
         | LspRequestMethod::TextDocumentCodeLens
         | LspRequestMethod::TextDocumentInlayHint => serde_json::json!([]),

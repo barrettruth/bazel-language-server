@@ -3,20 +3,26 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use lsp_types::{Location, Range};
+
 use super::commands;
 use super::index::{ConfigSite, ConfigurationSnapshot};
 use super::syntax::{Statement, config_declaration, config_references};
-use crate::document::{Document, Documents};
+use crate::document::{Buffers, Document, Documents};
+use crate::line_index::LineIndex;
+use crate::uri::file_uri;
 
-pub struct ConfigurationView {
+pub struct ConfigurationView<'a> {
+    documents: &'a Documents,
+    snapshot: &'a ConfigurationSnapshot,
     ready: bool,
     declarations: Vec<ConfigSite>,
     references: Vec<ConfigSite>,
 }
 
-impl ConfigurationView {
+impl<'a> ConfigurationView<'a> {
     #[must_use]
-    pub fn new(documents: &Documents, snapshot: &ConfigurationSnapshot) -> Self {
+    pub fn new(documents: &'a Documents, snapshot: &'a ConfigurationSnapshot) -> Self {
         let is_open = |path: &Path| {
             documents
                 .iter()
@@ -43,6 +49,8 @@ impl ConfigurationView {
         }
 
         Self {
+            documents,
+            snapshot,
             ready: snapshot.root.is_some(),
             declarations,
             references,
@@ -58,17 +66,20 @@ impl ConfigurationView {
         self.declarations.iter()
     }
 
-    pub fn declarations_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a ConfigSite> {
+    pub fn declarations_named<'view>(
+        &'view self,
+        name: &'view str,
+    ) -> impl Iterator<Item = &'view ConfigSite> {
         self.declarations
             .iter()
             .filter(move |site| site.name.as_ref() == name)
     }
 
-    pub fn applicable_declarations<'a>(
-        &'a self,
-        command: &'a str,
-        name: &'a str,
-    ) -> impl Iterator<Item = &'a ConfigSite> {
+    pub fn applicable_declarations<'view>(
+        &'view self,
+        command: &'view str,
+        name: &'view str,
+    ) -> impl Iterator<Item = &'view ConfigSite> {
         self.declarations_named(name)
             .filter(move |site| commands::applies(command, &site.command))
     }
@@ -76,6 +87,53 @@ impl ConfigurationView {
     pub fn references(&self) -> impl Iterator<Item = &ConfigSite> {
         self.references.iter()
     }
+
+    pub fn occurrence_at(&self, path: &Path, offset: usize) -> Option<(bool, &ConfigSite)> {
+        self.declarations
+            .iter()
+            .find(|site| site.file.as_ref() == path && contains(site.range, offset))
+            .map(|site| (true, site))
+            .or_else(|| {
+                self.references
+                    .iter()
+                    .find(|site| site.file.as_ref() == path && contains(site.range, offset))
+                    .map(|site| (false, site))
+            })
+    }
+
+    pub fn range(&self, site: &ConfigSite) -> Option<Range> {
+        self.span_range(&site.file, site.range)
+    }
+
+    pub fn line_range(&self, site: &ConfigSite) -> Option<Range> {
+        self.span_range(&site.file, site.line)
+    }
+
+    pub fn location(&self, site: &ConfigSite) -> Option<Location> {
+        Some(Location {
+            uri: file_uri(&site.file)?,
+            range: self.range(site)?,
+        })
+    }
+
+    fn span_range(&self, path: &Path, span: super::syntax::Span) -> Option<Range> {
+        if let Some(document) = self.documents.at(path) {
+            return Some(Range {
+                start: document.line_index().position(document.text(), span.start),
+                end: document.line_index().position(document.text(), span.end),
+            });
+        }
+        let file = self.snapshot.files.get(path)?;
+        let lines = LineIndex::new(&file.text);
+        Some(Range {
+            start: lines.position(&file.text, span.start),
+            end: lines.position(&file.text, span.end),
+        })
+    }
+}
+
+const fn contains(span: super::syntax::Span, offset: usize) -> bool {
+    span.start <= offset && offset <= span.end
 }
 
 fn collect(
