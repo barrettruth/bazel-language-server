@@ -167,15 +167,18 @@ fn imported<'a>(
         return None;
     }
     let target = resolve_import(root, &token.text);
+    let identity = configuration
+        .identity(document.path())
+        .unwrap_or_else(|| document.path());
     if let Some(site) = configuration.imports.iter().find(|site| {
-        site.file.as_ref() == document.path() && site.range == token.range && site.target == target
+        site.file.as_ref() == identity && site.range == token.range && site.target == target
     }) {
         return site.active.then_some(site.loaded.as_deref()).flatten();
     }
     configuration
         .imports
         .iter()
-        .find(|site| site.active && site.target == target)?
+        .find(|site| site.file.as_ref() == identity && site.active && site.target == target)?
         .loaded
         .as_deref()
 }

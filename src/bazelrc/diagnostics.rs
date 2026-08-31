@@ -14,6 +14,24 @@ const SOURCE: &str = "bazel-language-server";
 
 /// Findings in one current Bazelrc buffer.
 #[must_use]
+pub fn syntax_diagnostics(document: &Document) -> Vec<Diagnostic> {
+    document
+        .bazelrc()
+        .into_iter()
+        .flat_map(|parsed| &parsed.errors)
+        .map(|error| {
+            finding(
+                document,
+                error.range,
+                DiagnosticSeverity::Error,
+                &error.message,
+            )
+        })
+        .collect()
+}
+
+/// Findings in one current Bazelrc buffer and its captured configuration graph.
+#[must_use]
 pub fn diagnostics(
     document: &Document,
     documents: &Documents,
@@ -23,28 +41,17 @@ pub fn diagnostics(
     let Some(parsed) = document.bazelrc() else {
         return Vec::new();
     };
-    let mut found: Vec<_> = parsed
-        .errors
-        .iter()
-        .map(|error| {
-            finding(
-                document,
-                error.range,
-                DiagnosticSeverity::Error,
-                &error.message,
-            )
-        })
-        .collect();
-    let saved_is_current = configuration
-        .files
-        .get(document.path())
+    let mut found = syntax_diagnostics(document);
+    let identity = configuration.identity(document.path());
+    let saved_is_current = identity
+        .and_then(|path| configuration.files.get(path))
         .is_some_and(|file| file.text.as_ref() == document.text());
     if saved_is_current {
         found.extend(
             configuration
                 .problems
                 .iter()
-                .filter(|problem| problem.file.as_ref() == document.path())
+                .filter(|problem| identity.is_some_and(|path| problem.file.as_ref() == path))
                 .map(|problem| {
                     finding(
                         document,
@@ -107,13 +114,25 @@ fn diagnose_entry(
         ));
         return;
     }
+    if key.text.contains(':') && !commands::accepts_config(command) {
+        found.push(finding(
+            document,
+            key.range,
+            DiagnosticSeverity::Warning,
+            &format!(
+                "`{}` is not a valid Bazel 8.7 configuration section",
+                key.text
+            ),
+        ));
+        return;
+    }
 
     diagnose_config_references(document, configuration, line, command, found);
     if key.text.contains(':') {
         for option in line
             .options()
             .iter()
-            .filter(|option| option.text == "--config")
+            .filter(|option| option.text.starts_with("--config") && !option.text.contains('='))
         {
             found.push(finding(
                 document,
@@ -486,5 +505,19 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn startup_named_sections_are_not_startup_option_sections() {
+        let (documents, uri) = documents("startup:named --jobs\n");
+        let found = diagnostics(
+            documents.get(&uri).unwrap(),
+            &documents,
+            &ConfigurationSnapshot::default(),
+            Some(&catalog()),
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].severity, Some(DiagnosticSeverity::Warning));
+        assert!(message_contains(&found[0], "configuration section"));
     }
 }

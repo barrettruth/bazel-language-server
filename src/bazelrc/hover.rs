@@ -44,6 +44,9 @@ pub fn hover(
         {
             return Some(command_hover(document, command, command_range));
         }
+        if key.text.contains(':') && !commands::accepts_config(command) {
+            continue;
+        }
         let Some(catalog) = catalog else { continue };
         for option in native_options::uses(line, catalog) {
             let token = if contains(option.option.range, offset) {
@@ -177,11 +180,20 @@ fn import_hover(
     if let Some(root) = root {
         let target = super::index::resolve_import(root, &path.text);
         field(&mut text, "Resolved path", target.to_str());
-        let published = configuration.imports.iter().find(|site| {
-            site.file.as_ref() == document.path()
-                && site.range == path.range
-                && site.target == target
-        });
+        let identity = configuration
+            .identity(document.path())
+            .unwrap_or_else(|| document.path());
+        let published = configuration
+            .imports
+            .iter()
+            .filter(|site| site.file.as_ref() == identity && site.target == target)
+            .find(|site| site.range == path.range)
+            .or_else(|| {
+                configuration
+                    .imports
+                    .iter()
+                    .find(|site| site.file.as_ref() == identity && site.target == target)
+            });
         field(
             &mut text,
             "Published state",
