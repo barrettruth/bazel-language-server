@@ -321,8 +321,16 @@ pub(crate) fn is_ignored(root: &Path, path: &Path, ignored: &[std::path::PathBuf
 #[must_use]
 pub fn build_static(root: &Path) -> Tier {
     let mut index = Tier::default();
-    for path in workspace_files(root) {
-        collect_disk_file(root, &path, &mut index);
+    let ignored = read_bazelignore(root);
+    let walk = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !is_excluded(entry) && !is_ignored(root, entry.path(), &ignored));
+
+    for entry in walk.filter_map(Result::ok) {
+        if entry.file_type().is_file() {
+            collect_disk_file(root, entry.path(), &mut index);
+        }
     }
 
     tracing::info!(
