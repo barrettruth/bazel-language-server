@@ -229,6 +229,42 @@ table {
   font-size: 0.95em;
 }
 
+.support-matrix {
+  width: min(74rem, calc(100vw - 2rem));
+  margin-left: 50%;
+  overflow-x: auto;
+  transform: translateX(-50%);
+}
+
+.support-matrix table {
+  min-width: 58rem;
+}
+
+.support-matrix td:first-child {
+  white-space: nowrap;
+}
+
+.support-mark {
+  text-align: center;
+  color: #9b2c2c;
+  font-family: "Berkeley Mono", monospace;
+  font-weight: 700;
+}
+
+.support-mark.supported {
+  color: #287a45;
+}
+
+@media (prefers-color-scheme: dark) {
+  .support-mark {
+    color: #ef8e8e;
+  }
+
+  .support-mark.supported {
+    color: #7ed79b;
+  }
+}
+
 th,
 td {
   text-align: left;

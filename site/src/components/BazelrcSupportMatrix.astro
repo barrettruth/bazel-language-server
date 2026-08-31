@@ -1,0 +1,50 @@
+---
+import {
+  bazelrcSourceCommit,
+  bazelrcSupport,
+  bazelrcSupportReviewed,
+} from "../data/bazelrc-support";
+
+const sourceUrl = `https://github.com/bazelbuild/bazel/commit/${bazelrcSourceCommit}`;
+---
+
+<p>
+  Reviewed <time datetime={bazelrcSupportReviewed}>{bazelrcSupportReviewed}</time>
+  against upstream Bazel <a href={sourceUrl}><code>8.7.0</code></a>. Each row is
+  binary: a mixed capability is split until the check or cross has one exact
+  meaning.
+</p>
+
+<div class="support-matrix">
+  <table>
+    <thead>
+      <tr>
+        <th>Area</th>
+        <th>Behavior</th>
+        <th>Support</th>
+        <th>Exact boundary</th>
+      </tr>
+    </thead>
+    <tbody>
+      {
+        bazelrcSupport.flatMap((section) =>
+          section.rows.map((row) => (
+            <tr>
+              <td>{section.area}</td>
+              <td>{row.feature}</td>
+              <td class:list={["support-mark", { supported: row.supported }]}>
+                <span
+                  role="img"
+                  aria-label={row.supported ? "Supported" : "Not supported"}
+                >
+                  {row.supported ? "✓" : "✗"}
+                </span>
+              </td>
+              <td>{row.boundary}</td>
+            </tr>
+          )),
+        )
+      }
+    </tbody>
+  </table>
+</div>

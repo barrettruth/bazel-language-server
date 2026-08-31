@@ -73,6 +73,11 @@ Bazelrc formatting, rename, import-path completion, converter-specific value
 validation, configuration-expansion cycle analysis, and reconstruction of
 system, home or explicit rc files are not supported.
 
+The [normative Bazelrc 8.7 specification](docs/bazelrc-8.7.md) records the
+source-backed language contract. The website keeps the corresponding
+[dated support matrix](https://bazel-language-server.com/bazelrc.html#support-matrix)
+as the exhaustive public inventory.
+
 ## Configuration
 
 Everything is optional and the defaults are what most workspaces want. Send it

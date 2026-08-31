@@ -5,11 +5,21 @@ description: Exact Bazel 8.7 configuration support in bazel-language-server
 toc: true
 ---
 
+import BazelrcSupportMatrix from "../components/BazelrcSupportMatrix.astro";
+
 # Bazelrc
 
 The Bazelrc language surface implements upstream Bazel 8.7.0. It is separate
 from Starlark: Bazelrc files are never parsed, formatted or linted by
 `buildifier`.
+
+## Support matrix
+
+<BazelrcSupportMatrix />
+
+The tracked
+[Bazelrc 8.7 specification](https://github.com/barrettruth/bazel-language-server/blob/main/docs/bazelrc-8.7.md)
+defines the implementation contract behind this matrix.
 
 ## Files and imports
 
@@ -63,14 +73,12 @@ native lookup.
 
 ## Structural features
 
-Semantic highlighting distinguishes directives, commands, configurations,
-options, values and comments. Continued lines and comment runs fold, and
-selection ranges expand through tokens and logical lines. These features do not
-require Bazel.
+Semantic highlighting distinguishes directives and command keys, version
+conditions, import paths, option tokens and comments. Continued lines and
+comment runs fold, and selection ranges expand through tokens and logical
+lines. These features do not require Bazel.
 
 ## Boundaries
 
-The server does not provide Bazelrc formatting, rename, references,
-import-path completion, converter-specific value validation, configuration
-expansion-cycle diagnostics, or reconstruction of system, home and explicit rc
-files. It does not infer semantics from a newer, older or bundled flag catalog.
+The matrix above is the exhaustive public inventory as of its review date.
+Roadmap items remain separate from shipped behavior.
