@@ -34,12 +34,12 @@ Configure `bazel-language-server` in your editor of choice, for example with
 vim.lsp.enable('bazel_ls')
 ```
 
-It handles `BUILD`, `BUILD.bazel`, `*.bzl`, `MODULE.bazel`, `WORKSPACE` and
-`*.scl`. Bazel itself is optional: the target index is parsed from BUILD files,
-so the server answers without a Bazel process and without a build. Workspace
-indexing runs after startup; open buffers remain usable while the initial
-snapshot is being built, and later BUILD-file changes replace only that file's
-entries.
+It handles `BUILD`, `BUILD.bazel`, `*.bzl`, `MODULE.bazel`, `WORKSPACE`, `*.scl`
+and `*.bazelrc` (including `.bazelrc`). Bazel itself is optional: the target
+index is parsed from BUILD files, so the server answers without a Bazel process
+and without a build. Workspace indexing runs after startup; open buffers remain
+usable while the initial snapshot is being built, and later BUILD-file changes
+replace only that file's entries.
 
 Where Bazel is present it adds two things a parser cannot reach. Targets a
 legacy macro names at evaluation time become navigable, reported at the macro
@@ -47,6 +47,31 @@ call that produces them, which is the only place in the source they come from.
 And `@repo//…` resolves, through the repository mapping Bazel alone can
 produce — a repository that has not been fetched says so, and says which
 `bazel fetch` brings it down.
+
+### Bazelrc
+
+Bazelrc parsing follows upstream Bazel 8.7.0 and the advertised compatibility
+line is Bazel 8.7. Vendor suffixes on a numeric 8.7 release do not imply vendor
+grammar support. Other Bazel versions still receive structural answers, but
+the server does not select a nearby flag catalog or silently fall back to one.
+
+Without Bazel, Bazelrc files receive command and configuration completion,
+import links, go-to-definition for imports and configurations, semantic tokens,
+folding and selection ranges, and structural/import-graph diagnostics. The
+workspace graph starts at `.bazelrc`, follows imports in Bazel's order, and
+overlays open buffers for configuration navigation.
+
+When the configured binary reports numeric release 8.7, the Bazel actor reads
+its `help flags-as-proto` output with rc files disabled. That exact catalog adds
+command-filtered native flag completion and hover, plus diagnostics for proven
+scope/value contradictions, old names, deprecation and catalog status. A
+native-looking spelling absent from the catalog is reported only as not
+recognized by that catalog: Starlark settings, aliases, internal flags and
+external rc layers prevent a stronger claim.
+
+Bazelrc formatting, rename, import-path completion, converter-specific value
+validation, configuration-expansion cycle analysis, and reconstruction of
+system, home or explicit rc files are not supported.
 
 ## Configuration
 
@@ -141,6 +166,6 @@ Bazel results, and raise `BLS_PROBE_TIMEOUT_SECS` for a cold Bazel server.
 - [x] **Execute command** — run a `bazel` invocation the code lens offers
 - [x] **Incremental sync** — ordered UTF-16 `didChange` ranges and versioned
       diagnostics
-- [ ] **`.bazelrc`** — full LSP semantics, including completion, hover and
-      unknown-flag diagnostics from `bazel help flags-as-proto`, version-exact
-      for the user's own binary
+- [x] **`.bazelrc`** — upstream 8.7 syntax, workspace imports/configurations,
+      structural language features, and exact-8.7 catalog completion, hover and
+      conservative diagnostics
