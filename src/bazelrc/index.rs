@@ -315,7 +315,7 @@ struct Origin {
 
 pub(super) fn resolve_import(root: &Path, raw: &str) -> PathBuf {
     if let Some(relative) = raw.strip_prefix("%workspace%/") {
-        root.join(relative)
+        root.join(relative.trim_start_matches('/'))
     } else {
         let path = Path::new(raw);
         if path.is_absolute() {
@@ -396,6 +396,14 @@ mod tests {
                 .candidates
                 .iter()
                 .all(|path| !path.ends_with("ignored/hidden"))
+        );
+    }
+
+    #[test]
+    fn repeated_slashes_after_workspace_stay_under_the_workspace() {
+        assert_eq!(
+            resolve_import(Path::new("/ws"), "%workspace%//config/child"),
+            Path::new("/ws/config/child")
         );
     }
 
