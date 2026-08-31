@@ -17,7 +17,7 @@ mod proto {
 }
 
 /// One option accepted by the configured Bazel executable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Flag {
     pub name: Box<str>,
     pub has_negative_flag: bool,
@@ -35,6 +35,23 @@ pub struct Flag {
     pub option_expansions: Vec<Box<str>>,
     pub type_converter: Option<Box<str>>,
     pub enum_values: Vec<Box<str>>,
+}
+
+/// How an option token names its canonical flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlagSpelling {
+    Canonical,
+    Negative,
+    Abbreviation,
+    NegativeAbbreviation,
+    OldName,
+    NegativeOldName,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedFlag<'a> {
+    pub flag: &'a Flag,
+    pub spelling: FlagSpelling,
 }
 
 impl Flag {
@@ -110,19 +127,112 @@ impl FlagCatalog {
         self.flags.get(name)
     }
 
-    /// Find a flag by its canonical, abbreviated, or deprecated name.
+    /// Resolve one complete native option spelling, excluding its value.
     #[must_use]
-    pub fn resolve(&self, name: &str) -> Option<&Flag> {
-        self.get(name).or_else(|| {
-            self.flags.values().find(|flag| {
-                flag.abbreviation.as_deref() == Some(name) || flag.old_name.as_deref() == Some(name)
-            })
+    pub fn resolve_option(&self, option: &str) -> Option<ResolvedFlag<'_>> {
+        if is_build_setting(option) {
+            return None;
+        }
+        if let Some(long) = option.strip_prefix("--") {
+            let name = long.split_once('=').map_or(long, |(name, _)| name);
+            if let Some(flag) = self.get(name) {
+                return Some(ResolvedFlag {
+                    flag,
+                    spelling: FlagSpelling::Canonical,
+                });
+            }
+            if let Some(flag) = self
+                .flags
+                .values()
+                .find(|flag| flag.old_name.as_deref() == Some(name))
+            {
+                return Some(ResolvedFlag {
+                    flag,
+                    spelling: FlagSpelling::OldName,
+                });
+            }
+            if let Some(name) = name.strip_prefix("no") {
+                if let Some(flag) = self.get(name).filter(|flag| flag.has_negative_flag) {
+                    return Some(ResolvedFlag {
+                        flag,
+                        spelling: FlagSpelling::Negative,
+                    });
+                }
+                if let Some(flag) = self
+                    .flags
+                    .values()
+                    .find(|flag| flag.has_negative_flag && flag.old_name.as_deref() == Some(name))
+                {
+                    return Some(ResolvedFlag {
+                        flag,
+                        spelling: FlagSpelling::NegativeOldName,
+                    });
+                }
+            }
+            return None;
+        }
+        let short = option.strip_prefix('-')?;
+        let (abbreviation, negative) = short
+            .strip_suffix('-')
+            .map_or((short, false), |abbreviation| (abbreviation, true));
+        if abbreviation.len() != 1 {
+            return None;
+        }
+        let flag = self.flags.values().find(|flag| {
+            flag.abbreviation.as_deref() == Some(abbreviation)
+                && (!negative || flag.has_negative_flag)
+        })?;
+        Some(ResolvedFlag {
+            flag,
+            spelling: if negative {
+                FlagSpelling::NegativeAbbreviation
+            } else {
+                FlagSpelling::Abbreviation
+            },
         })
+    }
+
+    /// Whether `flag` is safe in this exact rc scope.
+    #[must_use]
+    pub fn supports_scope(&self, flag: &Flag, command: &str) -> bool {
+        match command {
+            "common" => flag
+                .commands
+                .iter()
+                .any(|command| command.as_ref() != "startup"),
+            "always" => self
+                .flags()
+                .flat_map(|candidate| &candidate.commands)
+                .filter(|command| command.as_ref() != "startup")
+                .all(|command| flag.supports(command)),
+            _ => flag.supports(command),
+        }
     }
 
     pub fn flags(&self) -> impl Iterator<Item = &Flag> {
         self.flags.values()
     }
+
+    #[cfg(test)]
+    pub(super) fn from_flags(reported: &str, flags: Vec<Flag>) -> Self {
+        Self {
+            reported: reported.into(),
+            flags: flags
+                .into_iter()
+                .map(|flag| (flag.name.clone(), flag))
+                .collect(),
+        }
+    }
+}
+
+fn is_build_setting(option: &str) -> bool {
+    matches!(
+        option,
+        value if value.starts_with("--//")
+            || value.starts_with("--@")
+            || value.starts_with("--no//")
+            || value.starts_with("--no@")
+    )
 }
 
 impl From<proto::FlagInfo> for Flag {
@@ -214,5 +324,26 @@ mod tests {
         assert!(handle.load().is_some());
         handle.clear();
         assert!(handle.load().is_none());
+    }
+
+    #[test]
+    fn option_spellings_resolve_without_claiming_build_settings() {
+        let catalog = FlagCatalog::from_flags(
+            "bazel 8.7.0",
+            vec![Flag {
+                name: "keep_going".into(),
+                has_negative_flag: true,
+                abbreviation: Some("k".into()),
+                old_name: Some("keepgoing".into()),
+                ..Default::default()
+            }],
+        );
+        let spelling = |option| catalog.resolve_option(option).map(|found| found.spelling);
+        assert_eq!(spelling("--keep_going"), Some(FlagSpelling::Canonical));
+        assert_eq!(spelling("--nokeep_going"), Some(FlagSpelling::Negative));
+        assert_eq!(spelling("-k-"), Some(FlagSpelling::NegativeAbbreviation));
+        assert_eq!(spelling("--keepgoing"), Some(FlagSpelling::OldName));
+        assert_eq!(spelling("--//settings:mode=value"), None);
+        assert_eq!(spelling("--@repo//settings:mode=value"), None);
     }
 }

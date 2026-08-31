@@ -3,12 +3,14 @@
 mod catalog;
 mod commands;
 mod completion;
+mod hover;
 mod index;
+mod native_options;
 mod navigation;
 mod provider;
 mod structural;
 pub mod syntax;
 
-pub use catalog::{CatalogHandle, Flag, FlagCatalog};
+pub use catalog::{CatalogHandle, Flag, FlagCatalog, FlagSpelling, ResolvedFlag};
 pub use index::{ConfigurationHandle, ConfigurationSnapshot, ImportSite, ProblemSeverity};
 pub use provider::{diagnostics, respond};

@@ -7,12 +7,12 @@ use lsp_server::{Request, Response};
 use lsp_types::{
     CompletionParams, CompletionRequest, DefinitionParams, DefinitionRequest, Diagnostic,
     DiagnosticSeverity, DocumentLinkParams, DocumentLinkRequest, FoldingRangeParams,
-    FoldingRangeRequest, LspRequestMethod, Range, Request as _, SelectionRangeParams,
-    SelectionRangeRequest, SemanticTokensParams, SemanticTokensRequest, Uri,
+    FoldingRangeRequest, HoverParams, HoverRequest, LspRequestMethod, Range, Request as _,
+    SelectionRangeParams, SelectionRangeRequest, SemanticTokensParams, SemanticTokensRequest, Uri,
 };
 
 use super::{
-    ConfigurationSnapshot, FlagCatalog, ProblemSeverity, completion, navigation, structural,
+    ConfigurationSnapshot, FlagCatalog, ProblemSeverity, completion, hover, navigation, structural,
 };
 use crate::document::{Document, Documents};
 
@@ -22,7 +22,7 @@ pub fn respond(
     request: &Request,
     docs: &Documents,
     configuration: &ConfigurationSnapshot,
-    _catalog: Option<&FlagCatalog>,
+    catalog: Option<&FlagCatalog>,
     root: Option<&Path>,
     link_support: bool,
 ) -> Option<Result<Response>> {
@@ -31,8 +31,16 @@ pub fn respond(
         return None;
     }
     Some(
-        answer(request, document, docs, configuration, root, link_support)
-            .map(|value| Response::new_ok(request.id.clone(), value)),
+        answer(
+            request,
+            document,
+            docs,
+            configuration,
+            catalog,
+            root,
+            link_support,
+        )
+        .map(|value| Response::new_ok(request.id.clone(), value)),
     )
 }
 
@@ -41,6 +49,7 @@ fn answer(
     document: &Document,
     docs: &Documents,
     configuration: &ConfigurationSnapshot,
+    catalog: Option<&FlagCatalog>,
     root: Option<&Path>,
     link_support: bool,
 ) -> Result<serde_json::Value> {
@@ -51,6 +60,7 @@ fn answer(
             document,
             docs,
             configuration,
+            catalog,
             params.text_document_position_params.position,
         ))?);
     }
@@ -67,6 +77,17 @@ fn answer(
             links,
             link_support,
         ))?);
+    }
+    if method == HoverRequest::METHOD {
+        let params: HoverParams = serde_json::from_value(request.params.clone())?;
+        let value = catalog.and_then(|catalog| {
+            hover::hover(
+                document,
+                catalog,
+                params.text_document_position_params.position,
+            )
+        });
+        return Ok(serde_json::to_value(value)?);
     }
     if method == FoldingRangeRequest::METHOD {
         let _: FoldingRangeParams = serde_json::from_value(request.params.clone())?;
