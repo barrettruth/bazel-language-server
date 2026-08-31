@@ -8,12 +8,15 @@ use lsp_types::{
     CompletionParams, CompletionRequest, DefinitionParams, DefinitionRequest,
     DocumentHighlightParams, DocumentHighlightRequest, DocumentLinkParams, DocumentLinkRequest,
     DocumentSymbolParams, DocumentSymbolRequest, FoldingRangeParams, FoldingRangeRequest,
-    HoverParams, HoverRequest, LspRequestMethod, ReferenceParams, ReferencesRequest, Request as _,
-    SelectionRangeParams, SelectionRangeRequest, SemanticTokensParams, SemanticTokensRequest, Uri,
+    HoverParams, HoverRequest, LspRequestMethod, PrepareRenameParams, PrepareRenameRequest,
+    PrepareRenameResult, ReferenceParams, ReferencesRequest, RenameParams, RenameRequest,
+    Request as _, SelectionRangeParams, SelectionRangeRequest, SemanticTokensParams,
+    SemanticTokensRequest, Uri,
 };
 
 use super::{
-    ConfigurationSnapshot, FlagCatalog, completion, hover, navigation, occurrences, structural,
+    ConfigurationSnapshot, FlagCatalog, completion, hover, navigation, occurrences, rename,
+    structural,
 };
 use crate::document::{Document, Documents};
 
@@ -117,6 +120,28 @@ fn answer(
             docs,
             configuration,
         ))?);
+    }
+    if method == PrepareRenameRequest::METHOD {
+        let params: PrepareRenameParams = serde_json::from_value(request.params.clone())?;
+        let value = rename::prepare(
+            document,
+            docs,
+            configuration,
+            params.text_document_position_params.position,
+        )
+        .map(PrepareRenameResult::Range);
+        return Ok(serde_json::to_value(value)?);
+    }
+    if method == RenameRequest::METHOD {
+        let params: RenameParams = serde_json::from_value(request.params.clone())?;
+        let value = rename::rename(
+            document,
+            docs,
+            configuration,
+            params.text_document_position_params.position,
+            &params.new_name,
+        )?;
+        return Ok(serde_json::to_value(value)?);
     }
     if method == FoldingRangeRequest::METHOD {
         let _: FoldingRangeParams = serde_json::from_value(request.params.clone())?;

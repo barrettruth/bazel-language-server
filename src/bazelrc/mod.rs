@@ -11,6 +11,7 @@ mod native_options;
 mod navigation;
 mod occurrences;
 mod provider;
+mod rename;
 mod structural;
 pub mod syntax;
 mod view;
