@@ -7,6 +7,7 @@
 
 mod actor;
 mod bazel;
+pub mod bazelrc;
 mod document;
 mod format;
 mod graph;
