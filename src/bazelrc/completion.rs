@@ -315,6 +315,7 @@ fn native_flag_context<'a>(
         option
             .value
             .is_some_and(|value| std::ptr::eq(value, current))
+            || (std::ptr::eq(option.option, current) && option.value.is_some())
     }) {
         return None;
     }
@@ -732,6 +733,18 @@ mod tests {
             panic!("plain text edit")
         };
         assert_eq!(edit.new_text, "--jobs=4");
+
+        let text = "build --jobs 4";
+        let after_option = text.find("--jobs").unwrap() + "--jobs".len();
+        assert!(
+            complete_items_at(
+                text,
+                &catalog,
+                &ConfigurationSnapshot::default(),
+                after_option
+            )
+            .is_empty()
+        );
     }
 
     #[test]
