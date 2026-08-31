@@ -270,6 +270,19 @@ fn is_excluded(entry: &walkdir::DirEntry) -> bool {
     entry.depth() == 1 && name.starts_with("bazel-")
 }
 
+/// Regular workspace files visible to static indexes and path completion.
+pub(crate) fn workspace_files(root: &Path) -> Vec<std::path::PathBuf> {
+    let ignored = read_bazelignore(root);
+    walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !is_excluded(entry) && !is_ignored(root, entry.path(), &ignored))
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
+        .collect()
+}
+
 /// Workspace-relative directories listed in `.bazelignore`.
 ///
 /// Bazel does not load packages under these, so neither may we: indexing them
@@ -308,18 +321,8 @@ pub(crate) fn is_ignored(root: &Path, path: &Path, ignored: &[std::path::PathBuf
 #[must_use]
 pub fn build_static(root: &Path) -> Tier {
     let mut index = Tier::default();
-    let ignored = read_bazelignore(root);
-
-    let walk = walkdir::WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| !is_excluded(entry) && !is_ignored(root, entry.path(), &ignored));
-
-    for entry in walk.filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        collect_disk_file(root, entry.path(), &mut index);
+    for path in workspace_files(root) {
+        collect_disk_file(root, &path, &mut index);
     }
 
     tracing::info!(

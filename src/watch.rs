@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use notify::{RecursiveMode, Watcher};
 
 use crate::actor::Bazel;
-use crate::bazelrc::ConfigurationHandle;
+use crate::bazelrc::{ConfigurationHandle, ConfigurationSnapshot};
 use crate::index::IndexHandle;
 
 /// Debounce window for filesystem bursts.
@@ -25,6 +25,8 @@ struct Invalidates {
     graph: bool,
     /// The imported Bazelrc graph.
     configuration: bool,
+    /// Workspace paths offered by Bazelrc import completion.
+    configuration_candidates: bool,
 }
 
 impl Invalidates {
@@ -33,30 +35,42 @@ impl Invalidates {
         target_files: Vec::new(),
         graph: false,
         configuration: false,
+        configuration_candidates: false,
     };
     const GRAPH: Self = Self {
         full_targets: false,
         target_files: Vec::new(),
         graph: true,
         configuration: false,
+        configuration_candidates: false,
     };
     const BOTH: Self = Self {
         full_targets: true,
         target_files: Vec::new(),
         graph: true,
         configuration: true,
+        configuration_candidates: true,
     };
     const CONFIGURATION: Self = Self {
         full_targets: false,
         target_files: Vec::new(),
         graph: true,
         configuration: true,
+        configuration_candidates: false,
+    };
+    const CONFIGURATION_CANDIDATES: Self = Self {
+        full_targets: false,
+        target_files: Vec::new(),
+        graph: false,
+        configuration: false,
+        configuration_candidates: true,
     };
     const INITIAL: Self = Self {
         full_targets: true,
         target_files: Vec::new(),
         graph: false,
         configuration: true,
+        configuration_candidates: true,
     };
 
     fn file(path: &Path) -> Self {
@@ -65,6 +79,7 @@ impl Invalidates {
             target_files: vec![path.to_path_buf()],
             graph: true,
             configuration: false,
+            configuration_candidates: false,
         }
     }
 
@@ -72,6 +87,7 @@ impl Invalidates {
         self.full_targets |= other.full_targets;
         self.graph |= other.graph;
         self.configuration |= other.configuration;
+        self.configuration_candidates |= other.configuration_candidates;
         if self.full_targets {
             self.target_files.clear();
         } else {
@@ -81,16 +97,20 @@ impl Invalidates {
     }
 
     fn anything(&self) -> bool {
-        self.full_targets || !self.target_files.is_empty() || self.graph || self.configuration
+        self.full_targets
+            || !self.target_files.is_empty()
+            || self.graph
+            || self.configuration
+            || self.configuration_candidates
     }
 }
 
 /// Classify a change by the index tiers it can affect.
-fn invalidated(path: &Path) -> Invalidates {
+fn invalidated(path: &Path, configuration: &ConfigurationSnapshot) -> Invalidates {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return Invalidates::NOTHING;
     };
-    match name {
+    let reaches = match name {
         "BUILD" | "BUILD.bazel" => Invalidates::file(path),
         ".bazelignore" => Invalidates::BOTH,
         "MODULE.bazel" | "MODULE.bazel.lock" | "WORKSPACE" | "WORKSPACE.bazel"
@@ -98,6 +118,11 @@ fn invalidated(path: &Path) -> Invalidates {
         _ if name == ".bazelrc" || name.ends_with(".bazelrc") => Invalidates::CONFIGURATION,
         _ if path.extension().is_some_and(|kind| kind == "bzl") => Invalidates::GRAPH,
         _ => Invalidates::NOTHING,
+    };
+    if configuration.includes(path) {
+        reaches.with(Invalidates::CONFIGURATION)
+    } else {
+        reaches
     }
 }
 
@@ -143,8 +168,14 @@ struct EventState {
 impl EventQueue {
     const MAX_FILES: usize = 1_024;
 
-    fn send(&self, root: &Path, tx: &Sender<Wake>, event: &notify::Result<notify::Event>) {
-        let reaches = wanted(root, event);
+    fn send(
+        &self,
+        root: &Path,
+        configuration: &ConfigurationHandle,
+        tx: &Sender<Wake>,
+        event: &notify::Result<notify::Event>,
+    ) {
+        let reaches = wanted(root, &configuration.load(), event);
         if !reaches.anything() {
             return;
         }
@@ -234,13 +265,15 @@ pub fn spawn(
         semantic_wake,
     };
     let watching = publishers.root.clone();
+    let watched_configuration = publishers.configuration.clone();
     let events = tx.clone();
     let event_queue = Arc::new(EventQueue::default());
     let callback_queue = Arc::clone(&event_queue);
     let thread = std::thread::Builder::new()
         .name("watch".to_owned())
         .spawn(move || {
-            let _watcher = match establish(&watching, events, callback_queue) {
+            let _watcher = match establish(&watching, watched_configuration, events, callback_queue)
+            {
                 Ok(watcher) => Some(watcher),
                 Err(err) => {
                     tracing::warn!(
@@ -262,12 +295,13 @@ pub fn spawn(
 /// One recursive watch on `root`, reporting into `tx`.
 fn establish(
     root: &Path,
+    configuration: ConfigurationHandle,
     tx: Sender<Wake>,
     queue: Arc<EventQueue>,
 ) -> Result<notify::RecommendedWatcher> {
     let classified = root.to_path_buf();
     let mut watcher = notify::recommended_watcher(move |event| {
-        queue.send(&classified, &tx, &event);
+        queue.send(&classified, &configuration, &tx, &event);
     })
     .context("creating the workspace watcher")?;
     watcher
@@ -328,7 +362,11 @@ fn reached(wake: &Wake, events: &EventQueue) -> Invalidates {
 
 /// Map backend events to index invalidations. Dropped events require a full
 /// rebuild because their paths are unknown.
-fn wanted(root: &Path, event: &notify::Result<notify::Event>) -> Invalidates {
+fn wanted(
+    root: &Path,
+    configuration: &ConfigurationSnapshot,
+    event: &notify::Result<notify::Event>,
+) -> Invalidates {
     match event {
         Ok(event) if event.need_rescan() => {
             tracing::debug!("the watcher dropped events; rebuilding everything");
@@ -342,19 +380,36 @@ fn wanted(root: &Path, event: &notify::Result<notify::Event>) -> Invalidates {
             if changes_package_tree(event) && event.paths.iter().any(|path| relevant(path)) {
                 return Invalidates::BOTH;
             }
-            event
+            let reaches = event
                 .paths
                 .iter()
                 .filter(|path| relevant(path))
                 .fold(Invalidates::NOTHING, |reaches, path| {
-                    reaches.with(invalidated(path))
-                })
+                    reaches.with(invalidated(path, configuration))
+                });
+            if changes_file_set(event) && event.paths.iter().any(|path| relevant(path)) {
+                reaches.with(Invalidates::CONFIGURATION_CANDIDATES)
+            } else {
+                reaches
+            }
         }
         Err(err) => {
             tracing::warn!("watching the workspace: {err}");
             Invalidates::NOTHING
         }
     }
+}
+
+fn changes_file_set(event: &notify::Event) -> bool {
+    use notify::EventKind::{Create, Modify, Remove};
+    use notify::event::{CreateKind, ModifyKind, RemoveKind};
+
+    matches!(
+        event.kind,
+        Create(CreateKind::Any | CreateKind::File | CreateKind::Other)
+            | Remove(RemoveKind::Any | RemoveKind::File | RemoveKind::Other)
+            | Modify(ModifyKind::Name(_))
+    )
 }
 
 fn changes_package_tree(event: &notify::Event) -> bool {
@@ -400,12 +455,21 @@ fn rebuild(publishers: &Publishers, reaches: Invalidates, nth: u64) {
     } else {
         tracing::info!(nth, "the target table is untouched by this change");
     }
-    if reaches.configuration {
-        publishers
-            .configuration
-            .store(crate::bazelrc::ConfigurationSnapshot::build(
+    if reaches.configuration || reaches.configuration_candidates {
+        let candidates = if reaches.configuration_candidates {
+            crate::index::workspace_files(&publishers.root)
+                .into_iter()
+                .map(|path| Arc::from(path.as_path()))
+                .collect()
+        } else {
+            publishers.configuration.load().candidates.clone()
+        };
+        publishers.configuration.store(
+            crate::bazelrc::ConfigurationSnapshot::build_with_candidates(
                 &publishers.root,
-            ));
+                candidates,
+            ),
+        );
         let _ = publishers.semantic_wake.try_send(());
     }
     if reaches.graph {
@@ -419,19 +483,21 @@ mod tests {
 
     #[test]
     fn only_a_build_file_reaches_the_target_table() {
+        let configuration = ConfigurationSnapshot::default();
         for path in ["/ws/lib/BUILD", "/ws/lib/BUILD.bazel"] {
-            let reaches = invalidated(Path::new(path));
+            let reaches = invalidated(Path::new(path), &configuration);
             assert!(reaches.graph);
             assert_eq!(reaches.target_files, vec![PathBuf::from(path)]);
         }
         assert_eq!(
-            invalidated(Path::new("/ws/.bazelignore")),
+            invalidated(Path::new("/ws/.bazelignore"), &configuration),
             Invalidates::BOTH
         );
     }
 
     #[test]
     fn what_only_bazel_reads_refreshes_only_the_graph() {
+        let configuration = ConfigurationSnapshot::default();
         for path in [
             "/ws/lib/defs.bzl",
             "/ws/MODULE.bazel",
@@ -440,7 +506,7 @@ mod tests {
             "/ws/REPO.bazel",
         ] {
             assert_eq!(
-                invalidated(Path::new(path)),
+                invalidated(Path::new(path), &configuration),
                 Invalidates::GRAPH,
                 "{path} is the graph tier's business alone"
             );
@@ -449,8 +515,9 @@ mod tests {
 
     #[test]
     fn every_bazelrc_refreshes_the_configuration_and_graph() {
+        let configuration = ConfigurationSnapshot::default();
         for path in ["/ws/.bazelrc", "/ws/config/build.bazelrc"] {
-            let reaches = invalidated(Path::new(path));
+            let reaches = invalidated(Path::new(path), &configuration);
             assert!(reaches.graph, "{path}");
             assert!(reaches.configuration, "{path}");
             assert!(!reaches.full_targets, "{path}");
@@ -458,20 +525,69 @@ mod tests {
     }
 
     #[test]
+    fn imported_arbitrary_names_refresh_every_language_tier_they_belong_to() {
+        let plain = PathBuf::from("/ws/config/plain");
+        let build = PathBuf::from("/ws/lib/BUILD");
+        let configuration = ConfigurationSnapshot {
+            imports: vec![
+                crate::bazelrc::ImportSite {
+                    file: Arc::from(Path::new("/ws/.bazelrc")),
+                    range: crate::bazelrc::syntax::Span::new(0, 1),
+                    target: plain.clone(),
+                    loaded: None,
+                    active: true,
+                },
+                crate::bazelrc::ImportSite {
+                    file: Arc::from(Path::new("/ws/.bazelrc")),
+                    range: crate::bazelrc::syntax::Span::new(2, 3),
+                    target: build.clone(),
+                    loaded: None,
+                    active: true,
+                },
+            ],
+            ..ConfigurationSnapshot::default()
+        };
+        let plain = invalidated(&plain, &configuration);
+        assert!(plain.configuration);
+        assert!(plain.graph);
+        let build = invalidated(&build, &configuration);
+        assert!(build.configuration);
+        assert_eq!(build.target_files, [PathBuf::from("/ws/lib/BUILD")]);
+    }
+
+    #[test]
+    fn file_creation_refreshes_candidates_without_refreshing_bazel() {
+        let root = Path::new("/ws");
+        let event = notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))
+            .add_path(PathBuf::from("/ws/config/plain"));
+        let reaches = wanted(root, &ConfigurationSnapshot::default(), &Ok(event));
+        assert!(reaches.configuration_candidates);
+        assert!(!reaches.configuration);
+        assert!(!reaches.graph);
+    }
+
+    #[test]
     fn everything_else_costs_nothing() {
+        let configuration = ConfigurationSnapshot::default();
         for path in ["/ws/lib/main.cc", "/ws/README.md", "/ws/lib/a.txt"] {
-            assert_eq!(invalidated(Path::new(path)), Invalidates::NOTHING, "{path}");
+            assert_eq!(
+                invalidated(Path::new(path), &configuration),
+                Invalidates::NOTHING,
+                "{path}"
+            );
         }
     }
 
     #[test]
     fn a_burst_reaches_the_union_of_its_files() {
-        let bzl = invalidated(Path::new("/ws/lib/defs.bzl"));
-        let text = invalidated(Path::new("/ws/lib/a.txt"));
+        let configuration = ConfigurationSnapshot::default();
+        let bzl = invalidated(Path::new("/ws/lib/defs.bzl"), &configuration);
+        let text = invalidated(Path::new("/ws/lib/a.txt"), &configuration);
         assert_eq!(bzl.clone().with(text.clone()), Invalidates::GRAPH);
-        let both = bzl
-            .clone()
-            .with(invalidated(Path::new("/ws/lib/BUILD.bazel")));
+        let both = bzl.clone().with(invalidated(
+            Path::new("/ws/lib/BUILD.bazel"),
+            &configuration,
+        ));
         assert!(both.graph);
         assert_eq!(
             both.target_files,
@@ -485,9 +601,11 @@ mod tests {
         let (tx, rx) = channel();
         let events = EventQueue::default();
         let root = Path::new("/ws");
+        let configuration = ConfigurationHandle::new();
         for path in ["/ws/one/BUILD.bazel", "/ws/two/BUILD.bazel"] {
             events.send(
                 root,
+                &configuration,
                 &tx,
                 &Ok(notify::Event::new(notify::EventKind::Any).add_path(PathBuf::from(path))),
             );
@@ -507,11 +625,17 @@ mod tests {
         std::fs::write(root.join(".bazelignore"), "ignored\n").unwrap();
         let event =
             notify::Event::new(notify::EventKind::Any).add_path(root.join("ignored/BUILD.bazel"));
-        assert_eq!(wanted(&root, &Ok(event)), Invalidates::NOTHING);
+        assert_eq!(
+            wanted(&root, &ConfigurationSnapshot::default(), &Ok(event)),
+            Invalidates::NOTHING
+        );
         let directory =
             notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::Folder))
                 .add_path(root.join("ignored/generated"));
-        assert_eq!(wanted(&root, &Ok(directory)), Invalidates::NOTHING);
+        assert_eq!(
+            wanted(&root, &ConfigurationSnapshot::default(), &Ok(directory)),
+            Invalidates::NOTHING
+        );
         std::fs::remove_dir_all(root).ok();
     }
 

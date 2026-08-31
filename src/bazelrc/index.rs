@@ -11,6 +11,8 @@ use super::syntax::{
     Directive, Parse, Span, Statement, config_declaration, config_references, parse,
 };
 
+const MAX_IMPORT_CANDIDATES: usize = 131_072;
+
 /// One rc file read from disk.
 #[derive(Debug)]
 pub struct ConfigurationFile {
@@ -73,22 +75,47 @@ pub struct ConfigurationSnapshot {
     pub references: Vec<ConfigSite>,
     pub imports: Vec<ImportSite>,
     pub problems: Vec<Problem>,
+    pub candidates: Vec<Arc<Path>>,
 }
 
 impl ConfigurationSnapshot {
     /// Build from the conventional workspace `.bazelrc`, if it exists.
     #[must_use]
     pub fn build(root: &Path) -> Self {
+        Self::build_with_candidates(
+            root,
+            crate::index::workspace_files(root)
+                .into_iter()
+                .map(|path| Arc::from(path.as_path()))
+                .collect(),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn build_with_candidates(root: &Path, candidates: Vec<Arc<Path>>) -> Self {
+        let mut candidates = candidates;
+        candidates.sort_unstable_by(|left, right| left.as_os_str().cmp(right.as_os_str()));
+        candidates.dedup();
+        candidates.truncate(MAX_IMPORT_CANDIDATES);
         let mut builder = Builder {
             root,
             snapshot: Self {
                 root: Some(Arc::from(root)),
+                candidates,
                 ..Self::default()
             },
             active: Vec::new(),
         };
         drop(builder.visit(&root.join(".bazelrc"), None, false));
         builder.snapshot
+    }
+
+    #[must_use]
+    pub fn includes(&self, path: &Path) -> bool {
+        self.files.contains_key(path)
+            || self.imports.iter().any(|site| {
+                site.target == path || site.loaded.as_deref().is_some_and(|loaded| loaded == path)
+            })
     }
 
     pub fn declarations(&self, name: &str) -> impl Iterator<Item = &ConfigSite> {
@@ -347,6 +374,29 @@ mod tests {
         assert_eq!(snapshot.entries[1].file.path.as_ref(), child.as_path());
         assert_eq!(snapshot.declarations("dev").count(), 1);
         assert_eq!(snapshot.references[0].name.as_ref(), "dev");
+    }
+
+    #[test]
+    fn candidates_include_arbitrary_files_but_not_ignored_trees() {
+        let workspace = Workspace::new();
+        workspace.write(".bazelrc", "import config/plain\n");
+        workspace.write("config/plain", "build --jobs=1\n");
+        std::fs::create_dir_all(workspace.0.join("ignored")).unwrap();
+        workspace.write(".bazelignore", "ignored\n");
+        workspace.write("ignored/hidden", "build --jobs=2\n");
+        let snapshot = ConfigurationSnapshot::build(&workspace.0);
+        assert!(
+            snapshot
+                .candidates
+                .iter()
+                .any(|path| path.ends_with("config/plain"))
+        );
+        assert!(
+            snapshot
+                .candidates
+                .iter()
+                .all(|path| !path.ends_with("ignored/hidden"))
+        );
     }
 
     #[test]

@@ -277,6 +277,8 @@ impl Session<'_> {
                     break;
                 }
                 while self.semantic_wake.try_recv().is_ok() {}
+                let configuration = self.request_context.bazelrc.configuration.load();
+                docs.reclassify_bazelrc(&configuration);
                 schedule_bazelrc_diagnostics(
                     self.request_context.connection,
                     self.diagnostics,
@@ -1104,16 +1106,23 @@ enum Applied {
     None,
 }
 
-fn apply(note: &lsp_server::Notification, docs: &mut Documents) -> Result<Applied> {
+fn apply(
+    note: &lsp_server::Notification,
+    docs: &mut Documents,
+    configuration: &bazelrc::ConfigurationSnapshot,
+) -> Result<Applied> {
     let method: LspNotificationMethod<'_> = note.method.as_str().into();
     if method == DidOpenTextDocumentNotification::METHOD {
         let params: DidOpenTextDocumentParams = serde_json::from_value(note.params.clone())?;
         let uri = params.text_document.uri;
-        docs.set(
+        let path: PathBuf = uri::to_path(&uri).into();
+        let configuration_file = configuration.includes(&path);
+        docs.set_classified(
             uri.clone(),
-            uri::to_path(&uri).into(),
+            path,
             params.text_document.version,
             params.text_document.text,
+            configuration_file,
         );
         return Ok(Applied::Changed(uri));
     }
@@ -1225,7 +1234,8 @@ fn handle_notification(
         return Ok(());
     }
 
-    match apply(&note, docs) {
+    let configuration = bazelrc.configuration.load();
+    match apply(&note, docs, &configuration) {
         Ok(Applied::Changed(uri)) => {
             schedule_diagnostics(connection, diagnostics, docs, bazelrc, &uri)?;
         }

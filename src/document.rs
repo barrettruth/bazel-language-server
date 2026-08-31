@@ -86,6 +86,20 @@ impl Documents {
         self.republish();
     }
 
+    pub fn set_classified(
+        &mut self,
+        uri: Uri,
+        path: PathBuf,
+        version: i32,
+        text: String,
+        bazelrc: bool,
+    ) {
+        let bazelrc = bazelrc || is_bazelrc(&path);
+        let document = Document::versioned_as(path, version, text, self.root.as_deref(), bazelrc);
+        self.texts.insert(uri, Arc::new(document));
+        self.republish();
+    }
+
     pub fn change(
         &mut self,
         uri: &Uri,
@@ -102,11 +116,12 @@ impl Documents {
             current.version()
         );
         let text = apply_changes(current.text(), changes)?;
-        let document = Document::versioned(
+        let document = Document::versioned_as(
             current.path().to_path_buf(),
             version,
             text,
             self.root.as_deref(),
+            current.is_bazelrc(),
         );
         self.texts.insert(uri.clone(), Arc::new(document));
         self.republish();
@@ -117,6 +132,28 @@ impl Documents {
     pub fn forget(&mut self, uri: &Uri) {
         self.texts.remove(uri);
         self.republish();
+    }
+
+    pub fn reclassify_bazelrc(&mut self, configuration: &bazelrc::ConfigurationSnapshot) {
+        let root = self.root.as_deref();
+        let mut changed = false;
+        for document in self.texts.values_mut() {
+            let bazelrc = is_bazelrc(document.path()) || configuration.includes(document.path());
+            if bazelrc == document.is_bazelrc() {
+                continue;
+            }
+            *document = Arc::new(Document::versioned_as(
+                document.path().to_path_buf(),
+                document.version(),
+                document.text().to_owned(),
+                root,
+                bazelrc,
+            ));
+            changed = true;
+        }
+        if changed {
+            self.republish();
+        }
     }
 
     /// Republish facts derived from all open BUILD files.
@@ -155,7 +192,18 @@ impl Document {
 
     #[must_use]
     pub fn versioned(path: PathBuf, version: i32, text: String, root: Option<&Path>) -> Self {
-        let syntax = if is_bazelrc(&path) {
+        let bazelrc = is_bazelrc(&path);
+        Self::versioned_as(path, version, text, root, bazelrc)
+    }
+
+    fn versioned_as(
+        path: PathBuf,
+        version: i32,
+        text: String,
+        root: Option<&Path>,
+        bazelrc: bool,
+    ) -> Self {
+        let syntax = if bazelrc {
             Syntax::Bazelrc(bazelrc::syntax::parse(&text))
         } else {
             let (dialect, kind) =
@@ -363,6 +411,39 @@ mod tests {
         document.contribute(Path::new("/ws"), &mut tier);
         assert!(tier.targets.is_empty());
         assert!(!tier.speaks_for.contains(path.as_path()));
+    }
+
+    #[test]
+    fn imported_arbitrary_paths_keep_graph_derived_classification() {
+        let root = PathBuf::from("/ws");
+        let path = root.join("config/plain");
+        let uri: Uri = "file:///ws/config/plain".parse().unwrap();
+        let mut documents = Documents::new(Some(root), IndexHandle::new());
+        documents.set_classified(
+            uri.clone(),
+            path.clone(),
+            1,
+            "build --jobs=1\n".to_owned(),
+            true,
+        );
+        assert!(documents.get(&uri).unwrap().is_bazelrc());
+        documents
+            .change(
+                &uri,
+                2,
+                vec![
+                    lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(
+                        lsp_types::TextDocumentContentChangeWholeDocument {
+                            text: "build --jobs=2\n".to_owned(),
+                        },
+                    ),
+                ],
+            )
+            .unwrap();
+        assert!(documents.get(&uri).unwrap().is_bazelrc());
+
+        documents.reclassify_bazelrc(&bazelrc::ConfigurationSnapshot::default());
+        assert!(!documents.get(&uri).unwrap().is_bazelrc());
     }
 
     #[test]
