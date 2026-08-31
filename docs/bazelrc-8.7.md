@@ -40,8 +40,8 @@ behavior that depends on that suffix is outside this contract.
    tokens spanning physical lines.
 4. The workspace configuration graph has one root, the workspace `.bazelrc`,
    and imports expand depth-first at their textual position.
-5. Relative imports resolve from the workspace root, matching the Bazel
-   process working directory, not the importing file's directory.
+5. The server models Bazel invoked from the workspace root, so ordinary
+   relative imports resolve there, never against the importing file.
 6. An argless ordinary line is not an entry, and therefore cannot declare an
    empty named configuration.
 7. `startup` and unknown command sections cannot declare or select named
@@ -145,8 +145,11 @@ two independent active paths replays its entries and produces a warning. Re-ente
 file on the active stack is an error. Bazel 8.7 has no import-depth cap.
 
 Only the exact `%workspace%/` prefix is substituted. Absolute paths remain
-absolute. Every other path is joined to the workspace root. Environment
-variables, `${...}`, and `~` are not expanded.
+absolute. Bazel itself leaves every other path relative to its client process
+working directory; the server's single workspace model fixes that directory
+at the workspace root. A Bazel invocation launched from a subdirectory may
+therefore resolve the same spelling differently. Environment variables,
+`${...}`, and `~` are not expanded.
 
 ## Commands and rc scopes
 
@@ -230,6 +233,9 @@ not offer old names and filters `UNDOCUMENTED`, `HIDDEN`, and `NO_OP` flags.
 command. `always` completion is the intersection across the catalog's reported
 non-startup command universe. Concrete command completion uses the catalog's
 exact command list.
+
+Enum membership follows Bazel's `EnumConverter` and is ASCII-case-insensitive;
+completion presents the canonical values reported by the catalog.
 
 Recognizable Starlark build-setting forms beginning with `--//`, `--@`,
 `--no//`, or `--no@` bypass native lookup. The catalog does not resolve

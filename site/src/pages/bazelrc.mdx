@@ -30,8 +30,10 @@ filenames reached from the workspace import graph. It indexes the workspace
 Supported directives are `import`, `try-import`, and the Bazel 8.7
 `try-import-if-bazel-version`. Required imports report read failures; missing
 optional imports do not. `%workspace%/` is recognized exactly. Other relative
-paths resolve from the workspace root, matching the Bazel process working
-directory rather than the importing file's directory.
+paths resolve from the workspace root: the server models one Bazel invocation
+working directory, while a command launched from a workspace subdirectory may
+resolve the same spelling differently. Imports are never containing-file
+relative.
 
 Import paths receive workspace-file completion, document links, structural
 hover, and go-to-definition. Completion returns at most 512 eligible matches

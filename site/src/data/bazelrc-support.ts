@@ -168,7 +168,14 @@ export const bazelrcSupport: BazelrcSupportSection[] = [
       {
         feature: "Absolute and workspace-root-relative paths",
         supported: true,
-        boundary: "Relative paths use Bazel's workspace process directory.",
+        boundary:
+          "The server models the Bazel client working directory as the workspace root.",
+      },
+      {
+        feature: "Per-invocation subdirectory working directory",
+        supported: false,
+        boundary:
+          "Bazel launched below the workspace may resolve an ordinary relative import differently.",
       },
       {
         feature: "Live refresh for imports outside the workspace",
@@ -382,7 +389,7 @@ export const bazelrcSupport: BazelrcSupportSection[] = [
         feature: "Enum membership validation",
         supported: true,
         boundary:
-          "Unknown values are errors only for an exact reported enum set.",
+          "ASCII-case-insensitive, matching Bazel's converter, and only for an exact reported enum set.",
       },
       {
         feature: "Other flag-value completion",
