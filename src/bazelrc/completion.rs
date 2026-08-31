@@ -301,6 +301,14 @@ fn native_flag_context<'a>(
     offset: usize,
     source: &str,
 ) -> Option<FlagContext<'a>> {
+    let uses = native_options::uses(line, catalog);
+    if uses.iter().any(|option| {
+        option
+            .value
+            .is_some_and(|value| option.option.range.end <= offset && offset <= value.range.start)
+    }) {
+        return None;
+    }
     let Some(current) = line
         .options()
         .iter()
@@ -311,7 +319,7 @@ fn native_flag_context<'a>(
             suffix: None,
         });
     };
-    if native_options::uses(line, catalog).iter().any(|option| {
+    if uses.iter().any(|option| {
         option
             .value
             .is_some_and(|value| std::ptr::eq(value, current))
@@ -742,6 +750,18 @@ mod tests {
                 &catalog,
                 &ConfigurationSnapshot::default(),
                 after_option
+            )
+            .is_empty()
+        );
+
+        let text = "build --jobs  4";
+        let inside_gap = text.find("  ").unwrap() + 1;
+        assert!(
+            complete_items_at(
+                text,
+                &catalog,
+                &ConfigurationSnapshot::default(),
+                inside_gap
             )
             .is_empty()
         );
