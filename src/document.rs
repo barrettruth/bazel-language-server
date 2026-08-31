@@ -142,10 +142,13 @@ impl Documents {
         self.republish();
     }
 
-    pub fn reclassify_bazelrc(&mut self, configuration: &bazelrc::ConfigurationSnapshot) {
+    pub fn reclassify_bazelrc(
+        &mut self,
+        configuration: &bazelrc::ConfigurationSnapshot,
+    ) -> Vec<Uri> {
         let root = self.root.as_deref();
-        let mut changed = false;
-        for document in self.texts.values_mut() {
+        let mut changed = Vec::new();
+        for (uri, document) in &mut self.texts {
             let bazelrc = is_bazelrc(document.path()) || configuration.includes(document.path());
             if bazelrc == document.is_bazelrc() {
                 continue;
@@ -157,11 +160,12 @@ impl Documents {
                 root,
                 bazelrc,
             ));
-            changed = true;
+            changed.push(uri.clone());
         }
-        if changed {
+        if !changed.is_empty() {
             self.republish();
         }
+        changed
     }
 
     /// Republish facts derived from all open BUILD files.

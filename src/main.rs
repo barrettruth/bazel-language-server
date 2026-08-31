@@ -56,6 +56,13 @@ enum Completed {
         document: Arc<Document>,
         diagnostics: Vec<lsp_types::Diagnostic>,
     },
+    BazelrcDiagnostics {
+        uri: Uri,
+        document: Arc<Document>,
+        configuration: Arc<bazelrc::ConfigurationSnapshot>,
+        catalog: Option<Arc<bazelrc::FlagCatalog>>,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+    },
 }
 
 enum Outgoing {
@@ -128,6 +135,8 @@ impl RequestContext<'_> {
         &self,
         requests: &mut ReqQueue<worker::Cancellation, Outgoing>,
         docs: &Documents,
+        configuration: &Arc<bazelrc::ConfigurationSnapshot>,
+        catalog: Option<&Arc<bazelrc::FlagCatalog>>,
         request: lsp_server::Request,
     ) -> Result<bool> {
         if self.connection.handle_shutdown(&request)? {
@@ -151,8 +160,8 @@ impl RequestContext<'_> {
         let queued_id = request.id.clone();
         let snapshot = docs.clone();
         let index = self.index.load();
-        let configuration = self.bazelrc.configuration.load();
-        let catalog = self.bazelrc.catalog.load();
+        let configuration = Arc::clone(configuration);
+        let catalog = catalog.cloned();
         let root = self.root.map(Path::to_path_buf);
         let link_support = self.link_support;
         let admitted = self.workers.execute(move || {
@@ -217,6 +226,8 @@ struct Session<'a> {
     completed: crossbeam_channel::Receiver<Completed>,
     ready: crossbeam_channel::Receiver<watch::Ready>,
     semantic_wake: crossbeam_channel::Receiver<()>,
+    configuration: Arc<bazelrc::ConfigurationSnapshot>,
+    catalog: Option<Arc<bazelrc::FlagCatalog>>,
 }
 
 impl Session<'_> {
@@ -232,7 +243,13 @@ impl Session<'_> {
                 let Ok(message) = message else { break };
                 match message {
                     Message::Request(request) => {
-                        if self.request_context.dispatch(requests, docs, request)? {
+                        if self.request_context.dispatch(
+                            requests,
+                            docs,
+                            &self.configuration,
+                            self.catalog.as_ref(),
+                            request,
+                        )? {
                             break 'session;
                         }
                     }
@@ -241,7 +258,8 @@ impl Session<'_> {
                         self.diagnostics,
                         requests,
                         docs,
-                        self.request_context.bazelrc,
+                        Arc::clone(&self.configuration),
+                        self.catalog.clone(),
                         self.request_context.bazel,
                         note,
                     )?,
@@ -262,7 +280,14 @@ impl Session<'_> {
             }
             recv(self.completed) -> completed => {
                 let Ok(completed) = completed else { break };
-                handle_completed(self.request_context.connection, requests, docs, completed)?;
+                handle_completed(
+                    self.request_context.connection,
+                    requests,
+                    docs,
+                    &self.configuration,
+                    self.catalog.as_ref(),
+                    completed,
+                )?;
             }
             recv(self.ready) -> ready => {
                 if let Ok(ready) = ready
@@ -277,13 +302,16 @@ impl Session<'_> {
                     break;
                 }
                 while self.semantic_wake.try_recv().is_ok() {}
-                let configuration = self.request_context.bazelrc.configuration.load();
-                docs.reclassify_bazelrc(&configuration);
+                self.configuration = self.request_context.bazelrc.configuration.load();
+                self.catalog = self.request_context.bazelrc.catalog.load();
+                let reclassified = docs.reclassify_bazelrc(&self.configuration);
                 schedule_bazelrc_diagnostics(
                     self.request_context.connection,
                     self.diagnostics,
                     docs,
-                    self.request_context.bazelrc,
+                    Arc::clone(&self.configuration),
+                    self.catalog.clone(),
+                    reclassified,
                 )?;
             }
             }
@@ -622,6 +650,8 @@ fn run_server() -> Result<()> {
         completed: completed_rx,
         ready: ready_rx,
         semantic_wake: semantic_wake_rx,
+        configuration: bazelrc.configuration.load(),
+        catalog: bazelrc.catalog.load(),
     }
     .run(&mut requests, &mut docs, &mut index_progress);
 
@@ -672,6 +702,8 @@ fn handle_completed(
     connection: &Connection,
     requests: &mut ReqQueue<worker::Cancellation, Outgoing>,
     docs: &Documents,
+    current_configuration: &Arc<bazelrc::ConfigurationSnapshot>,
+    current_catalog: Option<&Arc<bazelrc::FlagCatalog>>,
     completed: Completed,
 ) -> Result<()> {
     match completed {
@@ -688,8 +720,32 @@ fn handle_completed(
             publish_diagnostics(connection, uri, document.version(), diagnostics)?;
         }
         Completed::Diagnostics { .. } => {}
+        Completed::BazelrcDiagnostics {
+            uri,
+            document,
+            configuration,
+            catalog,
+            diagnostics,
+        } if docs.is_current(&uri, &document)
+            && Arc::ptr_eq(&configuration, current_configuration)
+            && same_catalog(catalog.as_ref(), current_catalog) =>
+        {
+            publish_diagnostics(connection, uri, document.version(), diagnostics)?;
+        }
+        Completed::BazelrcDiagnostics { .. } => {}
     }
     Ok(())
+}
+
+fn same_catalog(
+    left: Option<&Arc<bazelrc::FlagCatalog>>,
+    right: Option<&Arc<bazelrc::FlagCatalog>>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+    }
 }
 
 struct ResponseContext<'a> {
@@ -1226,7 +1282,8 @@ fn handle_notification(
     diagnostics: &worker::Latest<Uri, Completed>,
     requests: &mut ReqQueue<worker::Cancellation, Outgoing>,
     docs: &mut Documents,
-    bazelrc: &BazelrcState,
+    configuration: Arc<bazelrc::ConfigurationSnapshot>,
+    catalog: Option<Arc<bazelrc::FlagCatalog>>,
     bazel: &Bazel,
     note: lsp_server::Notification,
 ) -> Result<()> {
@@ -1256,10 +1313,9 @@ fn handle_notification(
         return Ok(());
     }
 
-    let configuration = bazelrc.configuration.load();
     match apply(&note, docs, &configuration) {
         Ok(Applied::Changed(uri)) => {
-            schedule_diagnostics(connection, diagnostics, docs, bazelrc, &uri)?;
+            schedule_diagnostics(connection, diagnostics, docs, configuration, catalog, &uri)?;
         }
         Ok(Applied::Closed { uri, version }) => {
             diagnostics.cancel(&uri);
@@ -1275,27 +1331,19 @@ fn schedule_diagnostics(
     connection: &Connection,
     diagnostics: &worker::Latest<Uri, Completed>,
     docs: &Documents,
-    bazelrc: &BazelrcState,
+    configuration: Arc<bazelrc::ConfigurationSnapshot>,
+    catalog: Option<Arc<bazelrc::FlagCatalog>>,
     uri: &Uri,
 ) -> Result<()> {
-    let configuration = bazelrc.configuration.load();
-    let catalog = bazelrc.catalog.load();
-    schedule_diagnostics_from(
-        connection,
-        diagnostics,
-        docs,
-        &configuration,
-        catalog.as_deref(),
-        uri,
-    )
+    schedule_diagnostics_from(connection, diagnostics, docs, configuration, catalog, uri)
 }
 
 fn schedule_diagnostics_from(
     connection: &Connection,
     diagnostics: &worker::Latest<Uri, Completed>,
     docs: &Documents,
-    configuration: &bazelrc::ConfigurationSnapshot,
-    catalog: Option<&bazelrc::FlagCatalog>,
+    configuration: Arc<bazelrc::ConfigurationSnapshot>,
+    catalog: Option<Arc<bazelrc::FlagCatalog>>,
     uri: &Uri,
 ) -> Result<()> {
     let Some(document) = docs.get(uri) else {
@@ -1303,14 +1351,29 @@ fn schedule_diagnostics_from(
     };
     let version = document.version();
     let syntax = if document.is_bazelrc() {
-        bazelrc::diagnostics(document, docs, configuration, catalog)
+        bazelrc::syntax_diagnostics(document)
     } else {
         handlers::syntax_diagnostics(document)
     };
     let clean = syntax.is_empty();
     diagnostics.cancel(uri);
     publish_diagnostics(connection, uri.clone(), version, syntax)?;
-    if clean && !document.is_bazelrc() {
+    if document.is_bazelrc() {
+        let uri = uri.clone();
+        let document = docs.shared(&uri).expect("the document scheduled above");
+        let documents = docs.clone();
+        diagnostics.execute(uri.clone(), move |_| {
+            let found =
+                bazelrc::diagnostics(&document, &documents, &configuration, catalog.as_deref());
+            Completed::BazelrcDiagnostics {
+                uri,
+                document,
+                configuration,
+                catalog,
+                diagnostics: found,
+            }
+        });
+    } else if clean {
         let uri = uri.clone();
         let document = docs.shared(&uri).expect("the document scheduled above");
         diagnostics.execute(uri.clone(), move |cancellation| Completed::Diagnostics {
@@ -1326,22 +1389,25 @@ fn schedule_bazelrc_diagnostics(
     connection: &Connection,
     diagnostics: &worker::Latest<Uri, Completed>,
     docs: &Documents,
-    bazelrc: &BazelrcState,
+    configuration: Arc<bazelrc::ConfigurationSnapshot>,
+    catalog: Option<Arc<bazelrc::FlagCatalog>>,
+    reclassified: Vec<Uri>,
 ) -> Result<()> {
-    let configuration = bazelrc.configuration.load();
-    let catalog = bazelrc.catalog.load();
-    let uris: Vec<_> = docs
+    let mut uris: Vec<_> = docs
         .iter()
         .filter(|(_, document)| document.is_bazelrc())
         .map(|(uri, _)| uri.clone())
         .collect();
+    uris.extend(reclassified);
+    uris.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+    uris.dedup();
     for uri in uris {
         schedule_diagnostics_from(
             connection,
             diagnostics,
             docs,
-            &configuration,
-            catalog.as_deref(),
+            Arc::clone(&configuration),
+            catalog.clone(),
             &uri,
         )?;
     }
