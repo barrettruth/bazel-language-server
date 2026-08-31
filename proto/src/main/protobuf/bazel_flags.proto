@@ -1,0 +1,44 @@
+// Copyright 2017 The Bazel Authors. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Schema from Bazel 8.7.0.
+syntax = "proto2";
+
+package bazel_flags;
+
+option java_outer_classname = "BazelFlagsProto";
+option java_package = "com.google.devtools.build.lib.runtime.commands.proto";
+
+message FlagInfo {
+  required string name = 1;
+  optional bool has_negative_flag = 2 [default = false];
+  optional string documentation = 3;
+  repeated string commands = 4;
+  optional string abbreviation = 5;
+  optional bool allows_multiple = 6 [default = false];
+  repeated string effect_tags = 7;
+  repeated string metadata_tags = 8;
+  optional string documentation_category = 9;
+  optional bool requires_value = 10;
+  optional string default_value = 13;
+  optional string old_name = 11;
+  optional string deprecation_warning = 12;
+  repeated string option_expansions = 14;
+  optional string type_converter = 15;
+  repeated string enum_values = 16;
+}
+
+message FlagCollection {
+  repeated FlagInfo flag_infos = 1;
+}

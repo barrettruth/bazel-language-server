@@ -10,6 +10,7 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 
 use crate::bazel::{BazelClient, BazelConfig, Interrupt};
+use crate::bazelrc::{CatalogHandle, FlagCatalog};
 use crate::index::{IndexHandle, Tier};
 use crate::repos::Repos;
 
@@ -21,14 +22,14 @@ pub struct Bazel {
 
 impl Bazel {
     #[must_use]
-    pub fn spawn(root: Option<PathBuf>, index: IndexHandle) -> Self {
+    pub fn spawn(root: Option<PathBuf>, index: IndexHandle, catalog: CatalogHandle) -> Self {
         let (tx, rx) = channel();
         let running = Arc::new(Mutex::new(Running::default()));
         let thread = {
             let running = Arc::clone(&running);
             std::thread::Builder::new()
                 .name("bazel".to_owned())
-                .spawn(move || serve(root.as_deref(), &rx, &running, &index))
+                .spawn(move || serve(root.as_deref(), &rx, &running, &index, &catalog))
                 .expect("spawning the bazel thread")
         };
         Self {
@@ -112,6 +113,7 @@ fn serve(
     rx: &Receiver<Message>,
     running: &Mutex<Running>,
     index: &IndexHandle,
+    catalog: &CatalogHandle,
 ) {
     let mut pending = VecDeque::new();
     let mut config = None;
@@ -133,6 +135,7 @@ fn serve(
                 client = None;
                 index.store_graph(Tier::default());
                 index.store_repos(Repos::default());
+                catalog.clear();
                 let Some(root) = root else {
                     config = Some(next);
                     continue;
@@ -148,12 +151,30 @@ fn serve(
                 config = Some(next);
                 match probe {
                     Ok(probe) => {
+                        let Some(flag_catalog) =
+                            read_flag_catalog(&candidate, &probe, running, rx, &mut pending)
+                        else {
+                            continue;
+                        };
                         tracing::info!(
                             version = %probe.version,
                             rule_schemas = probe.capabilities.rule_classes,
                             repo_mapping = probe.capabilities.repo_mapping,
                             "bazel"
                         );
+                        match flag_catalog {
+                            Ok(Some(flags)) => {
+                                tracing::info!(flags = flags.flags().count(), "bazel flag catalog");
+                                catalog.store(flags);
+                            }
+                            Err(err) => {
+                                tracing::warn!("the Bazel flag catalog is unavailable: {err:#}");
+                            }
+                            Ok(None) => tracing::info!(
+                                version = %probe.version,
+                                "Bazelrc flag intelligence requires Bazel 8.7"
+                            ),
+                        }
                         client = Some(candidate);
                         pending.push_back(Message::Refresh);
                         coalesce_refreshes(&mut pending);
@@ -189,6 +210,26 @@ fn serve(
             }
         }
     }
+}
+
+fn read_flag_catalog(
+    client: &BazelClient,
+    probe: &crate::bazel::Probe,
+    running: &Mutex<Running>,
+    rx: &Receiver<Message>,
+    pending: &mut VecDeque<Message>,
+) -> Option<Result<Option<FlagCatalog>>> {
+    if probe.version.major != 8 || probe.version.minor != 7 {
+        return Some(Ok(None));
+    }
+    if !prepare(Operation::Probe, running, rx, pending) {
+        return None;
+    }
+    let catalog = FlagCatalog::read_started(client, probe.reported.clone(), |child| {
+        set_running(running, child);
+    })
+    .map(Some);
+    finish(Operation::Probe, running, rx, pending).then_some(catalog)
 }
 
 impl Message {

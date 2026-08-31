@@ -71,7 +71,6 @@ impl ConfigurationSnapshot {
         builder.snapshot
     }
 
-    #[must_use]
     pub fn declarations(&self, name: &str) -> impl Iterator<Item = &ConfigSite> {
         self.declarations
             .iter()

@@ -1,6 +1,6 @@
 //! LSP boundary for Bazelrc documents.
 
-use super::ConfigurationSnapshot;
+use super::{ConfigurationSnapshot, FlagCatalog};
 use crate::document::{Document, Documents};
 use lsp_server::{Request, Response};
 use lsp_types::{Diagnostic, DiagnosticSeverity, LspRequestMethod, Range, Uri};
@@ -15,6 +15,7 @@ pub fn respond(
     request: &Request,
     docs: &Documents,
     _configuration: &ConfigurationSnapshot,
+    _catalog: Option<&FlagCatalog>,
 ) -> Option<Response> {
     let document = request_document(request, docs)?;
     if !document.is_bazelrc() {
@@ -104,7 +105,7 @@ mod tests {
             params: serde_json::json!({"textDocument": {"uri": uri}}),
         };
         assert_eq!(
-            respond(&request, &docs, &ConfigurationSnapshot::default())
+            respond(&request, &docs, &ConfigurationSnapshot::default(), None)
                 .unwrap()
                 .response_result
                 .unwrap(),

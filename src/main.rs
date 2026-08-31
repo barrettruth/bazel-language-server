@@ -116,6 +116,7 @@ struct RequestContext<'a> {
     workers: &'a worker::Pool<Completed>,
     index: &'a IndexHandle,
     configuration: &'a bazelrc::ConfigurationHandle,
+    catalog: &'a bazelrc::CatalogHandle,
     root: Option<&'a Path>,
     bazel: &'a Bazel,
     watch: Option<&'a watch::Watch>,
@@ -151,6 +152,7 @@ impl RequestContext<'_> {
         let snapshot = docs.clone();
         let index = self.index.load();
         let configuration = self.configuration.load();
+        let catalog = self.catalog.load();
         let root = self.root.map(Path::to_path_buf);
         let link_support = self.link_support;
         let admitted = self.workers.execute(move || {
@@ -166,11 +168,14 @@ impl RequestContext<'_> {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 respond(
                     &request,
-                    &snapshot,
-                    &index,
-                    &configuration,
-                    root.as_deref(),
-                    link_support,
+                    &ResponseContext {
+                        docs: &snapshot,
+                        index: &index,
+                        configuration: &configuration,
+                        catalog: catalog.as_deref(),
+                        root: root.as_deref(),
+                        link_support,
+                    },
                     &cancellation,
                 )
             }));
@@ -489,23 +494,10 @@ fn run_server() -> Result<()> {
         start_index_progress(&connection, &init, root.is_some(), &mut requests)?;
     let index = IndexHandle::new();
     let configuration = bazelrc::ConfigurationHandle::new();
-    let bazel = std::sync::Arc::new(Bazel::spawn(root.clone(), index.clone()));
+    let catalog = bazelrc::CatalogHandle::new();
+    let bazel = std::sync::Arc::new(Bazel::spawn(root.clone(), index.clone(), catalog.clone()));
     bazel.reconfigure(bazel_settings(init.initialization_options.as_ref()).unwrap_or_default());
-    let (watch, mut ready_rx) = if let Some(root) = root.as_deref() {
-        let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
-        (
-            Some(watch::spawn(
-                root,
-                index.clone(),
-                configuration.clone(),
-                bazel.clone(),
-                ready_tx,
-            )),
-            ready_rx,
-        )
-    } else {
-        (None, crossbeam_channel::never())
-    };
+    let (watch, mut ready_rx) = start_watch(root.as_deref(), &index, &configuration, &bazel);
     tracing::info!("ready");
 
     let mut docs = Documents::new(root.clone(), index.clone());
@@ -521,6 +513,7 @@ fn run_server() -> Result<()> {
             workers: &workers,
             index: &index,
             configuration: &configuration,
+            catalog: &catalog,
             root: root.as_deref(),
             bazel: &bazel,
             watch: watch.as_ref(),
@@ -588,6 +581,31 @@ fn run_server() -> Result<()> {
     Ok(())
 }
 
+fn start_watch(
+    root: Option<&Path>,
+    index: &IndexHandle,
+    configuration: &bazelrc::ConfigurationHandle,
+    bazel: &std::sync::Arc<Bazel>,
+) -> (
+    Option<watch::Watch>,
+    crossbeam_channel::Receiver<watch::Ready>,
+) {
+    let Some(root) = root else {
+        return (None, crossbeam_channel::never());
+    };
+    let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
+    (
+        Some(watch::spawn(
+            root,
+            index.clone(),
+            configuration.clone(),
+            bazel.clone(),
+            ready_tx,
+        )),
+        ready_rx,
+    )
+}
+
 fn handle_completed(
     connection: &Connection,
     requests: &mut ReqQueue<worker::Cancellation, Outgoing>,
@@ -612,16 +630,25 @@ fn handle_completed(
     Ok(())
 }
 
+struct ResponseContext<'a> {
+    docs: &'a Documents,
+    index: &'a Index,
+    configuration: &'a bazelrc::ConfigurationSnapshot,
+    catalog: Option<&'a bazelrc::FlagCatalog>,
+    root: Option<&'a Path>,
+    link_support: bool,
+}
+
 fn respond(
     request: &lsp_server::Request,
-    docs: &Documents,
-    index: &Index,
-    configuration: &bazelrc::ConfigurationSnapshot,
-    root: Option<&Path>,
-    link_support: bool,
+    context: &ResponseContext<'_>,
     cancellation: &worker::Cancellation,
 ) -> Result<Response> {
-    if let Some(response) = bazelrc::respond(request, docs, configuration) {
+    let docs = context.docs;
+    let index = context.index;
+    let root = context.root;
+    if let Some(response) = bazelrc::respond(request, docs, context.configuration, context.catalog)
+    {
         return Ok(response);
     }
     let id = request.id.clone();
@@ -629,7 +656,10 @@ fn respond(
     Ok(if method == DocumentSymbolRequest::METHOD {
         Response::new_ok(id, document_symbols(request, docs)?)
     } else if method == DefinitionRequest::METHOD {
-        Response::new_ok(id, definition(request, docs, index, root, link_support)?)
+        Response::new_ok(
+            id,
+            definition(request, docs, index, root, context.link_support)?,
+        )
     } else if method == ReferencesRequest::METHOD {
         Response::new_ok(id, references(request, docs, index, root)?)
     } else if method == DocumentHighlightRequest::METHOD {
