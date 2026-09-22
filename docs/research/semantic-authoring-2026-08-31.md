@@ -51,24 +51,24 @@ claim or rewrite damages trust or the workspace.
 
 ## Tracker topology
 
-The technical roadmap remains [#8](https://github.com/barrettruth/bazel-language-server/issues/8).
+The technical roadmap remains [#8](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/8).
 The semantic-authoring epic remains
-[#26](https://github.com/barrettruth/bazel-language-server/issues/26), narrowed
+[#25](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/25), narrowed
 to compose exact schemas and source symbols without merging their provenance.
 
 | Tracker action | Parent | Blocked by | Result |
 | --- | --- | --- | --- |
 | Add **Distinguish label candidates from semantic references** | #8 | Nothing | Context-bearing candidates; rename, references, and diagnostics consume only proven roles |
-| Narrow [#27](https://github.com/barrettruth/bazel-language-server/issues/27) to **Publish immutable rule schemas** | #26 | Nothing beyond the Bazel actor | Exact rule/attribute metadata only; no loaded symbols or inferred types |
-| Narrow [#4](https://github.com/barrettruth/bazel-language-server/issues/4) to **Complete explicit Bazel labels** | #26 | Candidate/context model | Prefix and package-aware labels from the existing index |
-| Add **Complete rule names and attributes from exact schemas** | #26 | #27 and source load bindings | Rule/attribute completion without bundled or inferred metadata |
-| Keep [#5](https://github.com/barrettruth/bazel-language-server/issues/5) | #26 | #27 for rules; exact source symbols for source callables | Provenance-preserving documentation hover |
-| Keep [#28](https://github.com/barrettruth/bazel-language-server/issues/28) | #26 | #27 for rules; exact source symbols for functions | Schema- and syntax-backed signature help |
-| Add **Publish exact Starlark source symbols** | #26 | Nothing | Declarations, scopes, parameters, and `load()` bindings; no expression types |
-| Add **Navigate and refactor loaded Starlark symbols** | #26 | Exact source symbols | Cross-file definition, references, and rename with snapshot-safe edits |
-| Extend [#29](https://github.com/barrettruth/bazel-language-server/issues/29) | #3 | Candidate/context model and graph-completeness evidence | Resolution states only after label-role proof |
-| Keep [#30](https://github.com/barrettruth/bazel-language-server/issues/30) | #3 | #29 and proven label roles | Diagnostics only for proven invalid labels |
-| Keep [#31](https://github.com/barrettruth/bazel-language-server/issues/31) and [#2](https://github.com/barrettruth/bazel-language-server/issues/2) | #3 | Proven diagnostics | Lazy, structured repair actions |
+| Narrow [#26](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/26) to **Publish immutable rule schemas** | #25 | Nothing beyond the Bazel actor | Exact rule/attribute metadata only; no loaded symbols or inferred types |
+| Narrow [#4](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/4) to **Complete explicit Bazel labels** | #25 | Candidate/context model | Prefix and package-aware labels from the existing index |
+| Add **Complete rule names and attributes from exact schemas** | #25 | #26 and source load bindings | Rule/attribute completion without bundled or inferred metadata |
+| Keep [#5](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/5) | #25 | #26 for rules; exact source symbols for source callables | Provenance-preserving documentation hover |
+| Keep [#27](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/27) | #25 | #26 for rules; exact source symbols for functions | Schema- and syntax-backed signature help |
+| Add **Publish exact Starlark source symbols** | #25 | Nothing | Declarations, scopes, parameters, and `load()` bindings; no expression types |
+| Add **Navigate and refactor loaded Starlark symbols** | #25 | Exact source symbols | Cross-file definition, references, and rename with snapshot-safe edits |
+| Extend [#28](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/28) | #3 | Candidate/context model and graph-completeness evidence | Resolution states only after label-role proof |
+| Keep [#29](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/29) | #3 | #28 and proven label roles | Diagnostics only for proven invalid labels |
+| Keep [#30](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/30) and [#2](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/2) | #3 | Proven diagnostics | Lazy, structured repair actions |
 
 No type-inference tracker is created. A later issue must name a concrete user
 outcome that exact schemas and symbols cannot provide, define the smallest
@@ -77,21 +77,21 @@ confidence score or emitting speculative diagnostics.
 
 Tracker housekeeping follows the same boundary:
 
-- [#8](https://github.com/barrettruth/bazel-language-server/issues/8) is the
+- [#8](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/8) is the
   sole technical umbrella and should use the dependency order in `ROADMAP.md`.
-- [#10](https://github.com/barrettruth/bazel-language-server/issues/10) should
+- [#10](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/10) should
   describe IMC rollout and feedback only; its v0.1 and feature-parity steps no
   longer describe technical work.
-- [#9](https://github.com/barrettruth/bazel-language-server/issues/9) and
-  [#15](https://github.com/barrettruth/bazel-language-server/issues/15) remain
+- [#9](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/9) and
+  [#14](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/14) remain
   distribution work after the semantic surface stabilises.
-- [#14](https://github.com/barrettruth/bazel-language-server/issues/14),
-  [#32](https://github.com/barrettruth/bazel-language-server/issues/32), and
-  [#33](https://github.com/barrettruth/bazel-language-server/issues/33) remain
+- [#13](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/13),
+  [#31](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/31), and
+  [#32](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/32) remain
   deferred; none blocks semantic authoring.
 - Bazelrc formatting stays the intentional non-feature concluded by
-  [#24](https://github.com/barrettruth/bazel-language-server/issues/24) and
-  [#25](https://github.com/barrettruth/bazel-language-server/issues/25).
+  [#23](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/23) and
+  [#24](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues/24).
 
 ## Draft issue bodies
 
@@ -116,7 +116,7 @@ schema already captured by the request.
 
 ### Publish exact Starlark source symbols
 
-Parent: #26
+Parent: #25
 
 Publish immutable source-backed declarations, lexical scopes, function
 parameters, and `load()` bindings for BUILD and `.bzl` files. Open buffers
@@ -129,9 +129,9 @@ exports, and unsupported constructs remain unknown.
 
 ### Complete rule names and attributes from exact schemas
 
-Parent: #26
+Parent: #25
 
-Blocked by #27 and exact source load bindings.
+Blocked by #26 and exact source load bindings.
 
 Complete callable rule names visible in the current source context and the
 attributes reported for the active rule class. Include requiredness, types,
@@ -144,7 +144,7 @@ attribute values that Bazel did not report.
 
 ### Navigate and refactor loaded Starlark symbols
 
-Parent: #26
+Parent: #25
 
 Blocked by exact Starlark source symbols.
 

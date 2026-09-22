@@ -23,19 +23,19 @@ cargo install bazel-language-server
 Run directly:
 
 ```sh
-nix run github:barrettruth/bazel-language-server
+nix run git+https://forge.barrettruth.com/barrettruth/bazel-language-server.git
 ```
 
 Or add the package to a flake:
 
 ```nix
-inputs.bazel-language-server.url = "github:barrettruth/bazel-language-server";
+inputs.bazel-language-server.url = "git+https://forge.barrettruth.com/barrettruth/bazel-language-server.git";
 ```
 
 ## From source
 
 ```sh
-git clone https://github.com/barrettruth/bazel-language-server.git
+git clone https://forge.barrettruth.com/barrettruth/bazel-language-server.git
 cd bazel-language-server
 cargo install --path . --locked
 ```

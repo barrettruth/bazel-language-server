@@ -6,7 +6,7 @@ bazel-language-server is a language server for Bazel build files. It is not a
 Starlark interpreter, a build tool, or a way to make other languages' language
 servers work inside a Bazel repository.
 
-Syntax belongs in [`starlark-cst`](https://github.com/barrettruth/starlark-cst),
+Syntax belongs in [`starlark-cst`](https://forge.barrettruth.com/barrettruth/starlark-cst),
 which is a parser and nothing else. A change that needs to know what a string
 refers to belongs here; a change to how a string is tokenised belongs there.
 

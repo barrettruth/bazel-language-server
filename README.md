@@ -13,13 +13,13 @@ cargo install bazel-language-server
 ### Nix
 
 ```sh
-nix run github:barrettruth/bazel-language-server
+nix run git+https://forge.barrettruth.com/barrettruth/bazel-language-server.git
 ```
 
 ### From source
 
 ```sh
-git clone https://github.com/barrettruth/bazel-language-server.git
+git clone https://forge.barrettruth.com/barrettruth/bazel-language-server.git
 cd bazel-language-server
 cargo install --path .
 ```
