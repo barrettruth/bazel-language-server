@@ -1,19 +1,22 @@
 name: deploy
 
 on:
-  workflow_call:
+  push:
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: production
+  cancel-in-progress: true
 
 jobs:
   deploy:
     name: Deploy
-    runs-on: ubuntu-latest
-    concurrency:
-      group: production
-      cancel-in-progress: true
+    runs-on: desktop
     steps:
-      - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: actions/checkout@v4
+      - name: Wait for quality
+        run: nix shell nixpkgs#curl nixpkgs#jq -c bash .forgejo/scripts/wait-for-quality.sh
       - name: Build site
         run: nix develop .#ci --command bash -c 'cd site && pnpm install --frozen-lockfile && pnpm build'
       - name: Deploy
@@ -36,7 +39,7 @@ jobs:
             set -eu
             ssh-keyscan -H "$DEPLOY_HOST" >> "$HOME/.ssh/known_hosts"
             ssh() { command ssh -i "$HOME/.ssh/vps_web_deploy" "$DEPLOY_USER@$DEPLOY_HOST" "$@"; }
-            release="$DEPLOY_ROOT/releases/$GITHUB_SHA"
+            release="$DEPLOY_ROOT/releases/$FORGEJO_SHA"
             ssh "rm -rf \"$release\" && mkdir -p \"$release\""
             tar -C "$BUILD_DIR" -czf - . | ssh "tar -C \"$release\" -xzf -"
             ssh "ln -sfn \"$release\" \"$DEPLOY_ROOT/current.next\" && mv -Tf \"$DEPLOY_ROOT/current.next\" \"$DEPLOY_ROOT/current\""

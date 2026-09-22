@@ -9,7 +9,7 @@ body:
       options:
         - label:
             I have searched [existing
-            issues](https://github.com/barrettruth/bazel-language-server/issues)
+            issues](https://forge.barrettruth.com/barrettruth/bazel-language-server/issues)
           required: true
 
   - type: textarea
